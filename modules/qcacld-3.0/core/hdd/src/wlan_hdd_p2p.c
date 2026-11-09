@@ -1295,6 +1295,7 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	struct net_device *dev = wdev->netdev;
 	struct hdd_context *hdd_ctx = (struct hdd_context *) wiphy_priv(wiphy);
 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
+	bool is_monitor = wlan_hdd_is_session_type_monitor(adapter->device_mode);
 	int errno;
 
 	hdd_enter();
@@ -1326,9 +1327,6 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	if (errno)
 		return errno;
 
-	if (wlan_hdd_is_session_type_monitor(adapter->device_mode))
-		ucfg_dp_set_mon_conf_flags(hdd_ctx->psoc, 0);
-
 	if (adapter->device_mode == QDF_SAP_MODE &&
 	    ucfg_pre_cac_is_active(hdd_ctx->psoc)) {
 		ucfg_pre_cac_clean_up(hdd_ctx->psoc);
@@ -1341,6 +1339,10 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	} else {
 		hdd_clean_up_interface(hdd_ctx, adapter);
 	}
+
+	/* Filter reset during cleanup still needs the monitor configuration. */
+	if (is_monitor)
+		ucfg_dp_set_mon_conf_flags(hdd_ctx->psoc, 0);
 
 	if (!hdd_is_any_interface_open(hdd_ctx))
 		hdd_psoc_idle_timer_start(hdd_ctx);

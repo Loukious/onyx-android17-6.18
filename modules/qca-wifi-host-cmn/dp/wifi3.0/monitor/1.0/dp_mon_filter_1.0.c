@@ -912,7 +912,7 @@ void dp_mon_filter_reset_rx_pktlog_cbf_1_0(struct dp_pdev *pdev)
  * This function is used as WAR till WIN cleans up the monitor mode
  * function for targets where monitor mode is not enabled.
  *
- * Return: true
+ * Return: true if a monitor vdev or its configured filters remain
  */
 static inline bool dp_mon_should_reset_buf_ring_filter(struct dp_pdev *pdev)
 {
@@ -923,7 +923,8 @@ static inline bool dp_mon_should_reset_buf_ring_filter(struct dp_pdev *pdev)
 	uint8_t mac_id = 0;
 	struct dp_mon_mac *mon_mac = dp_get_mon_mac(pdev, mac_id);
 
-	return (mon_mac->mvdev) ? true : false;
+	/* Vdev detach can precede filter reset during monitor teardown. */
+	return mon_mac->mvdev || pdev->monitor_pdev->monitor_configured;
 }
 #else
 static inline bool dp_mon_should_reset_buf_ring_filter(struct dp_pdev *pdev)
@@ -945,9 +946,15 @@ static inline bool dp_mon_should_reset_buf_ring_filter(struct dp_pdev *pdev)
 static inline
 bool dp_mon_filter_dest_for_mm_rx_mon(struct dp_soc *soc)
 {
+	/*
+	 * Without a dedicated monitor buffer ring, monitor mode overwrites the
+	 * regular RXDMA filter. Restore it even if the monitor interface flags
+	 * have already been cleared by interface deletion.
+	 */
 	if (soc->cdp_soc.ol_ops->get_con_mode &&
 	    soc->cdp_soc.ol_ops->get_con_mode() == QDF_GLOBAL_MISSION_MODE &&
-	    QDF_MONITOR_FLAG_OTHER_BSS & soc->mon_flags)
+	    (!soc->wlan_cfg_ctx->rxdma1_enable ||
+	     (QDF_MONITOR_FLAG_OTHER_BSS & soc->mon_flags)))
 		return true;
 
 	return false;

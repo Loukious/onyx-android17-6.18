@@ -10545,6 +10545,9 @@ static int hdd_stop_mon_adapter(struct hdd_adapter *adapter)
 	struct wlan_hdd_link_info *link_info;
 	int status;
 
+	/* Drain the injection helper before its parent monitor vdev is stopped. */
+	wma_injection_pre_stop_cleanup();
+
 	hdd_adapter_for_each_active_link_info(adapter, link_info) {
 		status = wlan_hdd_delete_mon_link(adapter, link_info);
 		if (status)

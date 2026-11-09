@@ -27,7 +27,6 @@
 #include "wlan_hdd_rx_monitor.h"
 #include "ol_txrx.h"
 #include "cdp_txrx_mon.h"
-#include "wma_api.h"
 
 int hdd_enable_monitor_mode(struct net_device *dev)
 {
@@ -47,6 +46,5 @@ int hdd_disable_monitor_mode(void)
 {
 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
 
-	wma_injection_pre_stop_cleanup();
 	return cdp_reset_monitor_mode(soc, OL_TXRX_PDEV_ID, false);
 }
