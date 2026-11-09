@@ -45,10 +45,19 @@ wrappers have concurrent add/remove-versus-unload host tests in
 
 The HVC extension uses `0002-required-common-fixes-with-hvc.patch`. The original required patch and pre-HVC manifest are preserved; `hvc-core.patch` is the independently reviewed second component. Its public certificate and trusted-key config preserve signed accepted GKI compatibility without disabling module protection. New-file before hashes are null and those files are removed on context exit.
 
-The current aggregate is `0004-required-common-fixes-with-timerfd.patch`.
-It retains the NetHunter/CAN additions in `0003` and adds
+The `0004-required-common-fixes-with-timerfd.patch` aggregate
+retains the NetHunter/CAN additions in `0003` and adds
 `timerfd-resume-freezer.patch`. The latter queues timerfd's resume notification
 on `system_freezable_wq`, so an intermediate s2idle CPU exit cannot notify an
 `EPOLLWAKEUP` waiter before the system has actually resumed. Timer expiry and
 explicit clock-change notification paths retain their existing behavior.
 See [the diagnosis and validation](../timerfd-s2idle.md).
+
+The current aggregate is `0005-required-common-fixes-with-blk-plug-ordering.patch`.
+It adds `blk-plug-timestamp-ordering.patch`: a compiler barrier between plug
+timestamp flag clearing and plug detachment, with AutoFDO left enabled.
+The manifest opts this file into the CI updater's reviewed ordering check.
+An upstream barrier in either the teardown or the flush helper retires the
+local addition; unfamiliar control flow stops the update for review. The
+original replay patch is retained so an upstream revert reactivates it.
+See [the ordering fix and detection limits](../blk-plug-ordering.md).

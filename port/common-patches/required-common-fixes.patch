@@ -1192,3 +1192,20 @@ index 79122fb46..d28b408e5 100644
  }
  
  static void __timerfd_remove_cancel(struct timerfd_ctx *ctx)
+diff --git a/block/blk-core.c b/block/blk-core.c
+index c7f36c048..e64f5dbac 100644
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@ -1295,6 +1295,12 @@ void blk_finish_plug(struct blk_plug *plug)
+ {
+ 	if (plug == current->plug) {
+ 		__blk_flush_plug(plug, false);
++		/*
++		 * A preempted task invalidates its cached timestamp when it is
++		 * scheduled back in. Keep the PF_BLOCK_TS clear above ordered
++		 * before detaching the plug, including when the flush is inlined.
++		 */
++		barrier();
+ 		current->plug = NULL;
+ 	}
+ }

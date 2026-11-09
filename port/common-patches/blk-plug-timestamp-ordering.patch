@@ -1,0 +1,34 @@
+From: Wael Hasnaoui <24696530+Loukious@users.noreply.github.com>
+Subject: [PATCH] block: order timestamp flag clearing before plug detachment
+
+blk_plug_invalidate_ts() assumes that PF_BLOCK_TS implies a non-NULL plug.
+An arm64 AutoFDO build can inline __blk_flush_plug() and detach the plug
+before clearing the flag. A preemption in that window makes the scheduler
+write through a NULL pointer when the task resumes.
+
+Keep the flag clear ordered before plug detachment with a compiler barrier.
+This retains AutoFDO and requires no hardware memory fence.
+
+The diagnosis, compiler experiments, patch, and changelog were prepared
+with OpenAI Codex assistance.
+
+Fixes: fad156c2af22 ("block: invalidate cached plug timestamp after task switch")
+Cc: stable@vger.kernel.org
+---
+diff --git a/block/blk-core.c b/block/blk-core.c
+index c7f36c048..e64f5dbac 100644
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@ -1295,6 +1295,12 @@ void blk_finish_plug(struct blk_plug *plug)
+ {
+ 	if (plug == current->plug) {
+ 		__blk_flush_plug(plug, false);
++		/*
++		 * A preempted task invalidates its cached timestamp when it is
++		 * scheduled back in. Keep the PF_BLOCK_TS clear above ordered
++		 * before detaching the plug, including when the flush is inlined.
++		 */
++		barrier();
+ 		current->plug = NULL;
+ 	}
+ }

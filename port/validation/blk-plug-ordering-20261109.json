@@ -1,0 +1,134 @@
+{
+  "status": "PASS",
+  "validated_at_utc": "2026-11-09T15:40:19.179030+00:00",
+  "common_revision": "ed4489e76f6fafbe67b99e8a9419215313df189e",
+  "compiler": {
+    "scope": "Focused Android arm64 translation-unit compilation with the existing local header configuration; not a full GKI build.",
+    "checks": [
+      {
+        "variant": "original",
+        "source_sha256": "35030b4d3813dd6a2ddeb849c9de4fdbfcb79f27cde0b54bcd4d91e459782ec0",
+        "profile_sha256": "d9971e756d3505839d3afb4fc3bda7254a12acfef06c0841fe2914e68f113ec3",
+        "returncode": 0,
+        "warnings": false,
+        "autofdo_enabled": true,
+        "flush_inlined": true,
+        "teardown_instructions": [
+          "str xzr, [x19, #32]",
+          "ldr w8, [x20, #68]",
+          "str xzr, [x20, #2728]",
+          "and w8, w8, #0xdfffffff",
+          "str w8, [x20, #68]"
+        ],
+        "assembly_sha256": "2c212bacdf59251aa78f85b6c676289ac9c668186ed68107bf87b7685d673eb1"
+      },
+      {
+        "variant": "fixed",
+        "source_sha256": "384d87b40a5c88eebd96eacd64f8c7bf7511dd0495f7650c742e2865f407bca6",
+        "profile_sha256": "d9971e756d3505839d3afb4fc3bda7254a12acfef06c0841fe2914e68f113ec3",
+        "returncode": 0,
+        "warnings": false,
+        "autofdo_enabled": true,
+        "flush_inlined": true,
+        "teardown_instructions": [
+          "str xzr, [x19, #32]",
+          "ldr w8, [x20, #68]",
+          "and w8, w8, #0xdfffffff",
+          "str w8, [x20, #68]",
+          "str xzr, [x20, #2728]"
+        ],
+        "assembly_sha256": "ab737d1128a0fea2ca53e7f2b16e695f56362b785e917d588faa8a1d852918cf"
+      }
+    ],
+    "compiler": "Android (15071444, +pgo, +bolt, +lto, +mlgo, based on r596125) clang version 22.0.2 (https://android.googlesource.com/toolchain/llvm-project de03d430485c884861198b25459851f429cbdbad)",
+    "status": "PASS"
+  },
+  "recipe": {
+    "source_snapshot_changed_files": [
+      "block/blk-core.c"
+    ],
+    "scenarios": [
+      {
+        "name": "unfixed_upstream",
+        "result": {
+          "active_common_patches": 22,
+          "already_integrated_upstream": [],
+          "upstream_checks": {
+            "block/blk-core.c": {
+              "status": "applied_locally",
+              "evidence": "barrier_in_finish"
+            }
+          }
+        },
+        "recipe_files_checked": 22,
+        "source_restored": true,
+        "patched_source_archived": true
+      },
+      {
+        "name": "upstream_finish_barrier",
+        "result": {
+          "active_common_patches": 21,
+          "already_integrated_upstream": [
+            "block/blk-core.c"
+          ],
+          "upstream_checks": {
+            "block/blk-core.c": {
+              "status": "integrated_upstream",
+              "evidence": "barrier_in_finish"
+            }
+          }
+        },
+        "recipe_files_checked": 22,
+        "source_restored": true,
+        "patched_source_archived": true
+      },
+      {
+        "name": "upstream_helper_barrier",
+        "result": {
+          "active_common_patches": 21,
+          "already_integrated_upstream": [
+            "block/blk-core.c"
+          ],
+          "upstream_checks": {
+            "block/blk-core.c": {
+              "status": "integrated_upstream",
+              "evidence": "barrier_in_flush"
+            }
+          }
+        },
+        "recipe_files_checked": 22,
+        "source_restored": true,
+        "patched_source_archived": true
+      }
+    ],
+    "upstream_revert_reactivated": true,
+    "unknown_source_rejected": "Plug teardown changed; manual review required",
+    "unknown_source_preserved_inputs": true,
+    "status": "PASS",
+    "scope": "Source replay and application/restoration context; no full kernel compilation inside this context."
+  },
+  "ci_tests": {
+    "command": "python3 -m unittest discover -s ci/tests -v",
+    "passed": 151,
+    "failed": 0,
+    "new_ordering_tests": 16
+  },
+  "checkpatch": {
+    "errors": 0,
+    "warnings": 0,
+    "checks": 0,
+    "options": [
+      "--no-tree",
+      "--no-signoff",
+      "--strict",
+      "--ignore UNKNOWN_COMMIT_ID"
+    ],
+    "note": "Unsigned downstream draft. The Fixes commit was independently verified publicly during the diagnosis; it is absent from the local minimal history."
+  },
+  "limits": [
+    "Focused compilation uses the saved local Android header configuration; this is not a full GKI or mainline build.",
+    "The instruction offsets reflect that header configuration, not a claim of whole-image identity with the phone.",
+    "Upstream source recognition covers the two documented barrier placements. Other source changes stop for review.",
+    "No device was flashed or runtime/performance testing performed for this change."
+  ]
+}
