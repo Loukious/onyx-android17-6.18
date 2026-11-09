@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebase common fixes and diagnostics by exact patch replay; reject conflicts."""
+"""Replay common fixes, recognizing reviewed upstream equivalents; reject conflicts."""
 import argparse
 import hashlib
 import json
@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tempfile
+
+import blk_plug_ordering
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT = Path(os.environ.get('KONOHA_SOURCE_ROOT', ROOT)) / 'port'
@@ -120,7 +122,14 @@ def refresh(common):
             safe_path(common, name)
         if set(names) != set(manifest['files']):
             raise ValueError('Common patch and file inventory differ')
-    active, integrated, files = [], [], {}
+    checks = manifest.get('upstream_checks', {})
+    if not isinstance(checks, dict) or set(checks) - set(names):
+        raise ValueError('Upstream checks must select files in the replay patch')
+    for name, check in checks.items():
+        if name != blk_plug_ordering.SOURCE or check != blk_plug_ordering.CHECK:
+            raise ValueError('Unknown common patch upstream check: ' + name)
+        blk_plug_ordering.validate_patch(diffs[names.index(name)])
+    active, integrated, files, check_results = [], [], {}, {}
     with tempfile.TemporaryDirectory(prefix='onyx-patch-rebase-') as temporary:
         root = Path(temporary)
         for name, diff in zip(names, diffs):
@@ -133,16 +142,27 @@ def refresh(common):
             if data is not None:
                 target.write_bytes(data)
                 target.chmod(source.stat().st_mode & 0o777)
-            if replay(root, diff):
+            ordering = blk_plug_ordering.classify(data) if name in checks else None
+            if ordering is not None and ordering != blk_plug_ordering.NEEDS_BARRIER:
+                integrated.append(name)
+                check_results[name] = {'status': 'integrated_upstream', 'evidence': ordering}
+            elif replay(root, diff):
                 subprocess.run(['git', '-C', str(root), 'apply', '-'], input=diff, check=True)
                 active.append(diff)
-            elif replay(root, diff, reverse=True):
+                if ordering is not None:
+                    result = blk_plug_ordering.classify(contents(root, name))
+                    if result != 'barrier_in_finish':
+                        raise ValueError('Plug ordering patch did not establish the reviewed barrier')
+                    check_results[name] = {'status': 'applied_locally', 'evidence': result}
+            elif ordering is None and replay(root, diff, reverse=True):
                 integrated.append(name)
             else:
                 raise ValueError(f'Common patch conflicts with upstream: {name}')
             files[name] = {'before_sha256': sha(data), 'candidate_sha256': sha(contents(root, name))}
         patch = header + b''.join(active) if active else b''
         manifest.update(files=files, patch_sha256=sha(patch), integrated_upstream=integrated)
+        if checks:
+            manifest['upstream_check_results'] = check_results
         # Refresh opt-in diagnostic sources, also requiring exact application.
         evidence = PORT / 'validation/clock_suspend_resume'
         diagnostic = contents(evidence, 'common-qdss-diagnostic.patch')
@@ -182,7 +202,10 @@ def refresh(common):
         for target, data in outputs:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-    return {'active_common_patches': len(active), 'already_integrated_upstream': integrated}
+    result = {'active_common_patches': len(active), 'already_integrated_upstream': integrated}
+    if checks:
+        result['upstream_checks'] = check_results
+    return result
 
 
 if __name__ == '__main__':

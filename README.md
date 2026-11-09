@@ -73,6 +73,11 @@ Google's LTS branch and KernelSU Next dev. A new kernel revision produces an
 patch hashes and the complete module snapshot. Exact patch replay is required;
 an upstream conflict fails the update without changing the accepted source branch.
 Already integrated CoreSight fixes are excluded from the effective patch.
+The plug timestamp ordering fix has an explicit source check: an unconditional
+barrier after flag clearing, either in the flush helper or before plug detachment,
+retires the local addition even when upstream uses a different comment. Other
+rewrites stop the update for review. The replay input is retained so a later
+upstream revert reactivates the fix, and the manifest records each decision.
 
 The tracker opens a pull request and explicitly dispatches its complete build
 (GitHub's default token does not trigger a workflow from its own push).
