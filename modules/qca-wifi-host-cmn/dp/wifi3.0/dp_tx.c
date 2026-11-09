@@ -27,6 +27,7 @@
 #include "hal_tx.h"
 #include "qdf_mem.h"
 #include "qdf_nbuf.h"
+#include "cdp_txrx_injection.h"
 #include "qdf_net_types.h"
 #include "qdf_module.h"
 #include <wlan_cfg.h>
@@ -58,14 +59,6 @@
 #endif
 
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
-#define DP_TX_INJECTION_DESC_PREFIX 0xf000
-
-static inline bool dp_tx_is_injection_nbuf(qdf_nbuf_t nbuf)
-{
-	return (QDF_NBUF_CB_MGMT_TXRX_DESC_ID(nbuf) &
-		DP_TX_INJECTION_DESC_PREFIX) == DP_TX_INJECTION_DESC_PREFIX;
-}
-
 extern bool wma_injection_dp_complete(void *wma_context, qdf_nbuf_t nbuf,
 				      int32_t status);
 #endif
@@ -998,7 +991,7 @@ static void dp_tx_trace_pkt(struct dp_soc *soc,
 			    qdf_nbuf_t skb, uint16_t msdu_id,
 			    uint8_t vdev_id, enum QDF_OPMODE op_mode)
 {
-	if (dp_is_tput_high(soc))
+	if (cdp_nbuf_is_injection(skb) || dp_is_tput_high(soc))
 		return;
 
 	QDF_NBUF_CB_TX_PACKET_TRACK(skb) = QDF_NBUF_TX_PKT_DATA_TRACK;
@@ -1920,6 +1913,10 @@ static void dp_tx_get_tid(struct dp_vdev *vdev, qdf_nbuf_t nbuf,
 	uint16_t   ether_type;
 	qdf_llc_t *llcHdr;
 	struct dp_pdev *pdev = (struct dp_pdev *)vdev->pdev;
+
+	/* HDD already parsed the variable raw header, including short controls. */
+	if (cdp_nbuf_is_injection(nbuf))
+		return;
 
 	DP_TX_TID_OVERRIDE(msdu_info, nbuf);
 	if (qdf_likely(vdev->tx_encap_type != htt_cmn_pkt_type_raw)) {
@@ -3277,7 +3274,8 @@ dp_tx_send_msdu_single(struct dp_vdev *vdev, qdf_nbuf_t nbuf,
 	dp_tx_desc_update_fast_comp_flag(soc, tx_desc,
 					 !pdev->enhanced_stats_en);
 
-	dp_tx_desc_update_bcast_flag(soc, tx_desc, nbuf);
+	if (!cdp_nbuf_is_injection(nbuf))
+		dp_tx_desc_update_bcast_flag(soc, tx_desc, nbuf);
 
 	dp_tx_update_mesh_flags(soc, vdev, tx_desc);
 
@@ -3371,8 +3369,8 @@ qdf_nbuf_t dp_tx_comp_free_buf(struct dp_soc *soc, struct dp_tx_desc_s *desc,
 		return NULL;
 
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
-	if (dp_tx_is_injection_nbuf(nbuf))
-		wma_injection_dp_complete(NULL, nbuf, 0);
+	if (cdp_nbuf_is_injection(nbuf))
+		wma_injection_dp_complete(NULL, nbuf, -ENODATA);
 #endif
 
 	/* 0 : MSDU buffer, 1 : MLE */
@@ -3833,6 +3831,61 @@ void dp_tx_add_tx_sniffer_meta_data(struct dp_vdev *vdev,
 	msdu_info->is_tx_sniffer = 1;
 }
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+static bool
+dp_tx_add_injection_metadata(qdf_nbuf_t nbuf,
+			     struct dp_tx_msdu_info_s *msdu_info)
+{
+	struct cdp_tx_injection_params params;
+	struct htt_tx_msdu_desc_ext2_t *meta =
+		(struct htt_tx_msdu_desc_ext2_t *)msdu_info->meta_data;
+
+	if (!wma_injection_get_tx_params(nbuf, &params))
+		return false;
+
+	/* Standalone raw data uses the firmware host-data exception pool. */
+	meta->host_tx_desc_pool = params.is_data;
+	meta->valid_encrypt_type = 1;
+	meta->encrypt_type = 0;
+	meta->valid_chanfreq = 1;
+	meta->chanfreq = params.chanfreq;
+	if (params.rate_valid) {
+		meta->valid_mcs_mask = 1;
+		meta->valid_nss_mask = 1;
+		meta->valid_preamble_type = 1;
+		meta->mcs_mask = params.mcs_mask;
+		meta->nss_mask = params.nss_mask;
+		switch (params.preamble) {
+		case CDP_INJECTION_CCK:
+			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_CCK;
+			break;
+		case CDP_INJECTION_HT:
+			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_HT;
+			break;
+		default:
+			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_OFDM;
+			break;
+		}
+	}
+	if (params.bandwidth_valid) {
+		meta->valid_bw_info = 1;
+		meta->dyn_bw = 0;
+		meta->bw_mask = params.bw_mask;
+	}
+	if (params.gi_valid) {
+		meta->valid_guard_interval = 1;
+		meta->guard_interval = params.guard_interval;
+	}
+	if (params.retries_valid) {
+		meta->valid_retries = 1;
+		meta->retry_limit = params.retries;
+	}
+	/* Per-packet requests must not change the helper peer's rate cache. */
+	meta->update_peer_cache = 0;
+	return true;
+}
+#endif
+
 #ifdef MESH_MODE_SUPPORT
 
 /**
@@ -4224,8 +4277,10 @@ dp_tx_send_exception(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 
 	dp_tx_override_flow_pool_id(soc, vdev, &msdu_info);
 
-	dp_tx_update_proto_stats(vdev, nbuf, msdu_info.tx_queue.desc_pool_id,
-				 TX_EXCEPTION);
+	if (!cdp_nbuf_is_injection(nbuf))
+		dp_tx_update_proto_stats(vdev, nbuf,
+					 msdu_info.tx_queue.desc_pool_id,
+					 TX_EXCEPTION);
 
 	if (qdf_unlikely(!dp_check_exc_metadata(tx_exc_metadata))) {
 		dp_tx_err("Invalid parameters in exception path");
@@ -4301,6 +4356,11 @@ dp_tx_send_exception(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 
 		dp_tx_add_tx_sniffer_meta_data(vdev, &msdu_info,
 					       tx_exc_metadata->ppdu_cookie);
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+		if (cdp_nbuf_is_injection(nbuf) &&
+		    !dp_tx_add_injection_metadata(nbuf, &msdu_info))
+			goto fail;
+#endif
 	}
 
 
@@ -6573,8 +6633,11 @@ void dp_tx_comp_process_tx_status(struct dp_soc *soc,
 	}
 
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
-	if (dp_tx_is_injection_nbuf(nbuf))
+	if (cdp_nbuf_is_injection(nbuf)) {
 		wma_injection_dp_complete(NULL, nbuf, ts->status);
+		/* These are raw 802.11 frames, not Ethernet protocol statistics. */
+		goto out;
+	}
 #endif
 
 	length = dp_tx_get_pkt_len(tx_desc);

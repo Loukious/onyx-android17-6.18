@@ -206,6 +206,10 @@ archive. A ROM already shipping that driver does not need a second copy.
 Installer checks and automated build verification do not establish that a new
 kernel release has passed device testing.
 
+See [WCN7750 monitor injection testing](port/wlan-test/README.md) for supported
+data/control frames, radiotap options, firmware limits and temporary module
+replacement with an original-driver restore path.
+
 ### Migrate from 6.6 or a different KMI generation
 
 An AnyKernel kernel update cannot perform this migration. It needs a complete

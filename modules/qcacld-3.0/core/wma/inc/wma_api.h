@@ -41,8 +41,11 @@ typedef void *WMA_HANDLE;
 
 #define WMA_MGMT_TX_INJECTION_DESC_ID 0xffff
 
+struct cdp_tx_injection_params;
+
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
-QDF_STATUS wma_injection_tx(qdf_nbuf_t nbuf, uint8_t monitor_vdev_id);
+QDF_STATUS wma_injection_tx(qdf_nbuf_t nbuf, uint8_t monitor_vdev_id,
+			    const struct cdp_tx_injection_params *params);
 QDF_STATUS
 wma_injection_channel_change_begin(uint8_t monitor_vdev_id,
 				   uint32_t chanfreq);
@@ -54,7 +57,8 @@ bool wma_injection_dp_complete(void *wma_handle, qdf_nbuf_t nbuf,
 void wma_injection_pre_stop_cleanup(void);
 #else
 static inline QDF_STATUS
-wma_injection_tx(qdf_nbuf_t nbuf, uint8_t monitor_vdev_id)
+wma_injection_tx(qdf_nbuf_t nbuf, uint8_t monitor_vdev_id,
+		 const struct cdp_tx_injection_params *params)
 {
 	return QDF_STATUS_E_NOSUPPORT;
 }

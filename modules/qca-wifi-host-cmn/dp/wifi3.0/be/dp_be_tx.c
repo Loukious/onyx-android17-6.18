@@ -1737,13 +1737,15 @@ dp_tx_hw_enqueue_be(struct dp_soc *soc, struct dp_vdev *vdev,
 	}
 
 	tx_desc->flags |= DP_TX_DESC_FLAG_QUEUED_TX;
-	dp_vdev_peer_stats_update_protocol_cnt_tx(vdev, tx_desc->nbuf);
+	if (tx_desc->tx_encap_type != htt_cmn_pkt_type_raw)
+		dp_vdev_peer_stats_update_protocol_cnt_tx(vdev, tx_desc->nbuf);
 
 	/* Sync cached descriptor with HW */
 	hal_tx_desc_sync(hal_tx_desc_cached, hal_tx_desc, num_desc_bytes);
 
-	dp_tx_update_proto_stats(vdev, tx_desc->nbuf, ring_id,
-				 TX_ENQUEUE_HW);
+	if (tx_desc->tx_encap_type != htt_cmn_pkt_type_raw)
+		dp_tx_update_proto_stats(vdev, tx_desc->nbuf, ring_id,
+					 TX_ENQUEUE_HW);
 
 	coalesce = dp_tx_attempt_coalescing(soc, vdev, tx_desc, tid,
 					    msdu_info, ring_id);

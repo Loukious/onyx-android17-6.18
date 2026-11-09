@@ -115,6 +115,7 @@ def main():
         "coresight_sources": "verify_coresight_sources",
         "glink_pkt": "verify_glink_pkt",
         "wlan_wiphy_lock": "verify_wlan_wiphy_lock",
+        "wlan_injection": "verify_wlan_injection",
         "cpuss_v4": "verify_cpuss_v4",
         "cpuss_native": "verify_cpuss_native",
     }
