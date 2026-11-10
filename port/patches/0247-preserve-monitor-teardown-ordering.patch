@@ -1,0 +1,106 @@
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_mon_filter_1.0.c b/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_mon_filter_1.0.c
+index c78b19891..7cbb24342 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_mon_filter_1.0.c
++++ b/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_mon_filter_1.0.c
+@@ -912,7 +912,7 @@ void dp_mon_filter_reset_rx_pktlog_cbf_1_0(struct dp_pdev *pdev)
+  * This function is used as WAR till WIN cleans up the monitor mode
+  * function for targets where monitor mode is not enabled.
+  *
+- * Return: true
++ * Return: true if a monitor vdev or its configured filters remain
+  */
+ static inline bool dp_mon_should_reset_buf_ring_filter(struct dp_pdev *pdev)
+ {
+@@ -923,7 +923,8 @@ static inline bool dp_mon_should_reset_buf_ring_filter(struct dp_pdev *pdev)
+ 	uint8_t mac_id = 0;
+ 	struct dp_mon_mac *mon_mac = dp_get_mon_mac(pdev, mac_id);
+ 
+-	return (mon_mac->mvdev) ? true : false;
++	/* Vdev detach can precede filter reset during monitor teardown. */
++	return mon_mac->mvdev || pdev->monitor_pdev->monitor_configured;
+ }
+ #else
+ static inline bool dp_mon_should_reset_buf_ring_filter(struct dp_pdev *pdev)
+@@ -945,9 +946,15 @@ static inline bool dp_mon_should_reset_buf_ring_filter(struct dp_pdev *pdev)
+ static inline
+ bool dp_mon_filter_dest_for_mm_rx_mon(struct dp_soc *soc)
+ {
++	/*
++	 * Without a dedicated monitor buffer ring, monitor mode overwrites the
++	 * regular RXDMA filter. Restore it even if the monitor interface flags
++	 * have already been cleared by interface deletion.
++	 */
+ 	if (soc->cdp_soc.ol_ops->get_con_mode &&
+ 	    soc->cdp_soc.ol_ops->get_con_mode() == QDF_GLOBAL_MISSION_MODE &&
+-	    QDF_MONITOR_FLAG_OTHER_BSS & soc->mon_flags)
++	    (!soc->wlan_cfg_ctx->rxdma1_enable ||
++	     (QDF_MONITOR_FLAG_OTHER_BSS & soc->mon_flags)))
+ 		return true;
+ 
+ 	return false;
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index bd8fad893..02540998d 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -10545,6 +10545,9 @@ static int hdd_stop_mon_adapter(struct hdd_adapter *adapter)
+ 	struct wlan_hdd_link_info *link_info;
+ 	int status;
+ 
++	/* Drain the injection helper before its parent monitor vdev is stopped. */
++	wma_injection_pre_stop_cleanup();
++
+ 	hdd_adapter_for_each_active_link_info(adapter, link_info) {
+ 		status = wlan_hdd_delete_mon_link(adapter, link_info);
+ 		if (status)
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_p2p.c b/qcacld-3.0/core/hdd/src/wlan_hdd_p2p.c
+index 43bc27486..1c715fa29 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_p2p.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_p2p.c
+@@ -1295,6 +1295,7 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
+ 	struct net_device *dev = wdev->netdev;
+ 	struct hdd_context *hdd_ctx = (struct hdd_context *) wiphy_priv(wiphy);
+ 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
++	bool is_monitor = wlan_hdd_is_session_type_monitor(adapter->device_mode);
+ 	int errno;
+ 
+ 	hdd_enter();
+@@ -1326,9 +1327,6 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
+ 	if (errno)
+ 		return errno;
+ 
+-	if (wlan_hdd_is_session_type_monitor(adapter->device_mode))
+-		ucfg_dp_set_mon_conf_flags(hdd_ctx->psoc, 0);
+-
+ 	if (adapter->device_mode == QDF_SAP_MODE &&
+ 	    ucfg_pre_cac_is_active(hdd_ctx->psoc)) {
+ 		ucfg_pre_cac_clean_up(hdd_ctx->psoc);
+@@ -1342,6 +1340,10 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
+ 		hdd_clean_up_interface(hdd_ctx, adapter);
+ 	}
+ 
++	/* Filter reset during cleanup still needs the monitor configuration. */
++	if (is_monitor)
++		ucfg_dp_set_mon_conf_flags(hdd_ctx->psoc, 0);
++
+ 	if (!hdd_is_any_interface_open(hdd_ctx))
+ 		hdd_psoc_idle_timer_start(hdd_ctx);
+ 	hdd_exit();
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c b/qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c
+index 6c20effa2..056d09f6c 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c
+@@ -27,7 +27,6 @@
+ #include "wlan_hdd_rx_monitor.h"
+ #include "ol_txrx.h"
+ #include "cdp_txrx_mon.h"
+-#include "wma_api.h"
+ 
+ int hdd_enable_monitor_mode(struct net_device *dev)
+ {
+@@ -47,6 +46,5 @@ int hdd_disable_monitor_mode(void)
+ {
+ 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
+ 
+-	wma_injection_pre_stop_cleanup();
+ 	return cdp_reset_monitor_mode(soc, OL_TXRX_PDEV_ID, false);
+ }
