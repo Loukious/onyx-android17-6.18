@@ -36,18 +36,59 @@ dma_addr_t __qdf_page_pool_get_dma_addr(struct page *page)
 
 bool __qdf_page_pool_full_bh(__qdf_page_pool_t pp)
 {
-	int i;
-	int count = 0;
+	struct ptr_ring *ring = &pp->ring;
+	struct page *frag_page;
+	u32 hold_cnt, release_cnt;
+	s32 inflight;
+	bool full = false;
+	int count;
 
-	if (!pp->alloc.count)
-		return ptr_ring_full_bh(&pp->ring);
+	/* The caller serializes allocation and disables direct recycling.
+	 * Ring slots consumed by RX remain non-NULL until a whole batch is
+	 * consumed, so neither raw slot counts nor ptr_ring_full() prove idle.
+	 */
+	spin_lock_bh(&ring->producer_lock);
+	count = ring->producer - ring->consumer_head;
+	if (count < 0)
+		count += ring->size;
+	if (!count && ring->size && ring->queue[ring->consumer_head])
+		count = ring->size;
+	count += pp->alloc.count;
 
-	for (i = 0; i < pp->ring.size; i++) {
-		if (pp->ring.queue[i])
-			count++;
+	if (pp->frag_page) {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
+		frag_page = netmem_to_page(pp->frag_page);
+#else
+		frag_page = pp->frag_page;
+#endif
+		if (!frag_page)
+			goto unlock;
+
+		/* Match page_pool_free_frag(): only its private bias may remain.
+		 * An RX sibling still using this page must keep its DMA mapping.
+		 */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
+		if (atomic_long_read(&frag_page->pp_ref_count) !=
+		    (LONG_MAX >> 1) - pp->frag_users)
+#else
+		if (atomic_long_read(&frag_page->pp_frag_count) !=
+		    LONG_MAX - pp->frag_users)
+#endif
+			goto unlock;
+		count++;
 	}
 
-	return (pp->ring.size - count == pp->alloc.count);
+	/* Pages released from a full ring no longer contribute to this total.
+	 * Use the same wrapping counter distance as page_pool_inflight().
+	 * Concurrent releases can only make an old snapshot conservative.
+	 */
+	release_cnt = atomic_read(&pp->pages_state_release_cnt);
+	hold_cnt = READ_ONCE(pp->pages_state_hold_cnt);
+	inflight = (s32)(hold_cnt - release_cnt);
+	full = inflight >= 0 && count == inflight;
+unlock:
+	spin_unlock_bh(&ring->producer_lock);
+	return full;
 }
 
 bool __qdf_page_pool_empty(__qdf_page_pool_t pp)

@@ -940,13 +940,19 @@ dp_rx_page_pool_upsize(struct dp_soc *soc, struct dp_rx_page_pool *rx_pp,
 	 */
 	for (i = 1; i < pp_count; i++) {
 		pp_params = &rx_pp->main_pool[i];
-		if (pp_params->pp)
-			continue;
-
 		pool_size = rx_pp->base_pool_size;
 
 		if (i == pp_count - 1 && rem_size)
 			pool_size = rem_size;
+
+		if (pp_params->pp) {
+			if (pp_params->pool_size < pool_size) {
+				dp_err("Existing page pool %d is too small", i);
+				goto out_pp_fail;
+			}
+			upscale_cnt++;
+			continue;
+		}
 
 		/* Try to rettach pools which are inactive first
 		 * before allocating new pools.
@@ -979,13 +985,9 @@ dp_rx_page_pool_upsize(struct dp_soc *soc, struct dp_rx_page_pool *rx_pp,
 	return QDF_STATUS_SUCCESS;
 
 out_pp_fail:
-	while (i > 1) {
-		pp_params = &rx_pp->main_pool[--i];
-		if (!pp_params->pp)
-			continue;
-		qdf_page_pool_destroy(pp_params->pp);
-		pp_params->pp = NULL;
-	}
+	/* Existing and reattached pools can still have buffers owned by RX.
+	 * Keep every published pool available for a later resize or teardown.
+	 */
 	return QDF_STATUS_E_FAILURE;
 }
 
@@ -994,7 +996,7 @@ QDF_STATUS dp_rx_page_pool_resize(struct dp_soc *soc, uint32_t pool_id,
 {
 	struct dp_rx_page_pool *rx_pp = &soc->rx_pp[pool_id];
 	struct dp_rx_pp_params *pp_params;
-	struct dp_rx_pp_params *inactive_pp;
+	struct dp_rx_pp_params *inactive_pp[DP_PAGE_POOL_MAX] = {0};
 	qdf_page_pool_t retired[DP_PAGE_POOL_MAX];
 	int retired_count = 0;
 	QDF_STATUS status = QDF_STATUS_SUCCESS;
@@ -1019,6 +1021,23 @@ QDF_STATUS dp_rx_page_pool_resize(struct dp_soc *soc, uint32_t pool_id,
 	}
 
 	qdf_spin_lock_bh(&rx_pp->pp_lock);
+	/* Reserve inactive-list nodes before detaching any pool. On allocation
+	 * failure, leave the current capacity and every RX mapping unchanged.
+	 */
+	for (i = 1; i < DP_PAGE_POOL_MAX; i++) {
+		pp_params = &rx_pp->main_pool[i];
+		if (!pp_params->pp || qdf_page_pool_full_bh(pp_params->pp))
+			continue;
+
+		inactive_pp[i] = qdf_mem_malloc(sizeof(*inactive_pp[i]));
+		if (!inactive_pp[i]) {
+			dp_info("Failed to alloc inactive pp node for %pK",
+				pp_params);
+			status = QDF_STATUS_E_NOMEM;
+			goto resize_unlock;
+		}
+	}
+
 	/* Base page pool at 0th index is always present,
 	 * so destroy page pools from 1st index.
 	 */
@@ -1031,24 +1050,17 @@ QDF_STATUS dp_rx_page_pool_resize(struct dp_soc *soc, uint32_t pool_id,
 		/* Immediately destroy the page pool if there
 		 * are no inflight pages.
 		 */
-		if (qdf_page_pool_full_bh(pp_params->pp)) {
+		if (!inactive_pp[i]) {
 			retired[retired_count++] = pp_params->pp;
 			qdf_mem_set(pp_params, sizeof(*pp_params), 0);
 			continue;
 		}
 
-		inactive_pp = qdf_mem_malloc(sizeof(*inactive_pp));
-		if (!inactive_pp) {
-			dp_info("Failed to alloc inactive pp node for %pK",
-				pp_params);
-			retired[retired_count++] = pp_params->pp;
-			qdf_mem_set(pp_params, sizeof(*pp_params), 0);
-			continue;
-		}
-
-		qdf_mem_copy(inactive_pp, pp_params, sizeof(*pp_params));
+		qdf_mem_copy(inactive_pp[i], pp_params, sizeof(*pp_params));
 		qdf_mem_set(pp_params, sizeof(*pp_params), 0);
-		qdf_list_insert_back(&rx_pp->inactive_list, &inactive_pp->node);
+		qdf_list_insert_back(&rx_pp->inactive_list,
+				     &inactive_pp[i]->node);
+		inactive_pp[i] = NULL;
 	}
 
 	if (!qdf_list_empty(&rx_pp->inactive_list))
@@ -1056,7 +1068,11 @@ QDF_STATUS dp_rx_page_pool_resize(struct dp_soc *soc, uint32_t pool_id,
 			      DP_RX_PP_INACTIVE_TIMER_MS);
 
 	rx_pp->active_pp_idx = 0;
+resize_unlock:
 	qdf_spin_unlock_bh(&rx_pp->pp_lock);
+
+	for (i = 1; i < DP_PAGE_POOL_MAX; i++)
+		qdf_mem_free(inactive_pp[i]);
 
 	for (i = 0; i < retired_count; i++)
 		qdf_page_pool_destroy(retired[i]);

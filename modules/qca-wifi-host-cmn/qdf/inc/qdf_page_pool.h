@@ -49,11 +49,13 @@ static inline dma_addr_t qdf_page_pool_get_dma_addr(qdf_page_t page)
 }
 
 /**
- * qdf_page_pool_full_bh() - Check page pool full condition
+ * qdf_page_pool_full_bh() - Check that a page pool has no borrowers
  *
  * @pp: Page Pool Reference
  *
- * Return: true/false
+ * The caller must serialize allocation and disable direct recycling.
+ *
+ * Return: true if all held pages are cached and no fragments are borrowed
  */
 static inline bool qdf_page_pool_full_bh(qdf_page_pool_t pp)
 {

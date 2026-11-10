@@ -1,0 +1,251 @@
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/dp_rx_buffer_pool.c b/qca-wifi-host-cmn/dp/wifi3.0/dp_rx_buffer_pool.c
+index d3e2cddf4..db167bcf4 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/dp_rx_buffer_pool.c
++++ b/qca-wifi-host-cmn/dp/wifi3.0/dp_rx_buffer_pool.c
+@@ -940,14 +940,20 @@ dp_rx_page_pool_upsize(struct dp_soc *soc, struct dp_rx_page_pool *rx_pp,
+ 	 */
+ 	for (i = 1; i < pp_count; i++) {
+ 		pp_params = &rx_pp->main_pool[i];
+-		if (pp_params->pp)
+-			continue;
+-
+ 		pool_size = rx_pp->base_pool_size;
+ 
+ 		if (i == pp_count - 1 && rem_size)
+ 			pool_size = rem_size;
+ 
++		if (pp_params->pp) {
++			if (pp_params->pool_size < pool_size) {
++				dp_err("Existing page pool %d is too small", i);
++				goto out_pp_fail;
++			}
++			upscale_cnt++;
++			continue;
++		}
++
+ 		/* Try to rettach pools which are inactive first
+ 		 * before allocating new pools.
+ 		 */
+@@ -979,13 +985,9 @@ dp_rx_page_pool_upsize(struct dp_soc *soc, struct dp_rx_page_pool *rx_pp,
+ 	return QDF_STATUS_SUCCESS;
+ 
+ out_pp_fail:
+-	while (i > 1) {
+-		pp_params = &rx_pp->main_pool[--i];
+-		if (!pp_params->pp)
+-			continue;
+-		qdf_page_pool_destroy(pp_params->pp);
+-		pp_params->pp = NULL;
+-	}
++	/* Existing and reattached pools can still have buffers owned by RX.
++	 * Keep every published pool available for a later resize or teardown.
++	 */
+ 	return QDF_STATUS_E_FAILURE;
+ }
+ 
+@@ -994,7 +996,7 @@ QDF_STATUS dp_rx_page_pool_resize(struct dp_soc *soc, uint32_t pool_id,
+ {
+ 	struct dp_rx_page_pool *rx_pp = &soc->rx_pp[pool_id];
+ 	struct dp_rx_pp_params *pp_params;
+-	struct dp_rx_pp_params *inactive_pp;
++	struct dp_rx_pp_params *inactive_pp[DP_PAGE_POOL_MAX] = {0};
+ 	qdf_page_pool_t retired[DP_PAGE_POOL_MAX];
+ 	int retired_count = 0;
+ 	QDF_STATUS status = QDF_STATUS_SUCCESS;
+@@ -1019,6 +1021,23 @@ QDF_STATUS dp_rx_page_pool_resize(struct dp_soc *soc, uint32_t pool_id,
+ 	}
+ 
+ 	qdf_spin_lock_bh(&rx_pp->pp_lock);
++	/* Reserve inactive-list nodes before detaching any pool. On allocation
++	 * failure, leave the current capacity and every RX mapping unchanged.
++	 */
++	for (i = 1; i < DP_PAGE_POOL_MAX; i++) {
++		pp_params = &rx_pp->main_pool[i];
++		if (!pp_params->pp || qdf_page_pool_full_bh(pp_params->pp))
++			continue;
++
++		inactive_pp[i] = qdf_mem_malloc(sizeof(*inactive_pp[i]));
++		if (!inactive_pp[i]) {
++			dp_info("Failed to alloc inactive pp node for %pK",
++				pp_params);
++			status = QDF_STATUS_E_NOMEM;
++			goto resize_unlock;
++		}
++	}
++
+ 	/* Base page pool at 0th index is always present,
+ 	 * so destroy page pools from 1st index.
+ 	 */
+@@ -1031,24 +1050,17 @@ QDF_STATUS dp_rx_page_pool_resize(struct dp_soc *soc, uint32_t pool_id,
+ 		/* Immediately destroy the page pool if there
+ 		 * are no inflight pages.
+ 		 */
+-		if (qdf_page_pool_full_bh(pp_params->pp)) {
+-			retired[retired_count++] = pp_params->pp;
+-			qdf_mem_set(pp_params, sizeof(*pp_params), 0);
+-			continue;
+-		}
+-
+-		inactive_pp = qdf_mem_malloc(sizeof(*inactive_pp));
+-		if (!inactive_pp) {
+-			dp_info("Failed to alloc inactive pp node for %pK",
+-				pp_params);
++		if (!inactive_pp[i]) {
+ 			retired[retired_count++] = pp_params->pp;
+ 			qdf_mem_set(pp_params, sizeof(*pp_params), 0);
+ 			continue;
+ 		}
+ 
+-		qdf_mem_copy(inactive_pp, pp_params, sizeof(*pp_params));
++		qdf_mem_copy(inactive_pp[i], pp_params, sizeof(*pp_params));
+ 		qdf_mem_set(pp_params, sizeof(*pp_params), 0);
+-		qdf_list_insert_back(&rx_pp->inactive_list, &inactive_pp->node);
++		qdf_list_insert_back(&rx_pp->inactive_list,
++				     &inactive_pp[i]->node);
++		inactive_pp[i] = NULL;
+ 	}
+ 
+ 	if (!qdf_list_empty(&rx_pp->inactive_list))
+@@ -1056,8 +1068,12 @@ QDF_STATUS dp_rx_page_pool_resize(struct dp_soc *soc, uint32_t pool_id,
+ 			      DP_RX_PP_INACTIVE_TIMER_MS);
+ 
+ 	rx_pp->active_pp_idx = 0;
++resize_unlock:
+ 	qdf_spin_unlock_bh(&rx_pp->pp_lock);
+ 
++	for (i = 1; i < DP_PAGE_POOL_MAX; i++)
++		qdf_mem_free(inactive_pp[i]);
++
+ 	for (i = 0; i < retired_count; i++)
+ 		qdf_page_pool_destroy(retired[i]);
+ 
+diff --git a/qca-wifi-host-cmn/qdf/inc/qdf_page_pool.h b/qca-wifi-host-cmn/qdf/inc/qdf_page_pool.h
+index e8ee63735..5044f4cef 100644
+--- a/qca-wifi-host-cmn/qdf/inc/qdf_page_pool.h
++++ b/qca-wifi-host-cmn/qdf/inc/qdf_page_pool.h
+@@ -49,11 +49,13 @@ static inline dma_addr_t qdf_page_pool_get_dma_addr(qdf_page_t page)
+ }
+ 
+ /**
+- * qdf_page_pool_full_bh() - Check page pool full condition
++ * qdf_page_pool_full_bh() - Check that a page pool has no borrowers
+  *
+  * @pp: Page Pool Reference
+  *
+- * Return: true/false
++ * The caller must serialize allocation and disable direct recycling.
++ *
++ * Return: true if all held pages are cached and no fragments are borrowed
+  */
+ static inline bool qdf_page_pool_full_bh(qdf_page_pool_t pp)
+ {
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_page_pool.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_page_pool.h
+index 334a68de6..54b5b216d 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_page_pool.h
++++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_page_pool.h
+@@ -63,11 +63,13 @@ struct page *__qdf_page_pool_alloc_page(__qdf_page_pool_t pp);
+ dma_addr_t __qdf_page_pool_get_dma_addr(struct page *page);
+ 
+ /**
+- * __qdf_page_pool_full_bh() - Check page pool full condition
++ * __qdf_page_pool_full_bh() - Check that a page pool has no borrowers
+  *
+  * @pp: Page Pool Reference
+  *
+- * Return: true/false
++ * The caller must serialize allocation and disable direct recycling.
++ *
++ * Return: true if all held pages are cached and no fragments are borrowed
+  */
+ bool __qdf_page_pool_full_bh(__qdf_page_pool_t pp);
+ 
+@@ -165,11 +167,13 @@ static inline dma_addr_t __qdf_page_pool_get_dma_addr(struct page *page)
+ }
+ 
+ /**
+- * __qdf_page_pool_full_bh() - Check page pool full condition
++ * __qdf_page_pool_full_bh() - Check that a page pool has no borrowers
+  *
+  * @pp: Page Pool Reference
+  *
+- * Return: true/false
++ * The caller must serialize allocation and disable direct recycling.
++ *
++ * Return: true if all held pages are cached and no fragments are borrowed
+  */
+ static inline bool __qdf_page_pool_full_bh(__qdf_page_pool_t pp)
+ {
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/qdf_page_pool.c b/qca-wifi-host-cmn/qdf/linux/src/qdf_page_pool.c
+index 30298d988..022122831 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/qdf_page_pool.c
++++ b/qca-wifi-host-cmn/qdf/linux/src/qdf_page_pool.c
+@@ -36,18 +36,59 @@ dma_addr_t __qdf_page_pool_get_dma_addr(struct page *page)
+ 
+ bool __qdf_page_pool_full_bh(__qdf_page_pool_t pp)
+ {
+-	int i;
+-	int count = 0;
+-
+-	if (!pp->alloc.count)
+-		return ptr_ring_full_bh(&pp->ring);
+-
+-	for (i = 0; i < pp->ring.size; i++) {
+-		if (pp->ring.queue[i])
+-			count++;
++	struct ptr_ring *ring = &pp->ring;
++	struct page *frag_page;
++	u32 hold_cnt, release_cnt;
++	s32 inflight;
++	bool full = false;
++	int count;
++
++	/* The caller serializes allocation and disables direct recycling.
++	 * Ring slots consumed by RX remain non-NULL until a whole batch is
++	 * consumed, so neither raw slot counts nor ptr_ring_full() prove idle.
++	 */
++	spin_lock_bh(&ring->producer_lock);
++	count = ring->producer - ring->consumer_head;
++	if (count < 0)
++		count += ring->size;
++	if (!count && ring->size && ring->queue[ring->consumer_head])
++		count = ring->size;
++	count += pp->alloc.count;
++
++	if (pp->frag_page) {
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
++		frag_page = netmem_to_page(pp->frag_page);
++#else
++		frag_page = pp->frag_page;
++#endif
++		if (!frag_page)
++			goto unlock;
++
++		/* Match page_pool_free_frag(): only its private bias may remain.
++		 * An RX sibling still using this page must keep its DMA mapping.
++		 */
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
++		if (atomic_long_read(&frag_page->pp_ref_count) !=
++		    (LONG_MAX >> 1) - pp->frag_users)
++#else
++		if (atomic_long_read(&frag_page->pp_frag_count) !=
++		    LONG_MAX - pp->frag_users)
++#endif
++			goto unlock;
++		count++;
+ 	}
+ 
+-	return (pp->ring.size - count == pp->alloc.count);
++	/* Pages released from a full ring no longer contribute to this total.
++	 * Use the same wrapping counter distance as page_pool_inflight().
++	 * Concurrent releases can only make an old snapshot conservative.
++	 */
++	release_cnt = atomic_read(&pp->pages_state_release_cnt);
++	hold_cnt = READ_ONCE(pp->pages_state_hold_cnt);
++	inflight = (s32)(hold_cnt - release_cnt);
++	full = inflight >= 0 && count == inflight;
++unlock:
++	spin_unlock_bh(&ring->producer_lock);
++	return full;
+ }
+ 
+ bool __qdf_page_pool_empty(__qdf_page_pool_t pp)

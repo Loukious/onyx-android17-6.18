@@ -63,11 +63,13 @@ struct page *__qdf_page_pool_alloc_page(__qdf_page_pool_t pp);
 dma_addr_t __qdf_page_pool_get_dma_addr(struct page *page);
 
 /**
- * __qdf_page_pool_full_bh() - Check page pool full condition
+ * __qdf_page_pool_full_bh() - Check that a page pool has no borrowers
  *
  * @pp: Page Pool Reference
  *
- * Return: true/false
+ * The caller must serialize allocation and disable direct recycling.
+ *
+ * Return: true if all held pages are cached and no fragments are borrowed
  */
 bool __qdf_page_pool_full_bh(__qdf_page_pool_t pp);
 
@@ -165,11 +167,13 @@ static inline dma_addr_t __qdf_page_pool_get_dma_addr(struct page *page)
 }
 
 /**
- * __qdf_page_pool_full_bh() - Check page pool full condition
+ * __qdf_page_pool_full_bh() - Check that a page pool has no borrowers
  *
  * @pp: Page Pool Reference
  *
- * Return: true/false
+ * The caller must serialize allocation and disable direct recycling.
+ *
+ * Return: true if all held pages are cached and no fragments are borrowed
  */
 static inline bool __qdf_page_pool_full_bh(__qdf_page_pool_t pp)
 {
