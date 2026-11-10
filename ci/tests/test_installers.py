@@ -119,28 +119,56 @@ class PackageTests(unittest.TestCase):
 
 
 class WlanServiceTests(unittest.TestCase):
-    def run_service(self, *, wifi='1', refcnt='0', unload='0', insert='0', abi='0', dependency=True):
+    def run_service(self, *, wifi='1', scan='1', refcnt='0', unload='0', insert='0',
+                    abi='0', dependency=True, framework_busy=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for directory in ('bin', 'wlan', 'sys/module/qca_cld3_wcn7750', 'vendor_dlkm/lib/modules'):
+            for directory in ('bin', 'wlan', 'proc', 'sys/module/qca_cld3_wcn7750', 'vendor_dlkm/lib/modules'):
                 (root/directory).mkdir(parents=True)
             if dependency:
                 (root/'sys/module/cfg80211').mkdir()
             (root/'sys/module/qca_cld3_wcn7750/refcnt').write_text(refcnt)
+            (root/'proc/uptime').write_text('100.00 0.00\n')
+            (root/'wifi').write_text(wifi)
+            (root/'scan').write_text(scan)
+            (root/'dumps').write_text('0')
             (root/'vendor_dlkm/lib/modules'/installers.WLAN).write_bytes(b'original')
             (root/'wlan'/installers.WLAN).write_bytes(b'candidate')
             (root/'payload.sha256').write_text(installers.sha(b'candidate')+'  wlan/'+installers.WLAN+'\n')
             script = (installers.HERE/'wlan-service.sh').read_text().replace('@RELEASE@', 'test-release').replace('@DEPS@', 'cfg80211')
             # Relocate only the filesystem paths; execute the actual service logic.
-            for prefix in ('/sys/module', '/vendor_dlkm/lib/modules', '/vendor/lib/modules'):
+            for prefix in ('/sys/module', '/vendor_dlkm/lib/modules', '/vendor/lib/modules', '/proc/uptime'):
                 script = script.replace(prefix, str(root)+prefix)
+            script = script.replace('/system/bin/svc', str(root/'bin/android-svc'))
             (root/'service.sh').write_text(script)
             mocks = {
-                'uname': 'echo test-release', 'log': ':', 'sleep': ':',
-                'settings': 'echo "$TEST_WIFI"',
-                'svc': 'echo "svc $*" >> "$EVENTS"',
-                'rmmod': 'echo rmmod >> "$EVENTS"; exit "$TEST_UNLOAD"',
-                'insmod': 'case "$1" in */wlan/*) echo candidate >> "$EVENTS"; exit "$TEST_INSERT";; *) echo rollback >> "$EVENTS";; esac',
+                'uname': 'echo test-release', 'log': ':', 'getprop': 'echo 1', 'pidof': 'exit 1',
+                'sleep': 't=$(cut -d. -f1 "$TEST_ROOT/proc/uptime"); echo "$((t + $1)).00 0.00" > "$TEST_ROOT/proc/uptime"',
+                'settings': 'case "$3" in wifi_on) cat "$TEST_ROOT/wifi";; wifi_scan_always_enabled) cat "$TEST_ROOT/scan";; *) exit 1;; esac',
+                # Standalone BusyBox resolves the unqualified name to its runsv applet.
+                'svc': 'echo "unexpected BusyBox svc" >&2; exit 1',
+                'android-svc': '''echo "svc $*" >> "$EVENTS"
+case "$2" in enable) echo 1 > "$TEST_ROOT/wifi";; disable) echo 0 > "$TEST_ROOT/wifi";; *) exit 1;; esac''',
+                'cmd': '''[ "$1 $2" = 'wifi set-scan-always-available' ] || exit 1
+case "$3" in enabled) echo 1 > "$TEST_ROOT/scan";; disabled) echo 0 > "$TEST_ROOT/scan";; *) exit 1;; esac''',
+                'dumpsys': '''n=$(cat "$TEST_ROOT/dumps"); echo "$((n + 1))" > "$TEST_ROOT/dumps"
+echo 'Dump of WifiActiveModeWarden'
+if [ "$TEST_FRAMEWORK_BUSY" = 0 ] && [ "$(cat "$TEST_ROOT/wifi")" = 0 ] && [ "$(cat "$TEST_ROOT/scan")" = 0 ]; then
+    echo 'Current wifi mode: DisabledState'; echo 'NumActiveModeManagers: 0'
+else
+    echo 'Current wifi mode: EnabledState'; echo 'NumActiveModeManagers: 1'
+fi
+echo 'WifiController:'
+# Historical lines must not override the current controller state.
+echo 'Current wifi mode: DisabledState'; echo 'NumActiveModeManagers: 0' ''',
+                'rmmod': '''echo rmmod >> "$EVENTS"
+[ "$TEST_UNLOAD" = 0 ] || exit "$TEST_UNLOAD"
+[ "$(cat "$TEST_ROOT/wifi")" = 0 ] && [ "$(cat "$TEST_ROOT/scan")" = 0 ] || exit 90
+[ "$TEST_FRAMEWORK_BUSY" = 0 ] && [ "$(cat "$TEST_ROOT/dumps")" -ge 2 ] || exit 91
+rm -rf "$TEST_ROOT/sys/module/qca_cld3_wcn7750"''',
+                'insmod': '''case "$1" in */wlan/*) echo candidate >> "$EVENTS"; [ "$TEST_INSERT" = 0 ] || exit "$TEST_INSERT";; *) echo rollback >> "$EVENTS";; esac
+mkdir -p "$TEST_ROOT/sys/module/qca_cld3_wcn7750"
+echo 0 > "$TEST_ROOT/sys/module/qca_cld3_wcn7750/refcnt"''',
             }
             for name, body in mocks.items():
                 path = root/'bin'/name
@@ -149,22 +177,31 @@ class WlanServiceTests(unittest.TestCase):
             (root/'module-abi').chmod(0o755)
             events = root/'events'
             env = dict(os.environ, PATH=str(root/'bin')+':'+os.environ['PATH'], EVENTS=str(events),
-                       TEST_WIFI=wifi, TEST_UNLOAD=unload, TEST_INSERT=insert, TEST_ABI=abi)
+                       TEST_ROOT=str(root), TEST_UNLOAD=unload, TEST_INSERT=insert, TEST_ABI=abi,
+                       TEST_FRAMEWORK_BUSY=str(int(framework_busy)))
             result = subprocess.run(['sh', str(root/'service.sh')], env=env, capture_output=True, timeout=5)
+            self.assertEqual(((root/'wifi').read_text().strip(), (root/'scan').read_text().strip()), (wifi, scan))
             return result.returncode, events.read_text().splitlines() if events.exists() else []
 
-    def test_success_preserves_enabled_or_disabled_wifi(self):
-        self.assertEqual(self.run_service(), (0, ['abi', 'svc wifi disable', 'rmmod', 'candidate', 'svc wifi enable']))
-        self.assertEqual(self.run_service(wifi='0'), (0, ['abi', 'rmmod', 'candidate']))
+    def test_success_preserves_wifi_and_independent_scan_setting(self):
+        for wifi in ('0', '1'):
+            for scan in ('0', '1'):
+                with self.subTest(wifi=wifi, scan=scan):
+                    restore = 'svc wifi enable' if wifi == '1' else 'svc wifi disable'
+                    self.assertEqual(self.run_service(wifi=wifi, scan=scan),
+                                     (0, ['abi', 'abi', 'svc wifi disable', 'rmmod', 'candidate', restore]))
 
     def test_unload_failure_does_not_insert_and_restores_wifi(self):
-        self.assertEqual(self.run_service(unload='1'), (1, ['abi', 'svc wifi disable', 'rmmod', 'svc wifi enable']))
+        self.assertEqual(self.run_service(unload='1'), (1, ['abi', 'abi', 'svc wifi disable', 'rmmod', 'svc wifi enable']))
 
     def test_insert_failure_reloads_original_and_restores_wifi(self):
-        self.assertEqual(self.run_service(insert='1'), (1, ['abi', 'svc wifi disable', 'rmmod', 'candidate', 'rollback', 'svc wifi enable']))
+        self.assertEqual(self.run_service(insert='1'), (1, ['abi', 'abi', 'svc wifi disable', 'rmmod', 'candidate', 'rollback', 'svc wifi enable']))
 
     def test_busy_driver_is_never_forcibly_unloaded(self):
-        self.assertEqual(self.run_service(refcnt='1'), (1, ['abi', 'svc wifi disable', 'svc wifi enable']))
+        self.assertEqual(self.run_service(refcnt='1'), (1, ['abi', 'abi', 'svc wifi disable', 'svc wifi enable']))
+
+    def test_active_framework_is_not_unloaded_even_with_zero_refcount(self):
+        self.assertEqual(self.run_service(framework_busy=True), (1, ['abi', 'abi', 'svc wifi disable', 'svc wifi enable']))
 
     def test_missing_dependencies_or_wrong_rollback_abi_preserve_driver(self):
         self.assertEqual(self.run_service(dependency=False), (1, []))
