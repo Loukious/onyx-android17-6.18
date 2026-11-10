@@ -157,9 +157,10 @@ dp_mon_set_fp_phy_err_filter(struct htt_rx_ring_tlv_filter *tlv_filter,
 }
 #endif
 
-void dp_mon_filter_h2t_setup(struct dp_soc *soc, struct dp_pdev *pdev,
-			     enum dp_mon_filter_srng_type srng_type,
-			     struct dp_mon_filter *filter)
+static void
+dp_mon_filter_h2t_setup_common(struct dp_soc *soc, struct dp_pdev *pdev,
+			       enum dp_mon_filter_srng_type srng_type,
+			       struct dp_mon_filter *filter, bool skip_monitor)
 {
 	int32_t current_mode = 0;
 	struct htt_rx_ring_tlv_filter *tlv_filter = &filter->tlv_filter;
@@ -177,7 +178,8 @@ void dp_mon_filter_h2t_setup(struct dp_soc *soc, struct dp_pdev *pdev,
 		/*
 		 * Check if the correct mode is enabled or not.
 		 */
-		if (!mon_filter->valid)
+		if (!mon_filter->valid ||
+		    (skip_monitor && current_mode == DP_MON_FILTER_MONITOR_MODE))
 			continue;
 
 		filter->valid = true;
@@ -288,6 +290,20 @@ void dp_mon_filter_h2t_setup(struct dp_soc *soc, struct dp_pdev *pdev,
 	dp_mon_filter_show_filter(mon_pdev, 0, filter);
 }
 
+void dp_mon_filter_h2t_setup(struct dp_soc *soc, struct dp_pdev *pdev,
+			     enum dp_mon_filter_srng_type srng_type,
+			     struct dp_mon_filter *filter)
+{
+	dp_mon_filter_h2t_setup_common(soc, pdev, srng_type, filter, false);
+}
+
+void dp_mon_filter_h2t_setup_non_mon(struct dp_soc *soc, struct dp_pdev *pdev,
+				   enum dp_mon_filter_srng_type srng_type,
+				   struct dp_mon_filter *filter)
+{
+	dp_mon_filter_h2t_setup_common(soc, pdev, srng_type, filter, true);
+}
+
 /**
  * dp_update_num_mac_rings() - Update number of MAC rings based on connection
  *                             mode and DBS check
@@ -309,6 +325,26 @@ dp_update_num_mac_rings(struct dp_soc *soc, int *mon_mac_rings)
 	}
 }
 
+static void
+dp_mon_filter_set_sta_coex_buf(struct dp_soc *soc,
+			       struct htt_rx_ring_tlv_filter *filter)
+{
+	/* The buffer-ring TLV subscription is shared with Android's STA. */
+	dp_htt_rxdma_ring_tlv_cfg_be(soc, filter);
+	filter->enable_fp = 0;
+	filter->fp_mgmt_filter = 0;
+	filter->fp_ctrl_filter = 0;
+	filter->fp_data_filter = 0;
+	filter->enable_mo = 1;
+	filter->mo_mgmt_filter = FILTER_MGMT_ALL;
+	filter->mo_ctrl_filter = FILTER_CTRL_ALL;
+	filter->mo_data_filter = FILTER_DATA_ALL;
+	filter->enable_md = 1;
+	filter->md_mgmt_filter = FILTER_MGMT_ALL;
+	filter->md_ctrl_filter = FILTER_CTRL_ALL;
+	filter->md_data_filter = FILTER_DATA_ALL;
+}
+
 QDF_STATUS
 dp_mon_ht2_rx_ring_cfg(struct dp_soc *soc,
 		       struct dp_pdev *pdev,
@@ -319,6 +355,27 @@ dp_mon_ht2_rx_ring_cfg(struct dp_soc *soc,
 	int max_mac_rings = wlan_cfg_get_num_mac_rings(pdev->wlan_cfg_ctx);
 	QDF_STATUS status = QDF_STATUS_SUCCESS;
 	uint32_t target_type = hal_get_target_type(soc->hal_soc);
+	struct htt_rx_ring_tlv_filter coex_filter;
+	bool coex_buf = dp_mon_is_sta_coex(soc) &&
+		srng_type == DP_MON_FILTER_SRNG_TYPE_RXDMA_BUF;
+
+	if (coex_buf) {
+		/*
+		 * Empty buffer masks do not reset routing and would clear the
+		 * shared TLV layout. Restore the complete normal BE setup.
+		 */
+		if (!tlv_filter->enable_mo && !tlv_filter->enable_md)
+			return soc->arch_ops.dp_rxdma_ring_sel_cfg(soc);
+		if (dp_mon_sta_coex_is_paused(soc))
+			return QDF_STATUS_E_AGAIN;
+		/*
+		 * Clamp after merging all filter modes. A combined FP+MO
+		 * command redirects FP traffic too on this firmware.
+		 */
+		dp_mon_filter_set_sta_coex_buf(soc, &coex_filter);
+		tlv_filter = &coex_filter;
+		max_mac_rings = NUM_RXDMA_RINGS_PER_PDEV;
+	}
 
 	if (srng_type == DP_MON_FILTER_SRNG_TYPE_RXDMA_BUF &&
 	    dp_mon_mode_local_pkt_capture(soc)) {
@@ -348,7 +405,11 @@ dp_mon_ht2_rx_ring_cfg(struct dp_soc *soc,
 
 		switch (srng_type) {
 		case DP_MON_FILTER_SRNG_TYPE_RXDMA_BUF:
-			if (target_type == TARGET_TYPE_QCN9160) {
+			if (coex_buf) {
+				hal_ring_hdl = dp_get_rxdma_ring(pdev, lmac_id)->hal_srng;
+				ring_buf_size =
+					wlan_cfg_rx_buffer_size(soc->wlan_cfg_ctx);
+			} else if (target_type == TARGET_TYPE_QCN9160) {
 				hal_ring_hdl =
 				soc->rx_refill_buf_ring[lmac_id].hal_srng;
 				ring_buf_size = RX_MONITOR_BUFFER_SIZE;
@@ -661,8 +722,8 @@ QDF_STATUS dp_mon_filter_update(struct dp_pdev *pdev)
 		return QDF_STATUS_E_FAILURE;
 	}
 
-	if (mon_ops && mon_ops->rx_mon_filter_update)
-		mon_ops->rx_mon_filter_update(pdev);
+	if (mon_ops->rx_mon_filter_update)
+		return mon_ops->rx_mon_filter_update(pdev);
 
 	return QDF_STATUS_SUCCESS;
 }
@@ -721,6 +782,25 @@ void dp_mon_filter_adjust(struct dp_pdev *pdev, struct dp_mon_filter *filter)
 {
 	struct dp_soc *soc = pdev->soc;
 
+#if defined(QCA_WIFI_WCN7750) && !defined(NO_RX_PKT_HDR_TLV)
+	if (hal_get_target_type(soc->hal_soc) == TARGET_TYPE_WCN7750) {
+		/* Exclusive and shared monitor RX use the same compiled layout. */
+		filter->tlv_filter.msdu_start = 0;
+		filter->tlv_filter.mpdu_end = 0;
+		filter->tlv_filter.attention = 0;
+		filter->tlv_filter.packet_header = 1;
+		filter->tlv_filter.offset_valid = true;
+		filter->tlv_filter.rx_header_offset =
+			hal_rx_pkt_tlv_offset_get(soc->hal_soc);
+		filter->tlv_filter.rx_packet_offset = soc->rx_mon_pkt_tlv_size;
+		filter->tlv_filter.rx_mpdu_start_offset =
+			hal_rx_mpdu_start_offset_get(soc->hal_soc);
+		filter->tlv_filter.rx_msdu_end_offset =
+			hal_rx_msdu_end_offset_get(soc->hal_soc);
+		dp_htt_rxdma_ring_wmask_cfg(soc, &filter->tlv_filter);
+		return;
+	}
+#endif
 	switch (hal_get_target_type(soc->hal_soc)) {
 	case TARGET_TYPE_KIWI:
 	case TARGET_TYPE_MANGO:
@@ -742,6 +822,11 @@ void dp_mon_filter_set_mon_cmn(struct dp_pdev *pdev,
 			       struct dp_mon_filter *filter)
 {
 	struct dp_mon_pdev *mon_pdev = pdev->monitor_pdev;
+
+	if (dp_mon_is_sta_coex(pdev->soc)) {
+		dp_mon_filter_set_sta_coex_buf(pdev->soc, &filter->tlv_filter);
+		return;
+	}
 
 	filter->tlv_filter.mpdu_start = 1;
 	filter->tlv_filter.msdu_start = 1;

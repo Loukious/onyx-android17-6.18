@@ -6019,8 +6019,8 @@ wlan_mlme_send_csa_event_status_ind_cmd(struct wlan_objmgr_vdev *vdev,
 }
 
 
-void wlan_mlme_set_vdev_mac_id(struct wlan_objmgr_pdev *pdev,
-			       uint8_t vdev_id, uint32_t mac_id)
+static void wlan_mlme_set_vdev_mac_id_internal(struct wlan_objmgr_pdev *pdev,
+			       uint8_t vdev_id, uint32_t mac_id, bool monitor_start)
 {
 	struct wlan_objmgr_vdev *vdev;
 	struct mlme_legacy_priv *vdev_mlme_priv;
@@ -6038,11 +6038,31 @@ void wlan_mlme_set_vdev_mac_id(struct wlan_objmgr_pdev *pdev,
 	}
 
 	old_mac_id = vdev_mlme_priv->mac_id;
+	if (old_mac_id != mac_id) {
+		if (monitor_start)
+			wlan_mlme_sta_mon_channel_changed(wlan_pdev_get_psoc(pdev),
+				vdev_id, wlan_vdev_mlme_get_bss_chan(vdev));
+		else
+			wlan_mlme_sta_mon_invalidate(wlan_pdev_get_psoc(pdev),
+						      vdev_id);
+	}
 	vdev_mlme_priv->mac_id = mac_id;
 
 	wlan_dp_notify_vdev_mac_id_migration(vdev, old_mac_id, mac_id);
 rel_ref:
 	wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_MAC_ID);
+}
+
+void wlan_mlme_set_vdev_mac_id(struct wlan_objmgr_pdev *pdev,
+			       uint8_t vdev_id, uint32_t mac_id)
+{
+	wlan_mlme_set_vdev_mac_id_internal(pdev, vdev_id, mac_id, false);
+}
+
+void wlan_mlme_sta_mon_set_start_mac_id(struct wlan_objmgr_pdev *pdev,
+				       uint8_t vdev_id, uint8_t mac_id)
+{
+	wlan_mlme_set_vdev_mac_id_internal(pdev, vdev_id, mac_id, true);
 }
 
 uint32_t wlan_mlme_get_vdev_mac_id(struct wlan_objmgr_pdev *pdev,

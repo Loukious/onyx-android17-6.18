@@ -43,6 +43,83 @@
 #define DP_MON_REAP_BUDGET 1024
 #define MON_BUF_MIN_ENTRIES 64
 
+/* Internal delivery gate, retained until the native monitor stop drains RX. */
+#define DP_MON_FLAG_STA_COEX_PAUSED (1U << 30)
+#define DP_MON_FLAGS_PRIVATE (QDF_MONITOR_FLAG_STA_COEX | \
+			     DP_MON_FLAG_STA_COEX_PAUSED)
+
+static inline bool dp_mon_is_sta_coex(struct dp_soc *soc)
+{
+#if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
+	return !!(READ_ONCE(soc->mon_flags) & QDF_MONITOR_FLAG_STA_COEX);
+#else
+	return false;
+#endif
+}
+
+static inline bool dp_mon_sta_coex_is_paused(struct dp_soc *soc)
+{
+	return !!(READ_ONCE(soc->mon_flags) & DP_MON_FLAG_STA_COEX_PAUSED);
+}
+
+static inline void dp_mon_update_private_flags(struct dp_soc *soc,
+					       uint32_t clear, uint32_t set)
+{
+	uint32_t old;
+
+	/* A connection invalidation may race a monitor configuration update. */
+	do {
+		old = READ_ONCE(soc->mon_flags);
+	} while (cmpxchg(&soc->mon_flags, old, (old & ~clear) | set) != old);
+}
+
+#if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
+uint32_t dp_rx_mon_shared_dest_process(struct dp_soc *soc,
+				     struct dp_intr *int_ctx,
+				     uint32_t mac_id, uint32_t quota);
+bool dp_mon_sta_coex_rx(struct dp_soc *soc, qdf_nbuf_t nbuf,
+		       qdf_nbuf_t *next);
+/*
+ * Caller retains an RX peer reference proving helper ownership. True consumes
+ * only nbuf and its fragments; the caller retains its saved next sibling.
+ */
+bool dp_mon_sta_coex_rx_exception(struct dp_soc *soc, struct dp_vdev *helper,
+				  qdf_nbuf_t nbuf, uint8_t *rx_tlv_hdr);
+/* Caller holds this lmac's mon_lock; original nbuf/descriptor remain owned. */
+void dp_mon_sta_coex_copy_shared(struct dp_soc *soc, uint32_t mac_id,
+			       qdf_nbuf_t nbuf, uint32_t buffer_size,
+			       uint32_t msdu_flags, void *ring_desc);
+/* Caller owns a DMA-unmapped REO buffer; only an independent copy is delivered. */
+void dp_mon_sta_coex_copy_unknown_raw(struct dp_soc *soc, uint32_t mac_id,
+				    qdf_nbuf_t nbuf, uint8_t *rx_tlv_hdr,
+				    uint16_t ppdu_id);
+#else
+static inline bool dp_mon_sta_coex_rx(struct dp_soc *soc, qdf_nbuf_t nbuf,
+				    qdf_nbuf_t *next)
+{
+	return false;
+}
+
+static inline bool
+dp_mon_sta_coex_rx_exception(struct dp_soc *soc, struct dp_vdev *helper,
+			    qdf_nbuf_t nbuf, uint8_t *rx_tlv_hdr)
+{
+	return false;
+}
+static inline void
+dp_mon_sta_coex_copy_shared(struct dp_soc *soc, uint32_t mac_id,
+			    qdf_nbuf_t nbuf, uint32_t buffer_size,
+			    uint32_t msdu_flags, void *ring_desc)
+{
+}
+static inline void
+dp_mon_sta_coex_copy_unknown_raw(struct dp_soc *soc, uint32_t mac_id,
+				qdf_nbuf_t nbuf, uint8_t *rx_tlv_hdr,
+				uint16_t ppdu_id)
+{
+}
+#endif
+
 /* 40MHZ BW 2 20MHZ sub bands */
 #define SUB40BW 2
 /* 80MHZ BW 4 20MHZ sub bands */

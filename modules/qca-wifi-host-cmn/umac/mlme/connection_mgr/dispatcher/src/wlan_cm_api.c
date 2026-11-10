@@ -25,6 +25,7 @@
 #include "connection_mgr/core/src/wlan_cm_main_api.h"
 #include "connection_mgr/core/src/wlan_cm_roam.h"
 #include <wlan_vdev_mgr_utils_api.h>
+#include <wlan_mlme_sta_mon.h>
 #ifdef WLAN_FEATURE_11BE_MLO
 #ifdef WLAN_FEATURE_11BE_MLO_ADV_FEATURE
 #include "wlan_mlo_mgr_roam.h"
@@ -34,7 +35,18 @@
 QDF_STATUS wlan_cm_start_connect(struct wlan_objmgr_vdev *vdev,
 				 struct wlan_cm_connect_req *req)
 {
-	return cm_connect_start_req(vdev, req);
+	struct wlan_objmgr_psoc *psoc;
+	QDF_STATUS status;
+
+	if (!vdev)
+		return QDF_STATUS_E_INVAL;
+	psoc = wlan_vdev_get_psoc(vdev);
+	if (!wlan_mlme_sta_mon_admission_begin(psoc))
+		return QDF_STATUS_E_BUSY;
+	status = cm_connect_start_req(vdev, req);
+	wlan_mlme_sta_mon_admission_end(psoc);
+
+	return status;
 }
 
 QDF_STATUS wlan_cm_disconnect(struct wlan_objmgr_vdev *vdev,
@@ -594,6 +606,8 @@ QDF_STATUS wlan_cm_sta_update_bw_puncture(struct wlan_objmgr_vdev *vdev,
 	    des_chan->ch_width == ch_param.ch_width)
 		return status;
 
+	wlan_mlme_sta_mon_invalidate(wlan_vdev_get_psoc(vdev),
+				     wlan_vdev_get_id(vdev));
 	des_chan->ch_freq_seg1 = ch_param.center_freq_seg0;
 	des_chan->ch_freq_seg2 = ch_param.center_freq_seg1;
 	des_chan->ch_cfreq1 = ch_param.mhz_freq_seg0;

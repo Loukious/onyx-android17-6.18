@@ -1332,4 +1332,34 @@ dp_htt_rxdma_ring_wmask_cfg(struct dp_soc *soc,
 }
 #endif
 
+/* Keep shared-buffer monitor updates byte-compatible with normal BE RX. */
+static inline void
+dp_htt_rxdma_ring_tlv_cfg_be(struct dp_soc *soc,
+			     struct htt_rx_ring_tlv_filter *filter)
+{
+	qdf_mem_zero(filter, sizeof(*filter));
+	filter->mpdu_start = 1;
+	filter->msdu_end = 1;
+	filter->packet = 1;
+#ifndef NO_RX_PKT_HDR_TLV
+	filter->packet_header = 1;
+	filter->rx_header_offset = hal_rx_pkt_tlv_offset_get(soc->hal_soc);
+#endif
+	filter->enable_fp = 1;
+	filter->fp_ctrl_filter = FILTER_CTRL_BA_REQ;
+	filter->fp_data_filter = FILTER_DATA_UCAST | FILTER_DATA_DATA;
+	if (hal_rx_en_mcast_fp_data_filter(soc->hal_soc))
+		filter->fp_data_filter |= FILTER_DATA_MCAST;
+	filter->offset_valid = true;
+	if (soc->cdp_soc.ol_ops->get_con_mode &&
+	    soc->cdp_soc.ol_ops->get_con_mode() == QDF_GLOBAL_MONITOR_MODE)
+		filter->rx_packet_offset = soc->rx_mon_pkt_tlv_size;
+	else
+		filter->rx_packet_offset = soc->rx_pkt_tlv_size;
+	filter->rx_mpdu_start_offset =
+		hal_rx_mpdu_start_offset_get(soc->hal_soc);
+	filter->rx_msdu_end_offset = hal_rx_msdu_end_offset_get(soc->hal_soc);
+	dp_htt_rxdma_ring_wmask_cfg(soc, filter);
+}
+
 #endif /* _DP_HTT_H_ */

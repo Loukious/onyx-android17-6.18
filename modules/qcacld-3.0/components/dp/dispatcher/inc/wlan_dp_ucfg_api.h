@@ -2010,6 +2010,10 @@ QDF_STATUS ucfg_dp_hlp_state_update(struct wlan_objmgr_vdev *vdev,
  */
 void ucfg_dp_set_mon_conf_flags(struct wlan_objmgr_psoc *psoc, uint32_t flags);
 
+/* Private STA/monitor admission and nonblocking delivery invalidation. */
+bool ucfg_dp_sta_mon_coex_supported(struct wlan_objmgr_psoc *psoc);
+void ucfg_dp_sta_mon_coex_pause(struct wlan_objmgr_psoc *psoc);
+
 /*
  * ucfg_dp_recover_mon_conf_flags(): Set monitor configuration flags
  *                                   from the one saved in dp_ctx

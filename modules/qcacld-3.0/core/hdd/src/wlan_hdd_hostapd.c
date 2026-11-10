@@ -70,6 +70,7 @@
 #include "qdf_net_if.h"
 #include "wlan_hdd_cfg.h"
 #include "wlan_policy_mgr_api.h"
+#include "wlan_mlme_sta_mon.h"
 #include "wlan_hdd_tsf.h"
 #include <cdp_txrx_misc.h>
 #include <cdp_txrx_ctrl.h>
@@ -9218,16 +9219,23 @@ int wlan_hdd_cfg80211_start_ap(struct wiphy *wiphy,
 {
 	int errno;
 	struct osif_vdev_sync *vdev_sync;
+	struct hdd_context *hdd_ctx = wiphy_priv(wiphy);
 
 	errno = osif_vdev_sync_op_start(dev, &vdev_sync);
 	if (errno)
 		return errno;
 
+	if (!wlan_mlme_sta_mon_admission_begin(hdd_ctx->psoc)) {
+		errno = -EBUSY;
+		goto out;
+	}
 	errno = __wlan_hdd_cfg80211_start_ap(wiphy, dev, params);
 
 	if (errno)
 		wlan_hdd_post_start_ap_failed(wiphy, dev, params);
+	wlan_mlme_sta_mon_admission_end(hdd_ctx->psoc);
 
+out:
 	osif_vdev_sync_op_stop(vdev_sync);
 
 	return errno;

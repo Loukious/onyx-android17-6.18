@@ -1376,6 +1376,91 @@ dp_peer_obj_destroy_notification(struct wlan_objmgr_peer *peer, void *arg)
 	return status;
 }
 
+/*
+ * A native injection vdev has no HDD adapter.  Give it an isolated component
+ * owner instead of resolving its ACK address to another interface's dp_intf.
+ * This owner is deliberately absent from the netdev/intf lists and never
+ * registers HDD TX/RX callbacks.  The low-level RAW monitor binding owns RX.
+ */
+static QDF_STATUS
+dp_injection_vdev_create(struct wlan_objmgr_vdev *vdev,
+			 struct wlan_dp_psoc_context *dp_ctx)
+{
+	struct wlan_dp_intf *dp_intf;
+	struct wlan_dp_link *dp_link;
+	QDF_STATUS status;
+
+	if (!dp_ctx)
+		return QDF_STATUS_E_INVAL;
+	dp_intf = __qdf_mem_malloc(sizeof(*dp_intf), __func__, __LINE__);
+	if (!dp_intf)
+		return QDF_STATUS_E_NOMEM;
+	dp_link = qdf_mem_malloc(sizeof(*dp_link));
+	if (!dp_link) {
+		__qdf_mem_free(dp_intf);
+		return QDF_STATUS_E_NOMEM;
+	}
+
+	dp_intf->dp_ctx = dp_ctx;
+	dp_intf->device_mode = QDF_SAP_MODE;
+	dp_intf->id = WLAN_DP_INTF_MAX;
+	dp_intf->def_link = dp_link;
+	dp_intf->num_links = 1;
+	qdf_mem_copy(dp_intf->mac_addr.bytes,
+		     wlan_vdev_mlme_get_macaddr(vdev), QDF_MAC_ADDR_SIZE);
+	qdf_spinlock_create(&dp_intf->dp_link_list_lock);
+	qdf_list_create(&dp_intf->dp_link_list, 0);
+	qdf_atomic_init(&dp_intf->num_active_task);
+	dp_link->magic = WLAN_DP_LINK_MAGIC;
+	dp_link->dp_intf = dp_intf;
+	dp_link->vdev = vdev;
+	dp_link->link_id = wlan_vdev_get_id(vdev);
+	qdf_copy_macaddr(&dp_link->mac_addr, &dp_intf->mac_addr);
+	qdf_spinlock_create(&dp_link->vdev_lock);
+	TAILQ_INIT(&dp_link->cdp_vdev_list);
+	qdf_list_insert_front(&dp_intf->dp_link_list, &dp_link->node);
+
+	status = wlan_objmgr_vdev_component_obj_attach(vdev, WLAN_COMP_DP,
+						       dp_link,
+						       QDF_STATUS_SUCCESS);
+	if (QDF_IS_STATUS_SUCCESS(status))
+		return status;
+
+	qdf_list_remove_node(&dp_intf->dp_link_list, &dp_link->node);
+	qdf_spinlock_destroy(&dp_link->vdev_lock);
+	qdf_list_destroy(&dp_intf->dp_link_list);
+	qdf_spinlock_destroy(&dp_intf->dp_link_list_lock);
+	qdf_mem_free(dp_link);
+	__qdf_mem_free(dp_intf);
+	return status;
+}
+
+static QDF_STATUS
+dp_injection_vdev_destroy(struct wlan_objmgr_vdev *vdev,
+			  struct wlan_dp_link *dp_link)
+{
+	struct wlan_dp_intf *dp_intf = dp_link->dp_intf;
+	QDF_STATUS status;
+
+	/* The native helper never registers this owner with a CDP vdev. */
+	if (!TAILQ_EMPTY(&dp_link->cdp_vdev_list) ||
+	    qdf_atomic_read(&dp_intf->num_active_task))
+		return QDF_STATUS_E_BUSY;
+	status = wlan_objmgr_vdev_component_obj_detach(vdev, WLAN_COMP_DP,
+						       dp_link);
+	if (QDF_IS_STATUS_ERROR(status))
+		return status;
+	qdf_list_remove_node(&dp_intf->dp_link_list, &dp_link->node);
+	dp_link->vdev = NULL;
+	dp_link->magic = 0;
+	qdf_spinlock_destroy(&dp_link->vdev_lock);
+	qdf_list_destroy(&dp_intf->dp_link_list);
+	qdf_spinlock_destroy(&dp_intf->dp_link_list_lock);
+	qdf_mem_free(dp_link);
+	__qdf_mem_free(dp_intf);
+	return QDF_STATUS_SUCCESS;
+}
+
 QDF_STATUS
 dp_vdev_obj_create_notification(struct wlan_objmgr_vdev *vdev, void *arg)
 {
@@ -1397,6 +1482,8 @@ dp_vdev_obj_create_notification(struct wlan_objmgr_vdev *vdev, void *arg)
 	}
 
 	dp_ctx =  dp_psoc_get_priv(psoc);
+	if (wlan_vdev_is_injection_helper(vdev))
+		return dp_injection_vdev_create(vdev, dp_ctx);
 	mac_addr = (struct qdf_mac_addr *)wlan_vdev_mlme_get_macaddr(vdev);
 
 	dev = dp_ctx->dp_ops.dp_get_netdev_by_vdev_mac(mac_addr);
@@ -1535,6 +1622,8 @@ dp_vdev_obj_destroy_notification(struct wlan_objmgr_vdev *vdev, void *arg)
 		dp_err("Failed to get DP link obj");
 		return QDF_STATUS_E_INVAL;
 	}
+	if (wlan_vdev_is_injection_helper(vdev))
+		return dp_injection_vdev_destroy(vdev, dp_link);
 
 	dp_intf = dp_link->dp_intf;
 	dp_ctx = dp_intf->dp_ctx;

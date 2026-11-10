@@ -38,6 +38,21 @@
 #include "wlan_p2p_off_chan_tx.h"
 #include "wlan_mlme_api.h"
 
+void p2p_sta_mon_roc_begin(struct p2p_roc_context *roc_ctx)
+{
+	if (roc_ctx->sta_mon_update)
+		return;
+	wlan_mlme_sta_mon_update_begin(roc_ctx->p2p_soc_obj->soc);
+	roc_ctx->sta_mon_update = true;
+}
+
+void p2p_free_roc_context(struct p2p_roc_context *roc_ctx)
+{
+	if (roc_ctx->sta_mon_update)
+		wlan_mlme_sta_mon_update_end(roc_ctx->p2p_soc_obj->soc);
+	qdf_mem_free(roc_ctx);
+}
+
 /**
  * p2p_mgmt_rx_ops() - register or unregister rx callback
  * @psoc: psoc object
@@ -366,7 +381,7 @@ static QDF_STATUS p2p_destroy_roc_ctx(struct p2p_roc_context *roc_ctx,
 	}
 
 	qdf_idr_remove(&p2p_soc_obj->p2p_idr, roc_ctx->id);
-	qdf_mem_free(roc_ctx);
+	p2p_free_roc_context(roc_ctx);
 
 	return status;
 }
@@ -879,7 +894,7 @@ QDF_STATUS p2p_process_cleanup_roc_queue(
 					&p2p_soc_obj->roc_q,
 					(qdf_list_node_t *)roc_ctx);
 			if (ret == QDF_STATUS_SUCCESS)
-				qdf_mem_free(roc_ctx);
+				p2p_free_roc_context(roc_ctx);
 			else
 				p2p_err("Failed to remove roc ctx from queue");
 		}

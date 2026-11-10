@@ -414,6 +414,8 @@ struct p2p_ap_assist_dfs_group_info {
  * @prev_action_frame_addr2: Address2 field (TA) of the last transmitted
  *                           action frame.
  * @ap_assist_dfs:      AP assisted DFS group operation info
+ * @sta_mon_lo_lock:    Protects listen-offload monitor exclusion
+ * @sta_mon_lo_active:  Holds exclusion until firmware reports LO stopped
  */
 struct p2p_vdev_priv_obj {
 	struct   wlan_objmgr_vdev *vdev;
@@ -428,7 +430,18 @@ struct p2p_vdev_priv_obj {
 	uint8_t prev_action_frame_addr2[QDF_MAC_ADDR_SIZE];
 
 	struct p2p_ap_assist_dfs_group_info ap_assist_dfs;
+#ifdef FEATURE_P2P_LISTEN_OFFLOAD
+	qdf_spinlock_t sta_mon_lo_lock;
+	bool sta_mon_lo_active;
+#endif
 };
+
+#ifdef FEATURE_P2P_LISTEN_OFFLOAD
+/* Caller holds submission admission; successful START retains an update. */
+QDF_STATUS p2p_sta_mon_lo_begin(struct wlan_objmgr_vdev *vdev);
+/* Only failed START submission or a firmware LO_STOPPED event proves this. */
+void p2p_sta_mon_lo_end(struct wlan_objmgr_vdev *vdev);
+#endif
 
 /**
  * struct p2p_noa_attr - p2p noa attribute

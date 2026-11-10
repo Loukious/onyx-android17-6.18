@@ -43,6 +43,7 @@
 #include "nan_datapath.h"
 #include "wlan_reg_services_api.h"
 #include "wma.h"
+#include "wlan_mlme_sta_mon.h"
 #include "wlan_pkt_capture_ucfg_api.h"
 #include "wlan_lmac_if_def.h"
 #include <lim_mlo.h>
@@ -3458,6 +3459,22 @@ void lim_process_switch_channel_rsp(struct mac_context *mac,
 		lim_check_conc_power_for_csa(mac, pe_session);
 		break;
 	case LIM_SWITCH_CHANNEL_MONITOR:
+		if (QDF_IS_STATUS_SUCCESS(status) &&
+		    wlan_mlme_sta_mon_handoff_restarting(mac->psoc,
+							pe_session->vdev_id)) {
+			struct vdev_mlme_obj *mlme =
+				wlan_vdev_mlme_get_cmpt_obj(pe_session->vdev);
+
+			/* No associated-STA/TPE power lease survives this handoff.
+			 * WMA has installed the actual START channel and power limits.
+			 * Cache only the newly calculated, successfully sent table.
+			 */
+			if (mlme) {
+				qdf_mem_zero(&mlme->reg_tpc_obj,
+					     sizeof(mlme->reg_tpc_obj));
+				lim_set_tpc_power(mac, pe_session, NULL);
+			}
+		}
 		lim_handle_mon_switch_channel_rsp(pe_session, status);
 		/*
 		 * If MCC upgrade/DBS downgrade happened during channel switch,

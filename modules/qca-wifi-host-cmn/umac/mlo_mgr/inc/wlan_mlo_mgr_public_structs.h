@@ -1715,10 +1715,12 @@ struct mlo_link_set_active_ctx {
  * struct mlo_link_set_active_req - MLO link set active request
  * @ctx: context for MLO link set active request
  * @param: MLO link set active params
+ * @sta_mon_fw_pending: A sent command still lacks a real firmware response
  */
 struct mlo_link_set_active_req {
 	struct mlo_link_set_active_ctx ctx;
 	struct mlo_link_set_active_param param;
+	bool sta_mon_fw_pending;
 };
 
 /**

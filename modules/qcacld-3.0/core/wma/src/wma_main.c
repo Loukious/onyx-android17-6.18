@@ -97,6 +97,8 @@
 #include "wlan_cp_stats_mc_ucfg_api.h"
 #include "cfg_nan_api.h"
 #include "wlan_mlme_api.h"
+#include "wlan_mlme_sta_mon.h"
+#include <linux/spinlock.h>
 #include "wlan_mlme_ucfg_api.h"
 #include "cfg_ucfg_api.h"
 #include "init_cmd_api.h"
@@ -129,6 +131,40 @@
 
 #define WMA_LOG_COMPLETION_TIMER 500 /* 500 msecs */
 #define WMI_TLV_HEADROOM 128
+
+/* No WMI command or response wait is made while this lock is held. */
+static DEFINE_SPINLOCK(wma_sta_mon_radio_lock);
+
+static bool wma_sta_mon_radio_begin(tp_wma_handle wma, bool *pending)
+{
+	bool admitted = false;
+
+	if (!wlan_mlme_sta_mon_admission_begin(wma->psoc))
+		return false;
+	spin_lock_bh(&wma_sta_mon_radio_lock);
+	if (!*pending) {
+		wlan_mlme_sta_mon_update_begin(wma->psoc);
+		*pending = true;
+		admitted = true;
+	}
+	spin_unlock_bh(&wma_sta_mon_radio_lock);
+	wlan_mlme_sta_mon_admission_end(wma->psoc);
+
+	return admitted;
+}
+
+/* Only a real response or a failed send releases a firmware update.  A
+ * timeout, malformed event or shutdown cannot prove that firmware stopped.
+ */
+static void wma_sta_mon_radio_end(tp_wma_handle wma, bool *pending)
+{
+	spin_lock_bh(&wma_sta_mon_radio_lock);
+	if (*pending) {
+		*pending = false;
+		wlan_mlme_sta_mon_update_end(wma->psoc);
+	}
+	spin_unlock_bh(&wma_sta_mon_radio_lock);
+}
 
 static uint32_t g_fw_wlan_feat_caps;
 extern int curr_con_mode;
@@ -1033,6 +1069,14 @@ int wma_cli_set2_command(int vdev_id, int param_id, uint32_t sval1,
 	struct scheduler_msg msg = { 0 };
 	wma_cli_set_cmd_t *iwcmd;
 
+	if (vpdev == VDEV_CMD && param_id == wmi_vdev_param_nth_beacon_to_host) {
+		/* VDEV commands otherwise ignore the second value. Bind this
+		 * queued request to its original firmware vdev lifetime.
+		 */
+		sval2 = wma_sta_mon_beacon_cookie(vdev_id);
+		if (!sval2)
+			return -ENODEV;
+	}
 	iwcmd = qdf_mem_malloc(sizeof(*iwcmd));
 	if (!iwcmd)
 		return -ENOMEM;
@@ -1423,7 +1467,13 @@ static __always_inline void wma_process_cli_set_cmd(tp_wma_handle wma,
 
 		wma_debug("vdev id %d pid %d pval %d", privcmd->param_vdev_id,
 			 privcmd->param_id, privcmd->param_value);
-		ret = wma_vdev_set_param(wma->wmi_handle,
+		if (privcmd->param_id == wmi_vdev_param_nth_beacon_to_host)
+			ret = wma_sta_mon_beacon_set_param(wma->wmi_handle,
+					privcmd->param_vdev_id,
+					privcmd->param_value,
+					privcmd->param_sec_value);
+		else
+			ret = wma_vdev_set_param(wma->wmi_handle,
 						      privcmd->param_vdev_id,
 						      privcmd->param_id,
 						      privcmd->param_value);
@@ -3872,6 +3922,8 @@ QDF_STATUS wma_open(struct wlan_objmgr_psoc *psoc,
 	wma_handle->tgt_cfg_update_cb = tgt_cfg_cb;
 	wma_handle->old_hw_mode_index = WMA_DEFAULT_HW_MODE_INDEX;
 	wma_handle->new_hw_mode_index = WMA_DEFAULT_HW_MODE_INDEX;
+	wma_handle->sta_mon_hw_mode_pending = false;
+	wma_handle->sta_mon_dual_mac_pending = false;
 	wma_handle->saved_chan.num_channels = 0;
 	wma_handle->fw_timeout_crash = cds_cfg->fw_timeout_crash;
 
@@ -4155,6 +4207,8 @@ QDF_STATUS wma_open(struct wlan_objmgr_psoc *psoc,
 	wma_set_exclude_selftx_from_cca_busy_time(
 			cds_cfg->exclude_selftx_from_cca_busy,
 			wma_handle);
+	/* Publish the beacon sidecar only after all fallible open setup. */
+	wma_sta_mon_beacon_init(wma_handle);
 	return QDF_STATUS_SUCCESS;
 
 err_dbglog_init:
@@ -4363,7 +4417,7 @@ static int wma_log_supported_evt_handler(void *handle,
  *
  * Return: QDF_STATUS
  */
-static int wma_pdev_set_hw_mode_resp_evt_handler(void *handle,
+static int wma_pdev_set_hw_mode_resp_evt_process(void *handle,
 		uint8_t *event,
 		uint32_t len)
 {
@@ -4393,7 +4447,7 @@ static int wma_pdev_set_hw_mode_resp_evt_handler(void *handle,
 	}
 
 	param_buf = (WMI_PDEV_SET_HW_MODE_RESP_EVENTID_param_tlvs *) event;
-	if (!param_buf) {
+	if (!param_buf || !param_buf->fixed_param) {
 		wma_err("Invalid WMI_PDEV_SET_HW_MODE_RESP_EVENTID event");
 		/* Need to send response back to upper layer to free
 		 * active command list
@@ -4465,6 +4519,7 @@ static int wma_pdev_set_hw_mode_resp_evt_handler(void *handle,
 	wma_debug("Updated: old_hw_mode_index:%d new_hw_mode_index:%d",
 		 wma->old_hw_mode_index, wma->new_hw_mode_index);
 
+	wma_sta_mon_radio_end(wma, &wma->sta_mon_hw_mode_pending);
 	wma_send_msg(wma, SIR_HAL_PDEV_SET_HW_MODE_RESP,
 		     (void *) hw_mode_resp, 0);
 
@@ -4479,6 +4534,21 @@ fail:
 			(void *) hw_mode_resp, 0);
 
 	return QDF_STATUS_E_FAILURE;
+}
+
+static int wma_pdev_set_hw_mode_resp_evt_handler(void *handle,
+		uint8_t *event, uint32_t len)
+{
+	tp_wma_handle wma = handle;
+	int status;
+
+	if (wma_validate_handle(wma))
+		return QDF_STATUS_E_NULL_VALUE;
+	wlan_mlme_sta_mon_update_begin(wma->psoc);
+	status = wma_pdev_set_hw_mode_resp_evt_process(handle, event, len);
+	wlan_mlme_sta_mon_update_end(wma->psoc);
+
+	return status;
 }
 
 /**
@@ -4502,11 +4572,13 @@ void wma_process_pdev_hw_mode_trans_ind(void *handle,
 	uint32_t i;
 	tp_wma_handle wma = (tp_wma_handle) handle;
 
+	wlan_mlme_sta_mon_update_begin(wma->psoc);
+
 	if (fixed_param->num_vdev_mac_entries > MAX_VDEV_SUPPORTED) {
 		wma_err("Number of Vdev mac entries %d exceeded max vdev supported %d",
 			fixed_param->num_vdev_mac_entries,
 			MAX_VDEV_SUPPORTED);
-		return;
+		goto out;
 	}
 	hw_mode_trans_ind->old_hw_mode_index = fixed_param->old_hw_mode_index;
 	hw_mode_trans_ind->new_hw_mode_index = fixed_param->new_hw_mode_index;
@@ -4527,12 +4599,12 @@ void wma_process_pdev_hw_mode_trans_ind(void *handle,
 
 		if (pdev_id == OL_TXRX_PDEV_ID) {
 			wma_err("soc level id received for mac id");
-			return;
+			goto out;
 		}
 		if (vdev_id >= wma->max_bssid) {
 			wma_err("vdev_id: %d is invalid, max_bssid: %d",
 			        vdev_id, wma->max_bssid);
-			return;
+			goto out;
 		}
 
 		mac_id = WMA_PDEV_TO_MAC_MAP(vdev_mac_entry[i].pdev_id);
@@ -4548,6 +4620,8 @@ update_hw_mode:
 		fixed_param->new_hw_mode_index);
 	policy_mgr_update_old_hw_mode_index(wma->psoc,
 		fixed_param->old_hw_mode_index);
+out:
+	wlan_mlme_sta_mon_update_end(wma->psoc);
 }
 
 static void
@@ -4594,7 +4668,7 @@ wma_process_mac_freq_mapping(struct cm_hw_mode_trans_ind *hw_mode_trans_ind,
  *
  * Return: Success on receiving valid params from FW
  */
-static int wma_pdev_hw_mode_transition_evt_handler(void *handle,
+static int wma_pdev_hw_mode_transition_evt_process(void *handle,
 		uint8_t *event,
 		uint32_t len)
 {
@@ -4610,7 +4684,7 @@ static int wma_pdev_hw_mode_transition_evt_handler(void *handle,
 	}
 
 	param_buf = (WMI_PDEV_HW_MODE_TRANSITION_EVENTID_param_tlvs *) event;
-	if (!param_buf) {
+	if (!param_buf || !param_buf->fixed_param) {
 		/* This is an async event. So, not sending any event to LIM */
 		wma_err("Invalid WMI_PDEV_HW_MODE_TRANSITION_EVENTID event");
 		return QDF_STATUS_E_FAILURE;
@@ -4671,6 +4745,21 @@ static int wma_pdev_hw_mode_transition_evt_handler(void *handle,
 	return QDF_STATUS_SUCCESS;
 }
 
+static int wma_pdev_hw_mode_transition_evt_handler(void *handle,
+		uint8_t *event, uint32_t len)
+{
+	tp_wma_handle wma = handle;
+	int status;
+
+	if (wma_validate_handle(wma))
+		return QDF_STATUS_E_NULL_VALUE;
+	wlan_mlme_sta_mon_update_begin(wma->psoc);
+	status = wma_pdev_hw_mode_transition_evt_process(handle, event, len);
+	wlan_mlme_sta_mon_update_end(wma->psoc);
+
+	return status;
+}
+
 /**
  * wma_pdev_set_dual_mode_config_resp_evt_handler() - Dual mode evt handler
  * @handle: WMI handle
@@ -4685,7 +4774,7 @@ static int wma_pdev_hw_mode_transition_evt_handler(void *handle,
  *
  * Return: Success on receiving valid params from FW
  */
-static int wma_pdev_set_dual_mode_config_resp_evt_handler(void *handle,
+static int wma_pdev_set_dual_mode_config_resp_evt_process(void *handle,
 		uint8_t *event,
 		uint32_t len)
 {
@@ -4712,7 +4801,7 @@ static int wma_pdev_set_dual_mode_config_resp_evt_handler(void *handle,
 
 	param_buf = (WMI_PDEV_SET_MAC_CONFIG_RESP_EVENTID_param_tlvs *)
 		event;
-	if (!param_buf) {
+	if (!param_buf || !param_buf->fixed_param) {
 		wma_err("Invalid event");
 		goto fail;
 	}
@@ -4726,6 +4815,7 @@ static int wma_pdev_set_dual_mode_config_resp_evt_handler(void *handle,
 		policy_mgr_update_dbs_fw_config(wma->psoc);
 	}
 
+	wma_sta_mon_radio_end(wma, &wma->sta_mon_dual_mac_pending);
 	/* Pass the message to PE */
 	wma_send_msg(wma, SIR_HAL_PDEV_MAC_CFG_RESP,
 			(void *) dual_mac_cfg_resp, 0);
@@ -4740,6 +4830,21 @@ fail:
 
 	return QDF_STATUS_E_FAILURE;
 
+}
+
+static int wma_pdev_set_dual_mode_config_resp_evt_handler(void *handle,
+		uint8_t *event, uint32_t len)
+{
+	tp_wma_handle wma = handle;
+	int status;
+
+	if (wma_validate_handle(wma))
+		return QDF_STATUS_E_NULL_VALUE;
+	wlan_mlme_sta_mon_update_begin(wma->psoc);
+	status = wma_pdev_set_dual_mode_config_resp_evt_process(handle, event, len);
+	wlan_mlme_sta_mon_update_end(wma->psoc);
+
+	return status;
 }
 
 #ifdef WLAN_CONV_SPECTRAL_ENABLE
@@ -5077,6 +5182,7 @@ QDF_STATUS wma_wmi_service_close(void)
 
 	/* detach the wmi service */
 	wma_debug("calling wmi_unified_detach");
+	wma_sta_mon_beacon_deinit(wma_handle);
 	wmi_unified_detach(wmi_handle);
 	wma_handle->wmi_handle = NULL;
 
@@ -10245,10 +10351,15 @@ QDF_STATUS wma_send_pdev_set_hw_mode_cmd(tp_wma_handle wma_handle,
 		goto fail;
 	}
 
+	if (!wma_sta_mon_radio_begin(wma_handle,
+				    &wma_handle->sta_mon_hw_mode_pending))
+		goto fail;
 	wma_acquire_wakelock(&wma_handle->wmi_cmd_rsp_wake_lock,
 			     WMA_VDEV_HW_MODE_REQUEST_TIMEOUT);
 	if (wmi_unified_soc_set_hw_mode_cmd(wma_handle->wmi_handle,
 					    msg->hw_mode_index)) {
+		wma_sta_mon_radio_end(wma_handle,
+				       &wma_handle->sta_mon_hw_mode_pending);
 		wma_release_wakelock(&wma_handle->wmi_cmd_rsp_wake_lock);
 		goto fail;
 	}
@@ -10300,13 +10411,18 @@ QDF_STATUS wma_send_pdev_set_dual_mac_config(tp_wma_handle wma_handle,
 		return QDF_STATUS_E_NULL_VALUE;
 	}
 
+	if (!wma_sta_mon_radio_begin(wma_handle,
+				    &wma_handle->sta_mon_dual_mac_pending))
+		goto fail;
 	req_msg = wma_fill_hold_req(wma_handle, 0,
 				    SIR_HAL_PDEV_DUAL_MAC_CFG_REQ,
 				    WMA_PDEV_MAC_CFG_RESP, NULL, NULL,
 				    WMA_VDEV_DUAL_MAC_CFG_TIMEOUT);
 	if (!req_msg) {
 		wma_err("Failed to allocate request for SIR_HAL_PDEV_DUAL_MAC_CFG_REQ");
-		return QDF_STATUS_E_FAILURE;
+		wma_sta_mon_radio_end(wma_handle,
+				       &wma_handle->sta_mon_dual_mac_pending);
+		goto fail;
 	}
 
 	/*
@@ -10319,6 +10435,8 @@ QDF_STATUS wma_send_pdev_set_dual_mac_config(tp_wma_handle wma_handle,
 				wma_handle->wmi_handle,
 				(struct policy_mgr_dual_mac_config *)msg);
 	if (QDF_IS_STATUS_ERROR(status)) {
+		wma_sta_mon_radio_end(wma_handle,
+				       &wma_handle->sta_mon_dual_mac_pending);
 		wma_err("Failed to send WMI_PDEV_SET_DUAL_MAC_CONFIG_CMDID: %d",
 			status);
 		wma_release_wakelock(&wma_handle->wmi_cmd_rsp_wake_lock);
@@ -10360,6 +10478,7 @@ QDF_STATUS wma_send_pdev_set_antenna_mode(tp_wma_handle wma_handle,
 	uint32_t len;
 	QDF_STATUS status = QDF_STATUS_SUCCESS;
 	struct sir_antenna_mode_resp *param;
+	bool admitted;
 
 	if (wma_validate_handle(wma_handle))
 		return QDF_STATUS_E_NULL_VALUE;
@@ -10369,6 +10488,11 @@ QDF_STATUS wma_send_pdev_set_antenna_mode(tp_wma_handle wma_handle,
 		return QDF_STATUS_E_NULL_VALUE;
 	}
 
+	admitted = wlan_mlme_sta_mon_admission_begin(wma_handle->psoc);
+	if (!admitted) {
+		status = QDF_STATUS_E_BUSY;
+		goto resp;
+	}
 	len = sizeof(*cmd);
 
 	buf = wmi_buf_alloc(wma_handle->wmi_handle, len);
@@ -10401,6 +10525,8 @@ QDF_STATUS wma_send_pdev_set_antenna_mode(tp_wma_handle wma_handle,
 	status = QDF_STATUS_SUCCESS;
 
 resp:
+	if (admitted)
+		wlan_mlme_sta_mon_admission_end(wma_handle->psoc);
 	param = qdf_mem_malloc(sizeof(*param));
 	if (!param)
 		return QDF_STATUS_E_NOMEM;

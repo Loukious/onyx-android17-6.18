@@ -61,6 +61,16 @@
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 extern bool wma_injection_dp_complete(void *wma_context, qdf_nbuf_t nbuf,
 				      int32_t status);
+extern void wma_injection_dp_release(qdf_nbuf_t nbuf, uint8_t slot_index);
+
+/*
+ * Software-only retirement metadata in the unused high descriptor flag bits.
+ * Set after DMA unmap and consume only after returning the descriptor to its
+ * pool. The skb may already be freed then, so never read its control buffer.
+ */
+#define DP_TX_DESC_FLAG_INJECTION_RETIRED 0x400000U
+#define DP_TX_DESC_INJECTION_SLOT_SHIFT 24
+#define DP_TX_DESC_INJECTION_SLOT_MASK 0xff000000U
 #endif
 
 /* Flag to skip CCE classify when mesh or tid override enabled */
@@ -424,6 +434,10 @@ dp_tx_desc_release(struct dp_soc *soc, struct dp_tx_desc_s *tx_desc,
 {
 	struct dp_pdev *pdev = tx_desc->pdev;
 	uint8_t comp_status = 0;
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	uint32_t injection_flags = tx_desc->flags;
+	qdf_nbuf_t injection_nbuf = tx_desc->nbuf;
+#endif
 
 	if (dp_tx_release_ds_tx_desc(soc, tx_desc, desc_pool_id))
 		return;
@@ -465,6 +479,12 @@ dp_tx_desc_release(struct dp_soc *soc, struct dp_tx_desc_s *tx_desc,
 		dp_tx_spcl_desc_free(soc, tx_desc, desc_pool_id);
 	else
 		dp_tx_desc_free(soc, tx_desc, desc_pool_id);
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (injection_flags & DP_TX_DESC_FLAG_INJECTION_RETIRED)
+		wma_injection_dp_release(injection_nbuf,
+			(injection_flags & DP_TX_DESC_INJECTION_SLOT_MASK) >>
+			DP_TX_DESC_INJECTION_SLOT_SHIFT);
+#endif
 	return;
 }
 
@@ -3367,12 +3387,6 @@ qdf_nbuf_t dp_tx_comp_free_buf(struct dp_soc *soc, struct dp_tx_desc_s *desc,
 
 	if (!dp_tdls_tx_comp_free_buff(soc, desc))
 		return NULL;
-
-#ifdef FEATURE_FRAME_INJECTION_SUPPORT
-	if (cdp_nbuf_is_injection(nbuf))
-		wma_injection_dp_complete(NULL, nbuf, -ENODATA);
-#endif
-
 	/* 0 : MSDU buffer, 1 : MLE */
 	if (desc->msdu_ext_desc) {
 		/* TSO free */
@@ -3429,6 +3443,15 @@ qdf_nbuf_t dp_tx_comp_free_buf(struct dp_soc *soc, struct dp_tx_desc_s *desc,
 		return NULL;
 
 nbuf_free:
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (cdp_nbuf_is_injection(nbuf)) {
+		uint8_t slot_index = QDF_NBUF_CB_MGMT_TXRX_DESC_ID(nbuf);
+
+		desc->flags &= ~DP_TX_DESC_INJECTION_SLOT_MASK;
+		desc->flags |= DP_TX_DESC_FLAG_INJECTION_RETIRED |
+			((uint32_t)slot_index << DP_TX_DESC_INJECTION_SLOT_SHIFT);
+	}
+#endif
 	if (delayed_free)
 		return nbuf;
 
@@ -4938,6 +4961,13 @@ void dp_tx_reinject_handler(struct dp_soc *soc,
 
 	qdf_assert(vdev);
 
+	/* RAW injection has no stack or WDS reinjection owner. */
+	if (cdp_nbuf_is_injection(nbuf)) {
+		dp_tx_comp_free_buf(soc, tx_desc, false);
+		dp_tx_desc_release(soc, tx_desc, tx_desc->pool_id);
+		return;
+	}
+
 	dp_tx_debug("Tx reinject path");
 
 	DP_STATS_INC_PKT(vdev, tx_i[xmit_type].reinject_pkts, 1,
@@ -5048,6 +5078,13 @@ void dp_tx_inspect_handler(struct dp_soc *soc,
 			   uint8_t *status)
 {
 	uint8_t xmit_type = qdf_nbuf_get_vdev_xmit_type(tx_desc->nbuf);
+
+	if (cdp_nbuf_is_injection(tx_desc->nbuf)) {
+		dp_tx_comp_free_buf(soc, tx_desc, false);
+		dp_tx_desc_release(soc, tx_desc, tx_desc->pool_id);
+		return;
+	}
+
 	QDF_TRACE(QDF_MODULE_ID_DP, QDF_TRACE_LEVEL_INFO,
 			"%s Tx inspect path",
 			__func__);
@@ -6202,6 +6239,12 @@ dp_tx_comp_process_desc(struct dp_soc *soc,
 	uint64_t time_latency = 0;
 	uint16_t peer_id = DP_INVALID_PEER_ID;
 
+	/* Keep the RAW skb on the owned unmap/free/descriptor-release path. */
+	if (cdp_nbuf_is_injection(desc->nbuf)) {
+		desc->flags |= DP_TX_DESC_FLAG_COMPLETED_TX;
+		return;
+	}
+
 	/*
 	 * m_copy/tx_capture modes are not supported for
 	 * scatter gather packets
@@ -6817,6 +6860,9 @@ dp_tx_mcast_reinject_handler(struct dp_soc *soc, struct dp_tx_desc_s *desc)
 {
 	struct dp_vdev *vdev = NULL;
 	uint8_t xmit_type;
+
+	if (cdp_nbuf_is_injection(desc->nbuf))
+		return false;
 
 	if (desc->tx_status == HAL_TX_TQM_RR_MULTICAST_DROP) {
 		if (!soc->arch_ops.dp_tx_mcast_handler ||

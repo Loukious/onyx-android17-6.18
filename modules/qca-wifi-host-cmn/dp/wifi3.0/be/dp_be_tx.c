@@ -27,6 +27,8 @@
 #include <hal_be_tx.h>
 #include <dp_htt.h>
 #include "dp_internal.h"
+#include "dp_mon.h"
+#include "cdp_txrx_injection.h"
 #ifdef FEATURE_WDS
 #include "dp_txrx_wds.h"
 #endif
@@ -1630,6 +1632,15 @@ dp_tx_hw_enqueue_be(struct dp_soc *soc, struct dp_vdev *vdev,
 	uint16_t ast_idx = vdev->bss_ast_idx;
 	uint16_t ast_hash = vdev->bss_ast_hash;
 	uint32_t hp;
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	struct cdp_injection_tx_guard injection_guard = {0};
+	bool sta_coex_tx = cdp_nbuf_is_injection(tx_desc->nbuf) &&
+			   dp_mon_is_sta_coex(soc);
+	bool coex_publish = false;
+#ifdef FEATURE_RUNTIME_PM
+	bool coex_pm_held = false;
+#endif
+#endif
 
 	be_vdev = dp_get_be_vdev_from_dp_vdev(vdev);
 
@@ -1725,6 +1736,40 @@ dp_tx_hw_enqueue_be(struct dp_soc *soc, struct dp_vdev *vdev,
 		return status;
 	}
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (sta_coex_tx) {
+		/* Do not leave a generation-checked packet pending a later wake. */
+		if (hif_system_pm_state_check(soc->hif_handle)) {
+			status = QDF_STATUS_E_AGAIN;
+			goto ring_access_fail;
+		}
+#ifdef FEATURE_RUNTIME_PM
+		if (QDF_IS_STATUS_ERROR(hif_rtpm_get(HIF_RTPM_GET_ASYNC,
+						   HIF_RTPM_ID_DP))) {
+			status = QDF_STATUS_E_AGAIN;
+			goto ring_access_fail;
+		}
+		coex_pm_held = true;
+#endif
+		if (hif_system_pm_state_check(soc->hif_handle)) {
+			status = QDF_STATUS_E_AGAIN;
+			goto ring_access_fail;
+		}
+		coex_publish = true;
+	}
+	if (cdp_nbuf_is_injection(tx_desc->nbuf) &&
+	    !wma_injection_tx_begin(tx_desc->nbuf, &injection_guard)) {
+		status = QDF_STATUS_E_AGAIN;
+		goto ring_access_fail;
+	}
+	if (injection_guard.held && !coex_publish) {
+		/* A live helper token must never use deferred HP publication. */
+		wma_injection_tx_end(&injection_guard);
+		status = QDF_STATUS_E_AGAIN;
+		goto ring_access_fail;
+	}
+#endif
+
 	hal_tx_desc = hal_srng_src_get_next(soc->hal_soc, hal_ring_hdl);
 	if (qdf_unlikely(!hal_tx_desc)) {
 		dp_verbose_debug("TCL ring full ring_id:%d", ring_id);
@@ -1765,7 +1810,19 @@ dp_tx_hw_enqueue_be(struct dp_soc *soc, struct dp_vdev *vdev,
 				 hal_ring_hdl, soc, ring_id);
 
 ring_access_fail:
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (coex_publish)
+		dp_tx_ring_access_end(soc, hal_ring_hdl, 0);
+	else
+#endif
 	dp_tx_ring_access_end_wrapper(soc, hal_ring_hdl, coalesce);
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	wma_injection_tx_end(&injection_guard);
+#ifdef FEATURE_RUNTIME_PM
+	if (coex_pm_held)
+		hif_rtpm_put(HIF_RTPM_PUT_ASYNC, HIF_RTPM_ID_DP);
+#endif
+#endif
 	dp_pkt_add_timestamp(vdev, QDF_PKT_TX_DRIVER_EXIT,
 			     qdf_get_log_timestamp(), tx_desc->nbuf);
 	return status;

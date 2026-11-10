@@ -1459,6 +1459,11 @@ dp_rx_process_rxdma_err(struct dp_soc *soc, qdf_nbuf_t nbuf,
 		return;
 	}
 
+#ifdef WIFI_MONITOR_SUPPORT
+	if (dp_mon_sta_coex_rx_exception(soc, vdev, nbuf, rx_tlv_hdr))
+		return;
+#endif
+
 	/*
 	 * Advance the packet start pointer by total size of
 	 * pre-header TLV's
@@ -1789,6 +1794,11 @@ dp_rx_err_route_hdl(struct dp_soc *soc, qdf_nbuf_t nbuf,
 		DP_STATS_INC(soc, rx.err.invalid_vdev, 1);
 		goto drop_nbuf;
 	}
+
+#ifdef WIFI_MONITOR_SUPPORT
+	if (dp_mon_sta_coex_rx_exception(soc, vdev, nbuf, rx_tlv_hdr))
+		return;
+#endif
 
 	/*
 	 * Advance the packet start pointer by total size of
@@ -3084,11 +3094,12 @@ static void dup_desc_dbg(struct dp_soc *soc,
  *
  * Return: number of msdu in MPDU to be popped
  */
-static inline uint32_t
+uint32_t
 dp_rx_err_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
 	hal_rxdma_desc_t rxdma_dst_ring_desc,
 	union dp_rx_desc_list_elem_t **head,
-	union dp_rx_desc_list_elem_t **tail)
+	union dp_rx_desc_list_elem_t **tail, bool report_stats,
+	bool mon_lock_held)
 {
 	void *rx_msdu_link_desc;
 	qdf_nbuf_t msdu;
@@ -3131,7 +3142,12 @@ dp_rx_err_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
 		rx_msdu_link_desc =
 			dp_rx_cookie_2_link_desc_va(soc, &buf_info);
 
-		qdf_assert_always(rx_msdu_link_desc);
+		if (qdf_unlikely(!rx_msdu_link_desc)) {
+			DP_STATS_INC(soc, rx.err.invalid_cookie, 1);
+			dp_rx_err_info_rl("RXDMA invalid link cookie 0x%x",
+					buf_info.sw_cookie);
+			break;
+		}
 
 		hal_rx_msdu_list_get(soc->hal_soc, rx_msdu_link_desc,
 				     &msdu_list, &num_msdus);
@@ -3153,12 +3169,20 @@ dp_rx_err_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
 			else {
 				for (i = 0; i < num_msdus; i++) {
 					qdf_dma_addr_t buf_paddr;
-					struct dp_rx_desc *rx_desc =
-						soc->arch_ops.
+					struct dp_rx_desc *rx_desc;
+
+					if (!dp_rx_is_sw_cookie_valid(soc,
+							msdu_list.sw_cookie[i]))
+						continue;
+					rx_desc = soc->arch_ops.
 						dp_rx_desc_cookie_2_va(
 							soc,
 							msdu_list.sw_cookie[i]);
-					qdf_assert_always(rx_desc);
+					if (qdf_unlikely(!rx_desc ||
+					    rx_desc->pool_id >= MAX_RXDESC_POOLS)) {
+						DP_STATS_INC(soc, rx.err.invalid_cookie, 1);
+						continue;
+					}
 					msdu = rx_desc->nbuf;
 					/*
 					 * this is a unlikely scenario
@@ -3207,6 +3231,14 @@ dp_rx_err_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
 					dp_rx_err_debug("%pK: msdu_nbuf=%pK ",
 							soc, msdu);
 
+#ifdef WIFI_MONITOR_SUPPORT
+					/* Observe only; preserve the original free/unmap owner. */
+					if (mon_lock_held)
+						dp_mon_sta_coex_copy_shared(soc, mac_id, msdu,
+							soc->rx_desc_buf[rx_desc->pool_id].buf_size,
+							msdu_list.msdu_info[i].msdu_flags,
+							rxdma_dst_ring_desc);
+#endif
 					dp_rx_buffer_pool_nbuf_free(soc, msdu,
 							rx_desc->pool_id);
 					rx_bufs_used++;
@@ -3234,9 +3266,11 @@ dp_rx_err_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
 						bm_action);
 	} while (buf_info.paddr);
 
-	DP_STATS_INC(soc, rx.err.rxdma_error[rxdma_error_code], 1);
-	if (pdev)
-		DP_STATS_INC(pdev, err.rxdma_error, 1);
+	if (report_stats) {
+		DP_STATS_INC(soc, rx.err.rxdma_error[rxdma_error_code], 1);
+		if (pdev)
+			DP_STATS_INC(pdev, err.rxdma_error, 1);
+	}
 
 	if (rxdma_error_code == HAL_RXDMA_ERR_DECRYPT) {
 		dp_rx_err_err("%pK: Packet received with Decrypt error", soc);
@@ -3263,6 +3297,12 @@ dp_rxdma_err_process(struct dp_intr *int_ctx, struct dp_soc *soc,
 	if (!pdev)
 		return 0;
 
+#if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
+	/* Monitor and normal errors have one owner while sharing this ring. */
+	if (dp_mon_is_sta_coex(soc))
+		return dp_rx_mon_shared_dest_process(soc, int_ctx, mac_id, quota);
+#endif
+
 	err_dst_srng = soc->rxdma_err_dst_ring[mac_id].hal_srng;
 
 	if (!err_dst_srng) {
@@ -3286,7 +3326,7 @@ dp_rxdma_err_process(struct dp_intr *int_ctx, struct dp_soc *soc,
 
 			rx_bufs_used += dp_rx_err_mpdu_pop(soc, mac_id,
 						rxdma_dst_ring_desc,
-						&head, &tail);
+						&head, &tail, true, false);
 	}
 
 	dp_srng_access_end(int_ctx, soc, err_dst_srng);

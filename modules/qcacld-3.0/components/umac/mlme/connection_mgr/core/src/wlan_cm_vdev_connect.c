@@ -21,6 +21,7 @@
  */
 
 #include "wlan_cm_vdev_api.h"
+#include "wlan_mlme_sta_mon.h"
 #include "wlan_scan_utils_api.h"
 #include "wlan_mlme_dbg.h"
 #include "wlan_cm_api.h"
@@ -1064,9 +1065,12 @@ QDF_STATUS cm_connect_start_ind(struct wlan_objmgr_vdev *vdev,
 		return QDF_STATUS_E_INVAL;
 	}
 
+	wlan_mlme_sta_mon_invalidate(psoc, WLAN_INVALID_VDEV_ID);
 	if (!wlan_dp_is_local_pkt_capture_active(psoc) &&
-	    policy_mgr_is_sta_mon_concurrency(psoc))
-		return QDF_STATUS_E_NOSUPPORT;
+	    policy_mgr_is_sta_mon_concurrency(psoc) &&
+	    !wlan_mlme_sta_mon_can_connect(psoc))
+		return wlan_mlme_sta_mon_needs_stop(psoc) ?
+			QDF_STATUS_E_BUSY : QDF_STATUS_E_NOSUPPORT;
 
 	rso_cfg = wlan_cm_get_rso_config(vdev);
 	if (rso_cfg) {

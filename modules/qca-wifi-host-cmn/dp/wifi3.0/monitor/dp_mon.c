@@ -40,6 +40,7 @@
 #include "dp_lite_mon.h"
 #endif
 #include "dp_mon_1.0.h"
+#include "cdp_txrx_mon.h"
 #ifdef WLAN_FEATURE_LOCAL_PKT_CAPTURE
 #include "dp_mon_2.0.h"
 #include "dp_mon_filter_2.0.h"
@@ -47,6 +48,130 @@
 
 #define DP_INTR_POLL_TIMER_MS	5
 #define INVALID_FREE_BUFF 0xffffffff
+
+#if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
+bool dp_mon_sta_coex_supported(struct cdp_soc_t *soc_hdl)
+{
+	/* Shared nbufs require restitch metadata saved from the final scatter. */
+#if defined(QCA_WIFI_WCN7750) && defined(CONFIG_4_BYTES_TLV_TAG) && \
+	defined(CONFIG_WORD_BASED_TLV) && defined(BE_NON_AP_COMPACT_TLV) && \
+	defined(QCA_WIFI_MONITOR_MODE_NO_MSDU_START_TLV_SUPPORT) && \
+	!defined(DP_RX_MON_MEM_FRAG)
+	struct dp_soc *soc;
+
+	if (!soc_hdl)
+		return false;
+
+	soc = cdp_soc_t_to_dp_soc(soc_hdl);
+	return soc->monitor_soc && !soc->monitor_soc->full_mon_mode &&
+		!soc->wlan_cfg_ctx->rxdma1_enable &&
+		soc->arch_ops.dp_rxdma_ring_sel_cfg &&
+		hal_rx_mon_shared_tlv_supported(soc->hal_soc) &&
+		hal_get_target_type(soc->hal_soc) == TARGET_TYPE_WCN7750 &&
+		soc->rx_pkt_tlv_size == soc->rx_mon_pkt_tlv_size;
+#else
+	return false;
+#endif
+}
+
+void dp_mon_set_sta_coex(struct cdp_soc_t *soc_hdl, bool enabled)
+{
+	struct dp_soc *soc;
+
+	if (!soc_hdl)
+		return;
+
+	soc = cdp_soc_t_to_dp_soc(soc_hdl);
+	if (enabled && dp_mon_sta_coex_supported(soc_hdl))
+		dp_mon_update_private_flags(soc, 0, QDF_MONITOR_FLAG_STA_COEX);
+	else
+		dp_mon_update_private_flags(soc, DP_MON_FLAGS_PRIVATE, 0);
+}
+
+void dp_mon_sta_coex_pause(struct cdp_soc_t *soc_hdl)
+{
+	struct dp_soc *soc;
+
+	if (!soc_hdl)
+		return;
+
+	soc = cdp_soc_t_to_dp_soc(soc_hdl);
+	/* No HTT command or allocation in the connection-state callback. */
+	dp_mon_update_private_flags(soc, 0, DP_MON_FLAG_STA_COEX_PAUSED);
+}
+
+/* Caller holds the control publication guard; no nested lock or firmware call. */
+void dp_mon_sta_coex_unpause(struct cdp_soc_t *soc_hdl)
+{
+	struct dp_soc *soc = cdp_soc_t_to_dp_soc(soc_hdl);
+
+	if (soc && dp_mon_is_sta_coex(soc))
+		dp_mon_update_private_flags(soc, DP_MON_FLAG_STA_COEX_PAUSED, 0);
+}
+
+QDF_STATUS dp_mon_sta_coex_rebind(struct cdp_soc_t *soc_hdl,
+				 uint8_t monitor_id, uint8_t mac_id,
+				 uint32_t frequency)
+{
+	struct dp_soc *soc = cdp_soc_t_to_dp_soc(soc_hdl);
+	struct dp_vdev *vdev;
+	struct dp_pdev *pdev;
+	struct dp_mon_mac *mon_mac;
+	uint8_t i;
+	QDF_STATUS status = QDF_STATUS_E_INVAL;
+
+	if (!soc || !dp_mon_is_sta_coex(soc) ||
+	    !dp_mon_sta_coex_is_paused(soc) || mac_id >= MAX_NUM_LMAC_HW)
+		return status;
+	vdev = dp_vdev_get_ref_by_id(soc, monitor_id, DP_MOD_ID_CDP);
+	if (!vdev)
+		return status;
+	pdev = vdev->pdev;
+	if (!pdev || !pdev->monitor_pdev || !vdev->monitor_vdev ||
+	    vdev->opmode != wlan_op_mode_monitor || vdev->lmac_id != mac_id ||
+	    vdev->monitor_vdev->mon_chan_freq != frequency ||
+	    vdev->monitor_vdev->mon_chan_num == INVALID_MON_CHAN_NUM ||
+	    !pdev->monitor_pdev->monitor_configured)
+		goto out;
+	/* The old helper's RCU binding has already drained. The locks complete
+	 * prior monitor callbacks; no nbuf, descriptor or DMA mapping is freed.
+	 */
+	for (i = 0; i < MAX_NUM_LMAC_HW; i++) {
+		mon_mac = dp_get_mon_mac(pdev, i);
+		qdf_spin_lock_bh(&mon_mac->mon_lock);
+		if (mon_mac->mvdev == vdev) {
+			mon_mac->mvdev = NULL;
+			mon_mac->vdev_id = DP_INVALID_VDEV_ID;
+			mon_mac->mon_chan_freq = 0;
+			mon_mac->mon_chan_num = INVALID_MON_CHAN_NUM;
+			mon_mac->mon_chan_band = REG_BAND_UNKNOWN;
+		}
+		qdf_spin_unlock_bh(&mon_mac->mon_lock);
+	}
+	mon_mac = dp_get_mon_mac(pdev, mac_id);
+	qdf_spin_lock_bh(&mon_mac->mon_lock);
+	if (dp_mon_sta_coex_is_paused(soc) &&
+	    READ_ONCE(vdev->lmac_id) == mac_id &&
+	    vdev->monitor_vdev->mon_chan_freq == frequency &&
+	    (!mon_mac->mvdev || mon_mac->mvdev == vdev)) {
+		/* Use the captured target protected by this lock. The generic map
+		 * helper reselects from vdev->lmac_id and may choose another lock
+		 * if an unrelated firmware migration races this aborted handoff.
+		 */
+		mon_mac->vdev_id = monitor_id;
+		mon_mac->mac_id = mac_id;
+		mon_mac->mvdev = vdev;
+		mon_mac->mon_chan_band = vdev->monitor_vdev->mon_chan_band;
+		mon_mac->mon_chan_freq = frequency;
+		mon_mac->mon_chan_num = vdev->monitor_vdev->mon_chan_num;
+		status = QDF_STATUS_SUCCESS;
+	}
+	qdf_spin_unlock_bh(&mon_mac->mon_lock);
+out:
+	dp_vdev_unref_delete(soc, vdev, DP_MOD_ID_CDP);
+	return status;
+}
+#endif
 
 #ifdef WLAN_RX_PKT_CAPTURE_ENH
 #include "dp_rx_mon_feature.h"
@@ -258,6 +383,8 @@ QDF_STATUS dp_reset_monitor_mode_unlock(struct cdp_soc_t *soc_hdl,
 		return QDF_STATUS_E_FAILURE;
 
 	mon_pdev = pdev->monitor_pdev;
+	if (dp_mon_is_sta_coex(soc))
+		dp_mon_update_private_flags(soc, 0, DP_MON_FLAG_STA_COEX_PAUSED);
 
 	cdp_ops = dp_mon_cdp_ops_get(soc);
 	if (cdp_ops  && cdp_ops->soc_config_full_mon_mode) {
@@ -311,7 +438,7 @@ QDF_STATUS dp_reset_monitor_mode_unlock(struct cdp_soc_t *soc_hdl,
 
 	mon_pdev->monitor_configured = false;
 
-	return QDF_STATUS_SUCCESS;
+	return status;
 }
 
 QDF_STATUS

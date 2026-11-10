@@ -23,6 +23,7 @@
  * Implementation for the FW based roaming events api interfaces.
  */
 #include "qdf_status.h"
+#include "wlan_mlme_sta_mon.h"
 #include "wlan_objmgr_psoc_obj.h"
 #include "wlan_objmgr_pdev_obj.h"
 #include "wlan_objmgr_vdev_obj.h"
@@ -211,6 +212,8 @@ QDF_STATUS cm_fw_roam_start_req(struct wlan_objmgr_psoc *psoc, uint8_t vdev_id)
 {
 	QDF_STATUS status;
 	struct wlan_objmgr_vdev *vdev;
+
+	wlan_mlme_sta_mon_invalidate(psoc, WLAN_INVALID_VDEV_ID);
 
 	vdev = wlan_objmgr_get_vdev_by_id_from_psoc(psoc, vdev_id,
 						    WLAN_MLME_SB_ID);

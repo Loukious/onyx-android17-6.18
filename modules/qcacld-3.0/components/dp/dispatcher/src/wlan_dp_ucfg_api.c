@@ -36,6 +36,7 @@
 #include "wlan_nlink_common.h"
 #include "wlan_pkt_capture_api.h"
 #include <cdp_txrx_ctrl.h>
+#include <cdp_txrx_mon.h>
 #include <cdp_txrx_peer_ops.h>
 #include <qdf_net_stats.h>
 #include "wlan_dp_prealloc.h"
@@ -3247,6 +3248,8 @@ void ucfg_dp_set_mon_conf_flags(struct wlan_objmgr_psoc *psoc, uint32_t flags)
 	val.cdp_monitor_flag = flags;
 	status = cdp_txrx_set_psoc_param(dp_ctx->cdp_soc,
 					 CDP_MONITOR_FLAG, val);
+	dp_mon_set_sta_coex(dp_ctx->cdp_soc,
+			   !!(flags & QDF_MONITOR_FLAG_STA_COEX));
 	if (QDF_IS_STATUS_ERROR(status))
 		dp_err("Failed to set flag %d status %d", flags, status);
 }
@@ -3265,9 +3268,27 @@ void ucfg_dp_recover_mon_conf_flags(struct wlan_objmgr_psoc *psoc)
 	val.cdp_monitor_flag = dp_ctx->monitor_flag;
 	status = cdp_txrx_set_psoc_param(dp_ctx->cdp_soc,
 					 CDP_MONITOR_FLAG, val);
+	dp_mon_set_sta_coex(dp_ctx->cdp_soc,
+			   !!(dp_ctx->monitor_flag & QDF_MONITOR_FLAG_STA_COEX));
 	if (QDF_IS_STATUS_ERROR(status))
 		dp_err("Failed to set flag %d status %d",
 		       dp_ctx->monitor_flag, status);
+}
+
+bool ucfg_dp_sta_mon_coex_supported(struct wlan_objmgr_psoc *psoc)
+{
+	struct wlan_dp_psoc_context *dp_ctx = dp_get_context();
+
+	return dp_ctx && dp_ctx->psoc == psoc &&
+		dp_mon_sta_coex_supported(dp_ctx->cdp_soc);
+}
+
+void ucfg_dp_sta_mon_coex_pause(struct wlan_objmgr_psoc *psoc)
+{
+	struct wlan_dp_psoc_context *dp_ctx = dp_get_context();
+
+	if (dp_ctx && dp_ctx->psoc == psoc)
+		dp_mon_sta_coex_pause(dp_ctx->cdp_soc);
 }
 
 void

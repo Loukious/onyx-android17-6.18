@@ -580,7 +580,8 @@ static void dp_mon_filter_set_reset_mon_dest(struct dp_pdev *pdev,
 
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 		/* WCN7750 normally suppresses these FP frames to avoid duplicates. */
-		if (hal_get_target_type(soc->hal_soc) == TARGET_TYPE_WCN7750)
+		if (hal_get_target_type(soc->hal_soc) == TARGET_TYPE_WCN7750 &&
+		    !dp_mon_is_sta_coex(soc))
 			pfilter->tlv_filter.fp_mgmt_filter = FILTER_MGMT_ALL;
 #endif
 
@@ -1032,6 +1033,100 @@ static void dp_mon_filter_dest_reset(struct dp_pdev *pdev)
 }
 #endif
 
+#if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
+static void
+dp_mon_filter_sta_coex_status(struct htt_rx_ring_tlv_filter *filter, bool enable)
+{
+	filter->enable_mo = enable;
+	filter->mo_mgmt_filter = enable ? FILTER_MGMT_ALL : 0;
+	filter->mo_ctrl_filter = enable ? FILTER_CTRL_ALL : 0;
+	filter->mo_data_filter = enable ? FILTER_DATA_ALL : 0;
+	filter->enable_md = enable;
+	filter->md_mgmt_filter = enable ? FILTER_MGMT_ALL : 0;
+	filter->md_ctrl_filter = enable ? FILTER_CTRL_ALL : 0;
+	filter->md_data_filter = enable ? FILTER_DATA_ALL : 0;
+	filter->enable_mon_mac_filter = false;
+}
+
+static QDF_STATUS dp_mon_filter_restore_sta_coex(struct dp_pdev *pdev)
+{
+	struct dp_soc *soc = pdev->soc;
+	struct dp_mon_filter status_filter = {0};
+	QDF_STATUS status, buf_status;
+
+	dp_mon_update_private_flags(soc, 0, DP_MON_FLAG_STA_COEX_PAUSED);
+	/* Keep ordinary FP statistics; explicitly disable MO/MD reporting. */
+	dp_mon_filter_h2t_setup_non_mon(soc, pdev,
+		DP_MON_FILTER_SRNG_TYPE_RXDMA_MONITOR_STATUS, &status_filter);
+	dp_mon_filter_sta_coex_status(&status_filter.tlv_filter, false);
+	status = dp_mon_ht2_rx_ring_cfg(soc, pdev,
+		DP_MON_FILTER_SRNG_TYPE_RXDMA_MONITOR_STATUS,
+		&status_filter.tlv_filter);
+	/*
+	 * Zero buffer masks leave old destination rows in place and clear
+	 * shared TLVs. The full no-MO BE setup restores FP and error routing.
+	 * Native monitor stop disables acceptance of the remaining MO/MD rows.
+	 */
+	buf_status = soc->arch_ops.dp_rxdma_ring_sel_cfg(soc);
+	if (QDF_IS_STATUS_ERROR(status) || QDF_IS_STATUS_ERROR(buf_status))
+		dp_mon_filter_err("STA monitor restore failed: status %d buffer %d",
+				  status, buf_status);
+	return QDF_IS_STATUS_ERROR(status) ? status : buf_status;
+}
+
+static QDF_STATUS dp_mon_filter_update_sta_coex(struct dp_pdev *pdev)
+{
+	struct dp_soc *soc = pdev->soc;
+	struct dp_mon_pdev *mon_pdev = pdev->monitor_pdev;
+	struct dp_mon_filter buf_filter = {0}, status_filter = {0};
+	bool enable = mon_pdev->filter[DP_MON_FILTER_MONITOR_MODE]
+			[DP_MON_FILTER_SRNG_TYPE_RXDMA_BUF].valid;
+	QDF_STATUS status;
+
+	if (!enable || dp_mon_sta_coex_is_paused(soc)) {
+		status = dp_mon_filter_restore_sta_coex(pdev);
+		if (enable && QDF_IS_STATUS_SUCCESS(status))
+			status = QDF_STATUS_E_AGAIN;
+		return status;
+	}
+
+	status = dp_mon_filter_check_co_exist(pdev);
+	if (QDF_IS_STATUS_ERROR(status))
+		goto restore;
+
+	dp_mon_filter_h2t_setup(soc, pdev,
+		DP_MON_FILTER_SRNG_TYPE_RXDMA_BUF, &buf_filter);
+	dp_mon_filter_h2t_setup(soc, pdev,
+		DP_MON_FILTER_SRNG_TYPE_RXDMA_MONITOR_STATUS, &status_filter);
+	if (!buf_filter.valid || !status_filter.valid) {
+		status = QDF_STATUS_E_INVAL;
+		goto restore;
+	}
+	dp_mon_filter_sta_coex_status(&status_filter.tlv_filter, true);
+
+	/* Establish normal FP routes before the MO/MD-only destination update. */
+	status = soc->arch_ops.dp_rxdma_ring_sel_cfg(soc);
+	if (QDF_IS_STATUS_ERROR(status))
+		goto restore;
+	/* Status must be consumable before RAW buffers can enter the shared ring. */
+	status = dp_mon_ht2_rx_ring_cfg(soc, pdev,
+		DP_MON_FILTER_SRNG_TYPE_RXDMA_MONITOR_STATUS,
+		&status_filter.tlv_filter);
+	if (QDF_IS_STATUS_ERROR(status))
+		goto restore;
+	status = dp_mon_ht2_rx_ring_cfg(soc, pdev,
+		DP_MON_FILTER_SRNG_TYPE_RXDMA_BUF, &buf_filter.tlv_filter);
+	if (QDF_IS_STATUS_ERROR(status))
+		goto restore;
+	if (!dp_mon_sta_coex_is_paused(soc))
+		return QDF_STATUS_SUCCESS;
+	status = QDF_STATUS_E_AGAIN;
+restore:
+	dp_mon_filter_restore_sta_coex(pdev);
+	return status;
+}
+#endif
+
 QDF_STATUS dp_mon_filter_update_1_0(struct dp_pdev *pdev)
 {
 	struct dp_soc *soc;
@@ -1049,6 +1144,11 @@ QDF_STATUS dp_mon_filter_update_1_0(struct dp_pdev *pdev)
 		dp_mon_filter_err("Soc Context is null");
 		return QDF_STATUS_E_FAILURE;
 	}
+
+#if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
+	if (dp_mon_is_sta_coex(soc))
+		return dp_mon_filter_update_sta_coex(pdev);
+#endif
 
 	status = dp_mon_filter_check_co_exist(pdev);
 	if (status != QDF_STATUS_SUCCESS)

@@ -47,9 +47,101 @@ static inline bool cdp_nbuf_is_injection(qdf_nbuf_t nbuf)
 #endif
 }
 
+struct wlan_objmgr_psoc;
+struct wlan_objmgr_pdev;
+struct wlan_objmgr_vdev;
+struct reg_tpc_power_info;
+
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+/* Track the exact effective table sent to firmware, outside exported MLME ABI. */
+uint64_t wma_injection_tpc_begin(struct wlan_objmgr_vdev *vdev,
+				const struct reg_tpc_power_info *power);
+void wma_injection_tpc_end(struct wlan_objmgr_vdev *vdev, uint64_t ticket,
+			   QDF_STATUS status);
+uint64_t wma_injection_reg_begin(struct wlan_objmgr_pdev *pdev);
+void wma_injection_reg_end(struct wlan_objmgr_pdev *pdev, uint64_t ticket);
+void wma_injection_power_set_owner(struct wlan_objmgr_vdev *vdev, bool attached);
+void wma_injection_power_reset(struct wlan_objmgr_vdev *vdev);
+void wma_injection_power_override(uint8_t vdev_id);
+#else
+static inline uint64_t
+wma_injection_tpc_begin(struct wlan_objmgr_vdev *vdev,
+			const struct reg_tpc_power_info *power)
+{
+	return 0;
+}
+
+static inline void
+wma_injection_tpc_end(struct wlan_objmgr_vdev *vdev, uint64_t ticket,
+		      QDF_STATUS status)
+{
+}
+
+static inline uint64_t wma_injection_reg_begin(struct wlan_objmgr_pdev *pdev)
+{
+	return 0;
+}
+
+static inline void
+wma_injection_reg_end(struct wlan_objmgr_pdev *pdev, uint64_t ticket)
+{
+}
+
+static inline void
+wma_injection_power_set_owner(struct wlan_objmgr_vdev *vdev, bool attached)
+{
+}
+
+static inline void wma_injection_power_reset(struct wlan_objmgr_vdev *vdev)
+{
+}
+
+static inline void wma_injection_power_override(uint8_t vdev_id)
+{
+}
+#endif
+
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 bool wma_injection_get_tx_params(qdf_nbuf_t nbuf,
 				struct cdp_tx_injection_params *params);
+
+struct cdp_injection_tx_guard {
+	unsigned long flags;
+	bool held;
+};
+
+bool wma_injection_tx_begin(qdf_nbuf_t nbuf,
+			    struct cdp_injection_tx_guard *guard);
+void wma_injection_tx_end(struct cdp_injection_tx_guard *guard);
+void wma_injection_peer_map_notify(uint8_t vdev_id);
+
+struct cdp_soc_t;
+#ifdef QCA_MONITOR_PKT_SUPPORT
+QDF_STATUS dp_mon_sta_coex_bind_helper(struct cdp_soc_t *soc,
+				     uint8_t helper_id, uint8_t monitor_id,
+				     uint64_t generation,
+				     bool (*token_valid)(void *arg,
+							 uint8_t monitor_id,
+							 uint64_t generation),
+				     void *arg);
+void dp_mon_sta_coex_unbind_helper(struct cdp_soc_t *soc, uint8_t helper_id);
+#else
+static inline QDF_STATUS
+dp_mon_sta_coex_bind_helper(struct cdp_soc_t *soc,
+			   uint8_t helper_id, uint8_t monitor_id,
+			   uint64_t generation,
+			   bool (*token_valid)(void *arg, uint8_t monitor_id,
+					       uint64_t generation),
+			   void *arg)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline void
+dp_mon_sta_coex_unbind_helper(struct cdp_soc_t *soc, uint8_t helper_id)
+{
+}
+#endif
 #endif
 
 #endif /* _CDP_TXRX_INJECTION_H_ */

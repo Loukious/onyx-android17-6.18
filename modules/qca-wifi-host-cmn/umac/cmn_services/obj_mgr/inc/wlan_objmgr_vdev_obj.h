@@ -281,6 +281,12 @@
 /* Invalid VDEV link id*/
 #define WLAN_INVALID_LINK_ID 255
 
+/* Private, non-beaconing injection owner; these are creation flags, not caps. */
+#define WLAN_VDEV_C_INJECTION_HELPER 0x80000000U
+#define WLAN_VDEV_C_INJECTION_FW_UNCERTAIN 0x40000000U
+/* Native monitor START requires an actual STOP before INIT-down is safe. */
+#define WLAN_VDEV_C_STA_MON_STOP_REQUIRED 0x20000000U
+
 /**
  * struct wlan_vdev_create_params - Create params, HDD/OSIF passes this
  *				    structure While creating VDEV
@@ -487,6 +493,24 @@ struct wlan_objmgr_vdev {
 #endif
 	qdf_atomic_t is_ap_suspend;
 };
+
+static inline bool
+wlan_vdev_is_injection_helper(struct wlan_objmgr_vdev *vdev)
+{
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	return vdev && (READ_ONCE(vdev->vdev_objmgr.c_flags) &
+			WLAN_VDEV_C_INJECTION_HELPER);
+#else
+	return false;
+#endif
+}
+
+static inline bool
+wlan_vdev_injection_fw_uncertain(struct wlan_objmgr_vdev *vdev)
+{
+	return vdev && (READ_ONCE(vdev->vdev_objmgr.c_flags) &
+			WLAN_VDEV_C_INJECTION_FW_UNCERTAIN);
+}
 
 /*
  * APIs to Create/Delete Global object APIs

@@ -135,6 +135,9 @@ typedef struct qdf_sglist {
 /* Use the configured MAC address and ACK incoming unicast packets */
 #define QDF_MONITOR_FLAG_ACTIVE __QDF_MONITOR_FLAG_ACTIVE
 
+/* Driver-private admission flag; never accepted directly from nl80211. */
+#define QDF_MONITOR_FLAG_STA_COEX (1U << 31)
+
 /**
  * enum qdf_buff_type_tx_rx: check buffer type
  *

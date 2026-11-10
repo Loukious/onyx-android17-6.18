@@ -29,6 +29,7 @@
 #include <hal_api.h>
 #include <hal_reo.h>
 #include <cdp_txrx_handle.h>
+#include <cdp_txrx_injection.h>
 #include <wlan_cfg.h>
 #ifdef WIFI_MONITOR_SUPPORT
 #include <dp_mon.h>
@@ -3156,6 +3157,10 @@ dp_rx_peer_map_handler(struct dp_soc *soc, uint16_t peer_id,
 					 ast_hash, is_wds);
 	}
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (peer && !is_wds)
+		wma_injection_peer_map_notify(vdev_id);
+#endif
 	return err;
 }
 

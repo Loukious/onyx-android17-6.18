@@ -32,6 +32,7 @@
 #include "wlan_hdd_p2p.h"
 #include "sap_api.h"
 #include "wlan_hdd_main.h"
+#include "wlan_mlme_sta_mon.h"
 #include "qdf_trace.h"
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
@@ -200,9 +201,11 @@ static int __wlan_hdd_cfg80211_remain_on_channel(struct wiphy *wiphy,
 	}
 	psoc = hdd_ctx->psoc;
 
+	wlan_mlme_sta_mon_invalidate(psoc, WLAN_INVALID_VDEV_ID);
 	wlan_hdd_lpc_handle_concurrency(hdd_ctx, false);
 	if (policy_mgr_is_sta_mon_concurrency(psoc) &&
-	    !hdd_lpc_is_work_scheduled(hdd_ctx))
+	    !hdd_lpc_is_work_scheduled(hdd_ctx) &&
+	    !wlan_mlme_sta_mon_can_connect(psoc))
 		return -EINVAL;
 
 	if (adapter->device_mode == QDF_P2P_DEVICE_MODE &&
@@ -251,14 +254,21 @@ int wlan_hdd_cfg80211_remain_on_channel(struct wiphy *wiphy,
 {
 	int errno;
 	struct osif_vdev_sync *vdev_sync;
+	struct hdd_context *hdd_ctx = wiphy_priv(wiphy);
 
 	errno = osif_vdev_sync_op_start(wdev->netdev, &vdev_sync);
 	if (errno)
 		return errno;
 
+	if (!wlan_mlme_sta_mon_admission_begin(hdd_ctx->psoc)) {
+		errno = -EBUSY;
+		goto out;
+	}
 	errno = __wlan_hdd_cfg80211_remain_on_channel(wiphy, wdev, chan,
 						      duration, cookie);
+	wlan_mlme_sta_mon_admission_end(hdd_ctx->psoc);
 
+out:
 	osif_vdev_sync_op_stop(vdev_sync);
 
 	return errno;
@@ -500,11 +510,16 @@ int wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 {
 	int errno;
 	struct osif_vdev_sync *vdev_sync;
+	struct hdd_context *hdd_ctx = wiphy_priv(wiphy);
 	int link_id = -1;
 	errno = osif_vdev_sync_op_start(wdev->netdev, &vdev_sync);
 	if (errno)
 		return errno;
 
+	if (!wlan_mlme_sta_mon_admission_begin(hdd_ctx->psoc)) {
+		errno = -EBUSY;
+		goto out;
+	}
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)) || \
 	(defined(WLAN_FEATURE_MULTI_LINK_SAP))
 	link_id = hdd_nb_get_link_id_from_params((void *)params, NB_MGMT_TX);
@@ -523,6 +538,8 @@ int wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 				   dont_wait_for_ack, cookie, link_id);
 #endif /* LINUX_VERSION_CODE */
 
+	wlan_mlme_sta_mon_admission_end(hdd_ctx->psoc);
+out:
 	osif_vdev_sync_op_stop(vdev_sync);
 
 	return errno;
@@ -882,6 +899,9 @@ struct wireless_dev *__wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
 	uint8_t *device_address = NULL;
 
 	hdd_enter();
+	/* Internal provenance can only be set after associated-STA admission. */
+	if (flags)
+		*flags &= ~QDF_MONITOR_FLAG_STA_COEX;
 
 	if (hdd_get_conparam() == QDF_GLOBAL_FTM_MODE) {
 		hdd_err("Command not allowed in FTM mode");
@@ -944,7 +964,9 @@ struct wireless_dev *__wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
 	create_params.is_add_virtual_iface = 1;
 
 	adapter = hdd_get_adapter(hdd_ctx, QDF_STA_MODE);
-	if (adapter && !wlan_hdd_validate_vdev_id(adapter->deflink->vdev_id)) {
+	if (adapter && !wlan_hdd_validate_vdev_id(adapter->deflink->vdev_id) &&
+	    !(type == NL80211_IFTYPE_MONITOR &&
+	      hdd_sta_monitor_coexist_enabled())) {
 		vdev = hdd_objmgr_get_vdev_by_user(adapter->deflink,
 						   WLAN_OSIF_P2P_ID);
 		if (vdev) {
@@ -983,12 +1005,15 @@ struct wireless_dev *__wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
 							 name_assign_type,
 							 is_rx_mon);
 			if (ret)
-				return ERR_PTR(-EINVAL);
+				return ERR_PTR(ret);
+			if (adapter && adapter->sta_mon_coexist)
+				*flags |= QDF_MONITOR_FLAG_STA_COEX;
 
 			ucfg_dp_set_mon_conf_flags(hdd_ctx->psoc, *flags);
 
 			if (adapter) {
-				hdd_monitor_set_wext_compat(wiphy, true);
+				if (!adapter->sta_mon_coexist)
+					hdd_monitor_set_wext_compat(wiphy, true);
 				hdd_exit();
 				return adapter->dev->ieee80211_ptr;
 			}
@@ -1076,14 +1101,20 @@ _wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
 {
 	struct wireless_dev *wdev;
 	struct osif_vdev_sync *vdev_sync;
+	struct hdd_context *hdd_ctx = wiphy_priv(wiphy);
 	int errno;
 
 	errno = osif_vdev_sync_create_and_trans(wiphy_dev(wiphy), &vdev_sync);
 	if (errno)
 		return ERR_PTR(errno);
 
+	if (!wlan_mlme_sta_mon_admission_begin(hdd_ctx->psoc)) {
+		wdev = ERR_PTR(-EBUSY);
+		goto destroy_sync;
+	}
 	wdev = __wlan_hdd_add_virtual_intf(wiphy, name, name_assign_type,
 					   type, flags, params);
+	wlan_mlme_sta_mon_admission_end(hdd_ctx->psoc);
 
 	if (IS_ERR_OR_NULL(wdev))
 		goto destroy_sync;
@@ -1327,7 +1358,15 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	if (errno)
 		return errno;
 
-	if (adapter->device_mode == QDF_SAP_MODE &&
+	if (adapter->sta_mon_coexist) {
+		QDF_STATUS status = hdd_stop_adapter(hdd_ctx, adapter);
+
+		if (QDF_IS_STATUS_ERROR(status))
+			return qdf_status_to_os_return(status);
+		wlan_hdd_release_intf_addr(hdd_ctx, adapter->mac_addr.bytes);
+		hdd_deinit_adapter(hdd_ctx, adapter, true);
+		hdd_close_adapter(hdd_ctx, adapter, true);
+	} else if (adapter->device_mode == QDF_SAP_MODE &&
 	    ucfg_pre_cac_is_active(hdd_ctx->psoc)) {
 		ucfg_pre_cac_clean_up(hdd_ctx->psoc);
 		hdd_clean_up_interface(hdd_ctx, adapter);
@@ -1358,6 +1397,7 @@ int wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(wdev->netdev);
 	struct hdd_context *hdd_ctx = wiphy_priv(wiphy);
 	bool restore_station;
+	bool coex = adapter->sta_mon_coexist;
 
 	if (hdd_preserve_station_for_monitor(hdd_ctx, adapter))
 		return 0;
@@ -1367,19 +1407,29 @@ int wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 
 	adapter->delete_in_progress = true;
 	errno = osif_vdev_sync_trans_start_wait(wdev->netdev, &vdev_sync);
-	if (errno)
+	if (errno) {
+		if (coex)
+			adapter->delete_in_progress = false;
 		return errno;
+	}
 
 	osif_vdev_sync_unregister(wdev->netdev);
 	osif_vdev_sync_wait_for_ops(vdev_sync);
 
 	adapter->is_virtual_iface = true;
 	errno = __wlan_hdd_del_virtual_intf(wiphy, wdev);
+	if (errno && coex) {
+		/* Failed drains retain the registered owner for a later retry. */
+		osif_vdev_sync_register(wdev->netdev, vdev_sync);
+		adapter->delete_in_progress = false;
+		osif_vdev_sync_trans_stop(vdev_sync);
+		return errno;
+	}
 
 	osif_vdev_sync_trans_stop(vdev_sync);
 	osif_vdev_sync_destroy(vdev_sync);
 
-	if (!errno && restore_station) {
+	if (!errno && restore_station && !coex) {
 		hdd_monitor_set_wext_compat(wiphy, false);
 		hdd_queue_monitor_station_restore(hdd_ctx);
 	}

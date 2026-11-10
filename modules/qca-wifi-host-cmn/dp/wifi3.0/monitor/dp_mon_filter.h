@@ -696,6 +696,11 @@ void dp_mon_filter_h2t_setup(struct dp_soc *soc, struct dp_pdev *pdev,
 			     enum dp_mon_filter_srng_type srng_type,
 			     struct dp_mon_filter *filter);
 
+/* Restore remaining status users without re-adding monitor subscriptions. */
+void dp_mon_filter_h2t_setup_non_mon(struct dp_soc *soc, struct dp_pdev *pdev,
+				   enum dp_mon_filter_srng_type srng_type,
+				   struct dp_mon_filter *filter);
+
 /**
  * dp_mon_ht2_rx_ring_cfg() - Configure filter to HW
  * @soc: Dp soc handle

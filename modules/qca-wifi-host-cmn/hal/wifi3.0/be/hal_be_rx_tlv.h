@@ -35,7 +35,13 @@
 #define TLV_TAG_T uint64_t
 #endif
 
-#define HAL_RX_BE_PKT_HDR_TLV_LEN	112
+#if defined(QCA_WIFI_WCN7750) && defined(CONFIG_4_BYTES_TLV_TAG)
+/* RXOLE's default header subscription captures up to 128 packet bytes. */
+#define HAL_RX_BE_PKT_HDR_TLV_LEN 128
+#define HAL_RX_BE_PKT_HDR_TLV_PAD 4
+#else
+#define HAL_RX_BE_PKT_HDR_TLV_LEN 112
+#endif
 /* Number of bytes to store SW private info in rx_pkt_tlvs */
 #define HAL_RX_TLV_PRIV_INFO_BYTES	4
 
@@ -45,7 +51,11 @@ struct rx_pkt_hdr_tlv {
 	uint32_t reserved_0				: 16, /* 4 B */
 		 phy_ppdu_id				: 16;
 	uint32_t reserved_1a;				/* 4 B */
-	char rx_pkt_hdr[HAL_RX_BE_PKT_HDR_TLV_LEN];	/* 112 B */
+	char rx_pkt_hdr[HAL_RX_BE_PKT_HDR_TLV_LEN];
+#ifdef HAL_RX_BE_PKT_HDR_TLV_PAD
+	/* Keep the explicit packet offset aligned without overlapping RX_HEADER. */
+	uint8_t rx_pkt_hdr_pad[HAL_RX_BE_PKT_HDR_TLV_PAD];
+#endif
 };
 #else
 struct rx_pkt_hdr_tlv {
@@ -53,7 +63,11 @@ struct rx_pkt_hdr_tlv {
 	uint32_t phy_ppdu_id				: 16, /* 4 B */
 		 reserved_0				: 16;
 	uint32_t reserved_1a;				/* 4 B */
-	char rx_pkt_hdr[HAL_RX_BE_PKT_HDR_TLV_LEN];	/* 112 B */
+	char rx_pkt_hdr[HAL_RX_BE_PKT_HDR_TLV_LEN];
+#ifdef HAL_RX_BE_PKT_HDR_TLV_PAD
+	/* Keep the explicit packet offset aligned without overlapping RX_HEADER. */
+	uint8_t rx_pkt_hdr_pad[HAL_RX_BE_PKT_HDR_TLV_PAD];
+#endif
 };
 #endif
 

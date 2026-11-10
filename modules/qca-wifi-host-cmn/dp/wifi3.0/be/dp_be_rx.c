@@ -39,6 +39,7 @@
 #endif
 #include "dp_hist.h"
 #include "dp_rx_buffer_pool.h"
+#include "dp_mon.h"
 
 #ifdef WLAN_SUPPORT_RX_FLOW_TAG
 #include "hal_rx_flow.h"
@@ -755,6 +756,10 @@ done:
 	while (nbuf) {
 		next = nbuf->next;
 		dp_rx_prefetch_nbuf_data_be(nbuf, next);
+		if (qdf_unlikely(dp_mon_sta_coex_rx(soc, nbuf, &next))) {
+			nbuf = next;
+			continue;
+		}
 		if (qdf_unlikely(dp_rx_is_raw_frame_dropped(nbuf))) {
 			nbuf = next;
 			dp_verbose_debug("drop raw frame");
@@ -1399,6 +1404,15 @@ QDF_STATUS dp_wbm_get_rx_desc_from_hal_desc_be(struct dp_soc *soc,
 struct dp_rx_desc *dp_rx_desc_cookie_2_va_be(struct dp_soc *soc,
 					     uint32_t cookie)
 {
+	struct dp_soc_be *be_soc = dp_get_be_soc_from_dp_soc(soc);
+	uint32_t page_id = (cookie & DP_CC_DESC_ID_PPT_PAGE_OS_MASK) >>
+			  DP_CC_DESC_ID_PPT_PAGE_OS_SHIFT;
+
+	/* Error and shared-monitor rings use the software cookie lookup. */
+	if (qdf_unlikely(!be_soc->page_desc_base ||
+			 page_id >= DP_CC_PPT_MAX_ENTRIES ||
+			 !be_soc->page_desc_base[page_id].page_v_addr))
+		return NULL;
 	return (struct dp_rx_desc *)dp_cc_desc_find(soc, cookie);
 }
 
@@ -2590,6 +2604,13 @@ dp_rx_null_q_desc_handle_be(struct dp_soc *soc, qdf_nbuf_t nbuf,
 		qdf_assert(0);
 	}
 
+#if defined(QCA_WIFI_WCN7750) && defined(CONFIG_WORD_BASED_TLV) && \
+	defined(BE_NON_AP_COMPACT_TLV)
+	/* Keep the original unknown-peer exception and skb ownership unchanged. */
+	if (!txrx_peer && is_reo_exception)
+		dp_mon_sta_coex_copy_unknown_raw(soc, pool_id, nbuf, rx_tlv_hdr,
+					       HAL_RX_TLV_PHY_PPDU_ID_GET(rx_tlv_hdr));
+#endif
 	if (!txrx_peer &&
 	    dp_rx_null_q_handle_invalid_peer_id_exception(soc, pool_id,
 							  rx_tlv_hdr, nbuf))
@@ -2642,6 +2663,9 @@ dp_rx_null_q_desc_handle_be(struct dp_soc *soc, qdf_nbuf_t nbuf,
 		DP_STATS_INC(soc, rx.err.invalid_vdev, 1);
 		goto drop_nbuf;
 	}
+
+	if (dp_mon_sta_coex_rx_exception(soc, vdev, nbuf, rx_tlv_hdr))
+		return QDF_STATUS_SUCCESS;
 
 	/*
 	 * Advance the packet start pointer by total size of

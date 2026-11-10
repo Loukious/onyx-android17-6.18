@@ -210,6 +210,43 @@ See [WCN7750 monitor injection testing](port/wlan-test/README.md) for supported
 data/control frames, radiotap options, firmware limits and temporary module
 replacement with an original-driver restore path.
 
+### Keep Android Wi-Fi connected during monitor use
+
+The internal WCN7750 driver includes experimental STA/monitor coexistence. It
+is disabled by default; load the matching module with `sta_monitor_coexist=1`
+to opt in. The parameter is read-only after loading. Replacing the module still
+requires Android's Wi-Fi framework to shut down and release the old driver.
+Once connected, Android keeps its normal STA/HAL active while a separate `mon0`
+shares the same radio. This requires exactly one connected STA with one active
+link and the same full channel definition, including bandwidth and center
+frequencies. A request for the identical definition leaves that sharing intact.
+A same-primary request with a different width, center or puncturing is rejected
+without disconnecting Android.
+
+A request for a different supported primary channel hands the radio to the
+monitor: Android disconnects, while `mon0`, its ifindex and open capture remain
+in place. Exclusive targets are enabled 2.4/5 GHz channels with 20/40/80 MHz
+bandwidth, without DFS, passive-only operation, puncturing or a second center.
+Unsupported targets, including 6 GHz, are rejected before disconnecting Android.
+While exclusive, Android scans and new connections cannot run. Closing the
+monitor releases the radio and resumes any still-valid deferred Android
+scheduled scan (PNO), allowing Android to reconnect. The internal radio does
+not provide two independent channels at once. AP/monitor support is deferred.
+
+Device testing passed a channel 52/80 MHz to channel 1/20 MHz handoff while
+retaining the same monitor interface and capture process. Android rejoined
+about two seconds after monitor teardown. Known-PIN WPS passed both after
+handoff and against a different BSSID on the shared channel; the shared-channel
+run received all 1,410 Android connectivity-check pings. This exact driver
+also passed a 35-minute post-teardown stability observation without rebooting
+or reporting a critical kernel fault.
+
+The Kali chroot must have `/dev` mounted. Use a Bully build with native ACK
+reception, channel preservation, per-packet FCS handling and early-reply
+retention; that build needs no wrapper or compatibility preload. Capture
+availability and metadata differ between RAW, firmware management and bounded
+EAPOL copies. See the [setup, limits and runtime results](port/wlan-test/README.md#keep-android-wi-fi-connected).
+
 ### Migrate from 6.6 or a different KMI generation
 
 An AnyKernel kernel update cannot perform this migration. It needs a complete

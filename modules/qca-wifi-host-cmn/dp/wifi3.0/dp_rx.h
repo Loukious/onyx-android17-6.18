@@ -1559,14 +1559,24 @@ void *dp_rx_cookie_2_link_desc_va(struct dp_soc *soc,
 	void *link_desc_va;
 	struct qdf_mem_multi_page_t *pages;
 	uint16_t page_id = LINK_DESC_COOKIE_PAGE_ID(buf_info->sw_cookie);
+	qdf_dma_addr_t offset;
+	uint32_t desc_size;
 
 	pages = &soc->link_desc_pages;
-	if (!pages)
+	if (!pages->dma_pages || !buf_info->paddr)
 		return NULL;
 	if (qdf_unlikely(page_id >= pages->num_pages))
 		return NULL;
+	if (qdf_unlikely(buf_info->paddr <
+			 pages->dma_pages[page_id].page_p_addr))
+		return NULL;
+	offset = buf_info->paddr - pages->dma_pages[page_id].page_p_addr;
+	desc_size = hal_get_link_desc_size(soc->hal_soc);
+	if (qdf_unlikely(offset >= pages->page_size ||
+			 desc_size > pages->page_size - offset))
+		return NULL;
 	link_desc_va = pages->dma_pages[page_id].page_v_addr_start +
-		(buf_info->paddr - pages->dma_pages[page_id].page_p_addr);
+		offset;
 	return link_desc_va;
 }
 
@@ -3568,6 +3578,13 @@ dp_rx_link_desc_return_by_addr(struct dp_soc *soc,
 uint32_t
 dp_rxdma_err_process(struct dp_intr *int_ctx, struct dp_soc *soc,
 		     uint32_t mac_id, uint32_t quota);
+
+/* Caller owns the RXDMA destination ring lock and replenishes the free list. */
+uint32_t dp_rx_err_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
+			  hal_rxdma_desc_t rxdma_dst_ring_desc,
+			  union dp_rx_desc_list_elem_t **head,
+			  union dp_rx_desc_list_elem_t **tail,
+			  bool report_stats, bool mon_lock_held);
 
 /**
  * dp_rx_process_rxdma_err() - Function to deliver rxdma unencrypted_err

@@ -653,8 +653,97 @@ dp_rx_mon_check_n_drop_mpdu(struct dp_pdev *pdev, uint32_t mac_id,
 }
 #endif
 
-void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
-			    uint32_t mac_id, uint32_t quota)
+/*
+ * Classify the complete MPDU while holding the shared destination lock.
+ * Full TLVs supply the category in the first MPDU_START. Compact TLVs supply
+ * it in MSDU_END, which is valid only in the final scatter buffer after
+ * MSDU_DONE, as is the decap format. Do not read the absent header TLV.
+ * Record synchronization so a status-ring retry cannot unmap buffers twice.
+ */
+static bool dp_rx_mon_shared_is_raw(struct dp_pdev *pdev, uint32_t mac_id,
+				  hal_rxdma_desc_t ring_desc)
+{
+	struct dp_soc *soc = pdev->soc;
+	struct hal_buf_info buf_info;
+	struct hal_rx_msdu_list msdu_list;
+	struct dp_rx_desc *rx_desc;
+	struct rx_desc_pool *pool;
+	void *link_desc;
+	uint8_t *tlv;
+	uint8_t category;
+	uint32_t msdu_count, scanned = 0;
+	uint16_t num_msdus, i;
+	bool first = true, complete = false;
+
+	hal_rx_reo_ent_buf_paddr_get(soc->hal_soc, ring_desc, &buf_info,
+				     &msdu_count);
+	if (!msdu_count || !buf_info.paddr)
+		return false;
+
+	do {
+		link_desc = dp_rx_cookie_2_mon_link_desc(pdev, &buf_info, mac_id);
+		if (!link_desc)
+			return false;
+		hal_rx_msdu_list_get(soc->hal_soc, link_desc, &msdu_list,
+				     &num_msdus);
+		if (!num_msdus)
+			return false;
+		for (i = 0; i < num_msdus; i++) {
+			if (++scanned > 64 ||
+			    msdu_list.sw_cookie[i] == HAL_RX_COOKIE_SPECIAL ||
+			    !dp_rx_is_sw_cookie_valid(soc, msdu_list.sw_cookie[i]))
+				return false;
+			rx_desc = dp_rx_get_mon_desc(soc, msdu_list.sw_cookie[i]);
+			if (!rx_desc || !rx_desc->in_use || !rx_desc->nbuf ||
+			    rx_desc->pool_id >= MAX_RXDESC_POOLS ||
+			    dp_rx_mon_get_paddr_from_desc(rx_desc) != msdu_list.paddr[i])
+				return false;
+			pool = &soc->rx_desc_buf[rx_desc->pool_id];
+			if (pool->buf_size < soc->rx_pkt_tlv_size ||
+			    qdf_nbuf_is_nonlinear(rx_desc->nbuf) ||
+			    qdf_nbuf_headlen(rx_desc->nbuf) +
+				qdf_nbuf_tailroom(rx_desc->nbuf) < soc->rx_pkt_tlv_size)
+				return false;
+			if (!rx_desc->unmapped) {
+				dp_rx_mon_buffer_unmap(soc, rx_desc, pool->buf_size);
+				rx_desc->unmapped = 1;
+			}
+			tlv = dp_rx_mon_get_buffer_data(rx_desc);
+			if (first) {
+				if (!hal_rx_mpdu_start_tlv_tag_valid(soc->hal_soc, tlv))
+					return false;
+#ifndef CONFIG_WORD_BASED_TLV
+				category = hal_rx_get_filter_category(soc->hal_soc, tlv);
+				if (category != 1 && category != 2)
+					return false;
+#endif
+				first = false;
+			}
+			complete = !(msdu_list.msdu_info[i].msdu_flags &
+				     HAL_MSDU_F_MSDU_CONTINUATION);
+			if (complete &&
+			    (!hal_rx_attn_msdu_done_get(soc->hal_soc, tlv) ||
+			     hal_rx_tlv_decap_format_get(soc->hal_soc, tlv) !=
+						HAL_HW_RX_DECAP_FORMAT_RAW))
+				return false;
+#ifdef CONFIG_WORD_BASED_TLV
+			if (complete) {
+				category = hal_rx_get_filter_category(soc->hal_soc, tlv);
+				if (category != 1 && category != 2)
+					return false;
+			}
+#endif
+		}
+		hal_rx_mon_next_link_desc_get(soc->hal_soc, link_desc, &buf_info);
+	} while (buf_info.paddr);
+
+	return complete;
+}
+
+static uint32_t
+dp_rx_mon_dest_process_common(struct dp_soc *soc, struct dp_intr *int_ctx,
+			      uint32_t mac_id, uint32_t quota,
+			      bool status_ready)
 {
 	struct dp_pdev *pdev = dp_get_pdev_for_lmac_id(soc, mac_id);
 	uint8_t pdev_id;
@@ -670,10 +759,13 @@ void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
 	struct cdp_pdev_mon_stats *rx_mon_stats;
 	struct dp_mon_pdev *mon_pdev;
 	struct dp_mon_mac *mon_mac;
+	bool sta_coex = dp_mon_is_sta_coex(soc);
+	bool shared_drop_only;
+	uint32_t work_done = 0;
 
 	if (!pdev) {
 		dp_rx_mon_dest_debug("%pK: pdev is null for mac_id = %d", soc, mac_id);
-		return;
+		return 0;
 	}
 
 	mon_pdev = pdev->monitor_pdev;
@@ -683,7 +775,7 @@ void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
 	if (!mon_dst_srng || !hal_srng_initialized(mon_dst_srng)) {
 		dp_rx_mon_dest_err("%pK: : HAL Monitor Destination Ring Init Failed -- %pK",
 				   soc, mon_dst_srng);
-		return;
+		return 0;
 	}
 
 	hal_soc = soc->hal_soc;
@@ -691,13 +783,20 @@ void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
 	qdf_assert((hal_soc && pdev));
 
 	qdf_spin_lock_bh(&mon_mac->mon_lock);
+	/* Normal FP status can keep arriving after the coex owner is deleted. */
+	shared_drop_only =
+		hal_get_target_type(soc->hal_soc) == TARGET_TYPE_WCN7750 &&
+		!soc->wlan_cfg_ctx->rxdma1_enable && !mon_mac->mvdev &&
+		!mon_pdev->monitor_configured && !mon_pdev->mcopy_mode &&
+		!mon_pdev->neighbour_peers_added && !mon_pdev->rx_pktlog_cbf &&
+		mon_pdev->rx_enh_capture_mode == CDP_RX_ENH_CAPTURE_DISABLED;
 
 	if (qdf_unlikely(dp_srng_access_start(int_ctx, soc, mon_dst_srng))) {
 		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_ERROR,
 			  "%s %d : HAL Mon Dest Ring access Failed -- %pK",
 			  __func__, __LINE__, mon_dst_srng);
 		qdf_spin_unlock_bh(&mon_mac->mon_lock);
-		return;
+		return 0;
 	}
 
 	pdev_id = pdev->pdev_id;
@@ -715,6 +814,36 @@ void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
 		head_msdu = (qdf_nbuf_t)NULL;
 		tail_msdu = (qdf_nbuf_t)NULL;
 
+		if (sta_coex || shared_drop_only) {
+			bool monitor_packet;
+			bool report_stats;
+
+			if (work_done >= quota)
+				break;
+
+			monitor_packet = sta_coex && mon_mac->mvdev &&
+				mon_pdev->monitor_configured &&
+				!dp_mon_sta_coex_is_paused(soc) &&
+				dp_rx_mon_shared_is_raw(pdev, mac_id,
+						      rxdma_dst_ring_desc);
+			if (!monitor_packet) {
+				report_stats =
+					hal_rx_reo_ent_rxdma_push_reason_get(
+						rxdma_dst_ring_desc) ==
+					HAL_RX_WBM_RXDMA_PSH_RSN_ERROR;
+				rx_bufs_used += dp_rx_err_mpdu_pop(soc, mac_id,
+						rxdma_dst_ring_desc, &head, &tail,
+						report_stats, true);
+				hal_srng_dst_get_next(hal_soc, mon_dst_srng);
+				work_done++;
+				continue;
+			}
+
+			/* Only the status consumer supplies a matching PPDU. */
+			if (!status_ready)
+				break;
+		}
+
 		if (QDF_STATUS_SUCCESS ==
 		    dp_rx_mon_check_n_drop_mpdu(pdev, mac_id,
 						rxdma_dst_ring_desc,
@@ -723,6 +852,7 @@ void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
 			/* Increment stats */
 			rx_bufs_used += rx_bufs_dropped;
 			hal_srng_dst_get_next(hal_soc, mon_dst_srng);
+			work_done++;
 			continue;
 		}
 
@@ -773,6 +903,7 @@ void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
 		rxdma_dst_ring_desc =
 			hal_srng_dst_get_next(hal_soc,
 					      mon_dst_srng);
+		work_done++;
 	}
 
 	dp_srng_access_end(int_ctx, soc, mon_dst_srng);
@@ -788,7 +919,24 @@ void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
 								pdev_id),
 					rx_bufs_used, &head, &tail, false);
 	}
+
+	return work_done;
 }
+
+void dp_rx_mon_dest_process(struct dp_soc *soc, struct dp_intr *int_ctx,
+			   uint32_t mac_id, uint32_t quota)
+{
+	dp_rx_mon_dest_process_common(soc, int_ctx, mac_id, quota, true);
+}
+
+#if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
+uint32_t dp_rx_mon_shared_dest_process(struct dp_soc *soc,
+				     struct dp_intr *int_ctx,
+				     uint32_t mac_id, uint32_t quota)
+{
+	return dp_rx_mon_dest_process_common(soc, int_ctx, mac_id, quota, false);
+}
+#endif
 
 QDF_STATUS
 dp_rx_pdev_mon_buf_buffers_alloc(struct dp_pdev *pdev, uint32_t mac_id,

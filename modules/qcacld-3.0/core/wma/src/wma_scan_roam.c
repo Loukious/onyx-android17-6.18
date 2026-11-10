@@ -26,6 +26,7 @@
 /* Header files */
 
 #include "wma.h"
+#include "wlan_mlme_sta_mon.h"
 #include "wma_api.h"
 #include "cds_api.h"
 #include "wmi_unified_api.h"
@@ -2641,6 +2642,8 @@ void wma_roam_better_ap_handler(tp_wma_handle wma, uint32_t vdev_id)
 	QDF_STATUS status;
 	struct cm_host_roam_start_ind *ind;
 
+	wlan_mlme_sta_mon_invalidate(wma->psoc, WLAN_INVALID_VDEV_ID);
+
 	ind = qdf_mem_malloc(sizeof(*ind));
 	if (!ind)
 		return;
@@ -2713,6 +2716,10 @@ void cm_invalid_roam_reason_handler(uint32_t vdev_id, enum cm_roam_notif notif,
 		QDF_ASSERT(0);
 		return;
 	}
+	if (notif == CM_ROAM_NOTIF_SCAN_START ||
+	    notif == CM_ROAM_NOTIF_ROAM_START)
+		wlan_mlme_sta_mon_invalidate(wma_handle->psoc,
+					     WLAN_INVALID_VDEV_ID);
 	wma_invalid_roam_reason_handler(wma_handle, vdev_id, notif);
 
 	if (notif == CM_ROAM_NOTIF_SCAN_START ||

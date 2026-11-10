@@ -5134,8 +5134,13 @@ QDF_STATUS sme_vdev_post_vdev_create_setup(mac_handle_t mac_handle,
 	return status;
 
 csr_cleanup_vdev_session:
+	/* Native injection owner unwinds partial creation through FW responses. */
+	if (wlan_vdev_is_injection_helper(vdev))
+		return status;
 	csr_cleanup_vdev_session(mac_ctx, vdev_id);
 cleanup_wma:
+	if (wlan_vdev_is_injection_helper(vdev))
+		return status;
 	wma_cleanup_vdev(vdev);
 	return status;
 }
@@ -5162,13 +5167,16 @@ struct wlan_objmgr_vdev
 		return NULL;
 	}
 
-	if (wlan_objmgr_vdev_try_get_ref(vdev, WLAN_LEGACY_SME_ID) !=
+	/* The helper took this ref before native firmware creation began. */
+	if (!wlan_vdev_is_injection_helper(vdev) &&
+	    wlan_objmgr_vdev_try_get_ref(vdev, WLAN_LEGACY_SME_ID) !=
 	    QDF_STATUS_SUCCESS) {
 		wlan_objmgr_vdev_obj_delete(vdev);
 		return NULL;
 	}
 
-	cm_utf_attach(vdev);
+	if (!wlan_vdev_is_injection_helper(vdev))
+		cm_utf_attach(vdev);
 	MTRACE(qdf_trace(QDF_MODULE_ID_SME,
 			 TRACE_CODE_SME_RX_HDD_OPEN_SESSION,
 			 wlan_vdev_get_id(vdev), 0));
@@ -5190,6 +5198,10 @@ void sme_vdev_del_resp(uint8_t vdev_id)
 	mac = MAC_CONTEXT(mac_handle);
 	csr_cleanup_vdev_session(mac, vdev_id);
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (wma_injection_helper_deleted(vdev_id))
+		return;
+#endif
 	if (mac->session_close_cb)
 		mac->session_close_cb(vdev_id);
 }
@@ -5206,6 +5218,14 @@ QDF_STATUS sme_vdev_self_peer_delete_resp(struct del_vdev_params *del_vdev_req)
 	}
 
 	if (vdev->obj_state == WLAN_OBJ_STATE_LOGICALLY_DELETED) {
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+		if (wma_injection_helper_self_peer_deleted(
+				vdev, del_vdev_req->status)) {
+			status = del_vdev_req->status;
+			qdf_mem_free(del_vdev_req);
+			return status;
+		}
+#endif
 		wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_SME_ID);
 		wma_debug("vdev delete");
 	} else {
@@ -5233,6 +5253,7 @@ QDF_STATUS sme_vdev_delete(mac_handle_t mac_handle,
 			 TRACE_CODE_SME_RX_HDD_CLOSE_SESSION, vdev_id, 0));
 
 	is_pasn_peer_delete_all_required =
+		!wlan_vdev_is_injection_helper(vdev) &&
 		wlan_wifi_pos_pasn_peer_delete_all(mac->psoc, vdev_id);
 	if (is_pasn_peer_delete_all_required) {
 		sme_info("Resume vdev delete after pasn peers deletion");
@@ -5260,14 +5281,23 @@ QDF_STATUS sme_vdev_delete(mac_handle_t mac_handle,
 	 * resulting in the last reference of vdev object and sending the
 	 * vdev_delete to firmware.
 	 */
-	status = wlan_objmgr_vdev_obj_delete(vdev);
+	if (wlan_vdev_is_injection_helper(vdev) &&
+	    vdev->obj_state == WLAN_OBJ_STATE_LOGICALLY_DELETED)
+		status = QDF_STATUS_SUCCESS;
+	else
+		status = wlan_objmgr_vdev_obj_delete(vdev);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		sme_nofl_err("Failed to mark vdev as logical delete %d",
 			     status);
 		return status;
 	}
 
-	cm_utf_detach(vdev);
+	if (!wlan_vdev_is_injection_helper(vdev))
+		cm_utf_detach(vdev);
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	else if (!wma_injection_helper_has_self_peer(vdev))
+		return wma_injection_helper_delete_no_peer(vdev);
+#endif
 
 	del_self_peer = qdf_mem_malloc(sizeof(*del_self_peer));
 	if (!del_self_peer)
@@ -5291,7 +5321,8 @@ QDF_STATUS sme_vdev_delete(mac_handle_t mac_handle,
 
 	if (QDF_IS_STATUS_ERROR(status)) {
 		sme_err("Failed to post vdev selfpeer for vdev:%d", vdev_id);
-		wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_SME_ID);
+		if (!wlan_vdev_is_injection_helper(vdev))
+			wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_SME_ID);
 		qdf_mem_free(del_self_peer);
 	}
 

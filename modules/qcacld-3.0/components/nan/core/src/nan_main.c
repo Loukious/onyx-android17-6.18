@@ -1846,6 +1846,10 @@ QDF_STATUS nan_discovery_pre_enable(struct wlan_objmgr_pdev *pdev,
 		return QDF_STATUS_E_INVAL;
 	}
 
+	/* Close monitor admission before NAN state or radio ownership changes. */
+	if (!wlan_mlme_sta_mon_admission_begin(psoc))
+		return QDF_STATUS_E_BUSY;
+	wlan_mlme_sta_mon_update_begin(psoc);
 	status = nan_set_discovery_state(psoc, NAN_DISC_ENABLE_IN_PROGRESS);
 
 	if (QDF_IS_STATUS_ERROR(status)) {
@@ -1900,6 +1904,8 @@ QDF_STATUS nan_discovery_pre_enable(struct wlan_objmgr_pdev *pdev,
 pre_enable_failure:
 	if (QDF_IS_STATUS_ERROR(status))
 		nan_set_discovery_state(psoc, NAN_DISC_DISABLED);
+	wlan_mlme_sta_mon_update_end(psoc);
+	wlan_mlme_sta_mon_admission_end(psoc);
 
 	return status;
 }

@@ -28,6 +28,7 @@
 
 #include "wlan_policy_mgr_api.h"
 #include "wlan_policy_mgr_i.h"
+#include "wlan_mlme_sta_mon.h"
 #include "qdf_types.h"
 #include "qdf_trace.h"
 #include "wlan_objmgr_global_obj.h"
@@ -1507,7 +1508,7 @@ static QDF_STATUS policy_mgr_validate_unsupported_action
 	return QDF_STATUS_SUCCESS;
 }
 
-QDF_STATUS policy_mgr_next_actions(
+static QDF_STATUS policy_mgr_next_actions_admitted(
 		struct wlan_objmgr_psoc *psoc,
 		uint32_t session_id,
 		enum policy_mgr_conc_next_action action,
@@ -1733,6 +1734,24 @@ QDF_STATUS policy_mgr_next_actions(
 		status = QDF_STATUS_E_FAILURE;
 		break;
 	}
+
+	return status;
+}
+
+QDF_STATUS policy_mgr_next_actions(
+		struct wlan_objmgr_psoc *psoc,
+		uint32_t session_id,
+		enum policy_mgr_conc_next_action action,
+		enum policy_mgr_conn_update_reason reason,
+		uint32_t request_id)
+{
+	QDF_STATUS status;
+
+	if (!wlan_mlme_sta_mon_admission_begin(psoc))
+		return QDF_STATUS_E_BUSY;
+	status = policy_mgr_next_actions_admitted(psoc, session_id, action,
+						reason, request_id);
+	wlan_mlme_sta_mon_admission_end(psoc);
 
 	return status;
 }

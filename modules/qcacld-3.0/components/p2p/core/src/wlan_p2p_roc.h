@@ -93,6 +93,7 @@ enum roc_state {
  * @flag:       Indicate scan type. BIT[0] indicate whether
  *              scan type is for p2p or not when sta vdev gets
  *              use during p2p device mode operation
+ * @sta_mon_update: Holds associated-STA monitor admission while RoC is pending
  */
 struct p2p_roc_context {
 	qdf_list_node_t node;
@@ -110,7 +111,11 @@ struct p2p_roc_context {
 	struct qdf_mac_addr tx_mgmt_mac_addr;
 	enum QDF_OPMODE opmode;
 	uint32_t flag;
+	bool sta_mon_update;
 };
+
+void p2p_sta_mon_roc_begin(struct p2p_roc_context *roc_ctx);
+void p2p_free_roc_context(struct p2p_roc_context *roc_ctx);
 
 /**
  * struct cancel_roc_context - p2p cancel roc context

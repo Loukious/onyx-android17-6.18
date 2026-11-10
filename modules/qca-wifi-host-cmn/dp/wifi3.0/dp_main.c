@@ -9773,7 +9773,8 @@ dp_set_psoc_param(struct cdp_soc_t *cdp_soc,
 			soc->features.fw_support_ml_monitor);
 		break;
 	case CDP_MONITOR_FLAG:
-		soc->mon_flags = val.cdp_monitor_flag;
+		/* The public flag field is eight bits; retain private mode state. */
+		dp_mon_update_private_flags(soc, 0xffU, val.cdp_monitor_flag);
 		dp_info("monior interface flags: 0x%x", soc->mon_flags);
 		break;
 	case CDP_SCAN_RADIO_SUPPORT:

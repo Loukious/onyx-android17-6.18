@@ -60,6 +60,9 @@
 static struct vdev_mlme_ops sta_mlme_ops;
 static struct vdev_mlme_ops ap_mlme_ops;
 static struct vdev_mlme_ops mon_mlme_ops;
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+static struct vdev_mlme_ops injection_mlme_ops;
+#endif
 static struct mlme_ext_ops ext_ops;
 #ifdef WLAN_FEATURE_11BE_MLO
 static struct mlo_mlme_ext_ops mlo_ext_ops;
@@ -154,6 +157,12 @@ QDF_STATUS mlme_register_vdev_mgr_ops(struct vdev_mlme_obj *vdev_mlme)
 
 	vdev = vdev_mlme->vdev;
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (wlan_vdev_is_injection_helper(vdev)) {
+		vdev_mlme->ops = &injection_mlme_ops;
+		return QDF_STATUS_SUCCESS;
+	}
+#endif
 	if (mlme_is_vdev_in_beaconning_mode(vdev->vdev_mlme.vdev_opmode))
 		vdev_mlme->ops = &ap_mlme_ops;
 	else if (vdev->vdev_mlme.vdev_opmode == QDF_MONITOR_MODE)
@@ -1685,9 +1694,17 @@ QDF_STATUS vdevmgr_mlme_ext_hdl_destroy(struct vdev_mlme_obj *vdev_mlme)
 	if (!vdev_mlme->ext_vdev_ptr)
 		return status;
 
+	/* The helper retains its native object until FW DELETE is confirmed. */
+	if (wlan_vdev_is_injection_helper(vdev_mlme->vdev)) {
+		mlme_ext_handler_destroy(vdev_mlme);
+		return QDF_STATUS_SUCCESS;
+	}
+
 	status = vdev_mgr_delete_send(vdev_mlme);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		mlme_err("Failed to send vdev delete to firmware");
+		wlan_mlme_sta_mon_fw_timeout(
+			wlan_vdev_get_psoc(vdev_mlme->vdev), vdev_id);
 		mlme_wma_vdev_detach_handler(vdev_id);
 	}
 
@@ -1748,6 +1765,27 @@ QDF_STATUS vdevmgr_mlme_ext_hdl_create(struct vdev_mlme_obj *vdev_mlme)
 	qdf_runtime_lock_init(
 			&vdev_mlme->ext_vdev_ptr->peer_set_key_rt_wakelock);
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (wlan_vdev_is_injection_helper(vdev_mlme->vdev)) {
+		status = wma_injection_helper_attach_vdev(vdev_mlme->vdev);
+		if (QDF_IS_STATUS_ERROR(status)) {
+			mlme_ext_handler_destroy(vdev_mlme);
+			return status;
+		}
+		status = vdev_mgr_create_send(vdev_mlme);
+		wma_injection_helper_create_result(vdev_mlme->vdev, status);
+		/*
+		 * Keep the component intact even on a partial firmware/DP create
+		 * failure.  Its private owner must delete through the native API
+		 * and keep the vdev ID reserved until the response is received.
+		 */
+		return QDF_STATUS_SUCCESS;
+	}
+#endif
+	if (wlan_vdev_mlme_get_opmode(vdev_mlme->vdev) == QDF_MONITOR_MODE)
+		wlan_mlme_sta_mon_vdev_created(
+			wlan_vdev_get_psoc(vdev_mlme->vdev),
+			wlan_vdev_get_id(vdev_mlme->vdev));
 	status = vdev_mgr_create_send(vdev_mlme);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		mlme_err("Failed to create vdev for vdev id %d",
@@ -1788,6 +1826,21 @@ static QDF_STATUS ap_vdev_dfs_cac_timer_stop(struct vdev_mlme_obj *vdev_mlme,
 	return QDF_STATUS_SUCCESS;
 }
 
+static void mon_mlme_set_stop_required(struct wlan_objmgr_vdev *vdev,
+				       bool required)
+{
+	uint32_t flags;
+
+	wlan_vdev_obj_lock(vdev);
+	flags = vdev->vdev_objmgr.c_flags;
+	if (required)
+		flags |= WLAN_VDEV_C_STA_MON_STOP_REQUIRED;
+	else
+		flags &= ~WLAN_VDEV_C_STA_MON_STOP_REQUIRED;
+	WRITE_ONCE(vdev->vdev_objmgr.c_flags, flags);
+	wlan_vdev_obj_unlock(vdev);
+}
+
 /**
  * mon_mlme_vdev_start_restart_send () - send vdev start/restart req
  * @vdev_mlme: vdev mlme object
@@ -1802,8 +1855,32 @@ static QDF_STATUS mon_mlme_vdev_start_restart_send(
 	struct vdev_mlme_obj *vdev_mlme,
 	uint16_t data_len, void *data)
 {
+	struct wlan_objmgr_vdev *vdev = vdev_mlme->vdev;
+	struct wlan_objmgr_psoc *psoc = wlan_vdev_get_psoc(vdev);
+
 	mlme_legacy_debug("vdev id = %d",
 			  vdev_mlme->vdev->vdev_objmgr.vdev_id);
+	if (wlan_mlme_sta_mon_is_owner(psoc, wlan_vdev_get_id(vdev))) {
+		if (!wlan_mlme_sta_mon_start_valid(psoc,
+					wlan_mlme_sta_mon_epoch(psoc))) {
+			struct scheduler_msg message = {0};
+			enum wlan_vdev_sm_evt event = WLAN_VDEV_SM_EV_START_REQ_FAIL;
+
+			/* The SME request may have queued before owner invalidation. */
+			if (QDF_IS_STATUS_SUCCESS(wlan_vdev_is_restart_progress(vdev)))
+				event = WLAN_VDEV_SM_EV_RESTART_REQ_FAIL;
+			wlan_vdev_mlme_sm_deliver_evt_sync(vdev, event, 0, NULL);
+			/* Complete the wait; HDD still checks active state and epoch. */
+			message.type = eWNI_SME_MONITOR_MODE_VDEV_UP;
+			message.bodyval = wlan_vdev_get_id(vdev);
+			if (QDF_IS_STATUS_ERROR(scheduler_post_message(
+				    QDF_MODULE_ID_MLME, QDF_MODULE_ID_SME,
+				    QDF_MODULE_ID_SME, &message)))
+				mlme_err("Failed to complete canceled monitor START");
+			return QDF_STATUS_E_CANCELED;
+		}
+		mon_mlme_set_stop_required(vdev, true);
+	}
 	return lim_mon_mlme_vdev_start_send(vdev_mlme, data_len, data);
 }
 
@@ -1931,15 +2008,37 @@ static QDF_STATUS mon_mlme_vdev_down_send(struct vdev_mlme_obj *vdev_mlme,
 static QDF_STATUS mon_mlme_vdev_stop_resp(struct vdev_mlme_obj *vdev_mlme,
 					  struct vdev_stop_response *rsp)
 {
+	struct wlan_objmgr_vdev *vdev = vdev_mlme->vdev;
+	struct wlan_objmgr_psoc *psoc = wlan_vdev_get_psoc(vdev);
+
 	mlme_legacy_debug("vdev id = %d",
 			  vdev_mlme->vdev->vdev_objmgr.vdev_id);
+	if (wlan_mlme_sta_mon_is_owner(psoc, wlan_vdev_get_id(vdev))) {
+		/* The timer latches uncertainty before its synthetic response. */
+		if (wlan_mlme_sta_mon_fw_uncertain(psoc))
+			return QDF_STATUS_E_FAILURE;
+		mon_mlme_set_stop_required(vdev, false);
+	}
 	return wma_mon_mlme_vdev_stop_resp(vdev_mlme);
 }
 
 static void mon_mlme_vdev_down(struct vdev_mlme_obj *vdev_mlme)
 {
+	struct wlan_objmgr_vdev *vdev = vdev_mlme->vdev;
+	struct wlan_objmgr_psoc *psoc = wlan_vdev_get_psoc(vdev);
+	uint8_t vdev_id = wlan_vdev_get_id(vdev);
+
 	mlme_legacy_debug("vdev id = %d",
 			  vdev_mlme->vdev->vdev_objmgr.vdev_id);
+	if (wlan_mlme_sta_mon_is_owner(psoc, vdev_id) &&
+	    ((READ_ONCE(vdev->vdev_objmgr.c_flags) &
+	      WLAN_VDEV_C_STA_MON_STOP_REQUIRED) ||
+	     wlan_mlme_sta_mon_fw_uncertain(psoc))) {
+		/* INIT is also reached before the native STOP response arrives. */
+		wlan_mlme_sta_mon_fw_timeout(psoc, vdev_id);
+		mlme_err("VDEV_%u: INIT-down cannot confirm monitor STOP", vdev_id);
+		return;
+	}
 	wma_mon_mlme_vdev_stop_resp(vdev_mlme);
 }
 
@@ -2318,8 +2417,13 @@ void mlme_vdev_self_peer_delete_resp(struct del_vdev_params *param)
 					QDF_MODULE_ID_SME,
 					QDF_MODULE_ID_SME, &peer_del_rsp);
 	if (!QDF_IS_STATUS_SUCCESS(status)) {
-		/* In the error cases release the final sme reference */
-		wlan_objmgr_vdev_release_ref(param->vdev, WLAN_LEGACY_SME_ID);
+		/* A native helper must keep its final ref until FW DELETE. */
+		if (!wlan_vdev_is_injection_helper(param->vdev))
+			wlan_objmgr_vdev_release_ref(param->vdev, WLAN_LEGACY_SME_ID);
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+		else
+			wma_injection_helper_self_peer_deleted(param->vdev, status);
+#endif
 		qdf_mem_free(param);
 	}
 }
@@ -2488,6 +2592,22 @@ static struct vdev_mlme_ops ap_mlme_ops = {
 				vdevmgr_vdev_peer_delete_all_rsp_handle,
 	.mlme_vdev_csa_complete = ap_mlme_vdev_csa_complete,
 };
+
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+static struct vdev_mlme_ops injection_mlme_ops = {
+	.mlme_vdev_start_send = wma_injection_helper_start_send,
+	.mlme_vdev_start_continue = wma_injection_helper_start_continue,
+	.mlme_vdev_up_send = wma_injection_helper_up_send,
+	.mlme_vdev_notify_up_complete = wma_injection_helper_notify_up,
+	.mlme_vdev_disconnect_peers = wma_injection_helper_disconnect,
+	.mlme_vdev_stop_send = wma_injection_helper_stop_send,
+	.mlme_vdev_stop_continue = wma_injection_helper_stop_continue,
+	.mlme_vdev_down_send = wma_injection_helper_down_send,
+	.mlme_vdev_notify_down_complete = wma_injection_helper_notify_down,
+	.mlme_vdev_ext_start_rsp = wma_injection_helper_start_rsp,
+	.mlme_vdev_ext_stop_rsp = wma_injection_helper_stop_rsp,
+};
+#endif
 
 static struct vdev_mlme_ops mon_mlme_ops = {
 	.mlme_vdev_start_send = mon_mlme_vdev_start_restart_send,

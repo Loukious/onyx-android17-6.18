@@ -100,7 +100,15 @@
 
 #define WLAN_CFG_TIME_CONTROL_BP 3000
 
-#if defined(RX_DATA_BUFFER_SIZE)
+#if defined(QCA_WIFI_WCN7750) && defined(CONFIG_4_BYTES_TLV_TAG) && \
+	!defined(NO_RX_PKT_HDR_TLV)
+/* Match the header-enabled HAL floor even when cfg_dp.h is included first. */
+#if defined(RX_DATA_BUFFER_SIZE) && RX_DATA_BUFFER_SIZE > 2048
+#define WLAN_CFG_RX_BUFFER_SIZE RX_DATA_BUFFER_SIZE
+#else
+#define WLAN_CFG_RX_BUFFER_SIZE 2048
+#endif
+#elif defined(RX_DATA_BUFFER_SIZE)
 #define WLAN_CFG_RX_BUFFER_SIZE RX_DATA_BUFFER_SIZE
 #else
 #ifdef DP_RX_BUFFER_OPTIMIZATION
@@ -201,8 +209,14 @@
 
 #define WLAN_CFG_TIME_CONTROL_BP_MIN 3000
 #define WLAN_CFG_TIME_CONTROL_BP_MAX 1800000
+#if defined(QCA_WIFI_WCN7750) && defined(CONFIG_4_BYTES_TLV_TAG) && \
+	!defined(NO_RX_PKT_HDR_TLV)
+/* Reject legacy undersized INI values before the HAL minimum assertion. */
+#define WLAN_CFG_RX_BUFFER_SIZE_MIN WLAN_CFG_RX_BUFFER_SIZE
+#else
 /*MTU size of ethernet is 1500*/
 #define WLAN_CFG_RX_BUFFER_SIZE_MIN 1536
+#endif
 #define WLAN_CFG_RX_BUFFER_SIZE_MAX 4096
 
 #define WLAN_CFG_QREF_CONTROL_SIZE_MIN 0

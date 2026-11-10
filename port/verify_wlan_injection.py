@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise production packet parsing and firmware metadata with ASan/UBSan."""
+"""Exercise production injection parsing, queues and restart gates with ASan/UBSan."""
 import hashlib
 import json
 from pathlib import Path
@@ -12,7 +12,11 @@ HERE = Path(__file__).resolve().parent
 HDD = 'qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c'
 DP = 'qca-wifi-host-cmn/dp/wifi3.0/dp_tx.c'
 WMA = 'qcacld-3.0/core/wma/src/wma_data.c'
+MLME = 'qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c'
+MLME_HEADER = 'qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h'
+MLME_CONTROL = 'qcacld-3.0/components/mlme/core/inc/wlan_mlme_main.h'
 PARAMS = 'qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h'
+POWER = 'qca-wifi-host-cmn/umac/regulatory/dispatcher/inc/reg_services_public_struct.h'
 HTT = 'fw-api/fw/htt.h'
 
 
@@ -101,19 +105,55 @@ def verify(root):
             return int(result.stdout.strip())
         packet_assertions = run(code)
         wma = (root / WMA).read_text()
+        mlme = (root / MLME).read_text()
+        mlme_header = (root / MLME_HEADER).read_text()
         queue = (HERE / 'tests/wlan_injection_queue.c').read_text()
         replacements = {
             'PARAMS': params,
+            'POWER_TYPES': '\n'.join([
+                declaration((root / POWER).read_text(),
+                            r'struct chan_power_info \{.*?\n\};'),
+                declaration((root / POWER).read_text(),
+                            r'struct reg_tpc_power_info \{.*?\n\};'),
+            ]),
             'SLOT': declaration(wma, r'struct wma_injection_slot \{.*?\n\};'),
             'CB': declaration(wma, r'struct wma_injection_cb \{.*?\n\};'),
             'HELPER': declaration(wma, r'struct wma_injection_helper \{.*?\n\};'),
             'SNAPSHOT': declaration(wma, r'struct wma_injection_helper_snapshot \{.*?\n\};'),
+            'CONTEXT': declaration(wma, r'static struct \{.*?\n\} wma_injection_ctx;'),
+            'STA_MON_TYPES': '\n'.join([
+                declaration(mlme_header, r'enum wlan_mlme_sta_mon_state \{.*?\n\};'),
+                declaration(mlme_header, r'enum wlan_mlme_sta_mon_handoff_phase \{.*?\n\};'),
+                declaration(mlme_header, r'struct wlan_mlme_sta_mon_snapshot \{.*?\n\};'),
+                declaration(mlme_header, r'typedef void \(\*wlan_mlme_sta_mon_stop_cb\)\(void \*arg\);'),
+                declaration((root / MLME_CONTROL).read_text(),
+                            r'struct wlan_mlme_sta_mon_control \{.*?\n\};'),
+            ]),
+            'STA_MON_FUNCTIONS': '\n'.join(function(mlme, name) for name in [
+                'sta_mon_invalidate_locked', 'wlan_mlme_sta_mon_set_ready',
+                'sta_mon_handoff_valid_locked', 'sta_mon_vdev_is_owner',
+                'wlan_mlme_sta_mon_power_changed',
+                'wlan_mlme_sta_mon_is_owner', 'wlan_mlme_sta_mon_get_token',
+                'wlan_mlme_sta_mon_token_valid', 'wlan_mlme_sta_mon_get_snapshot',
+                'wlan_mlme_sta_mon_invalidate_owner', 'wlan_mlme_sta_mon_invalidate',
+                'wlan_mlme_sta_mon_update_begin', 'wlan_mlme_sta_mon_update_end',
+            ]),
+            'POWER': wma[wma.index('struct wma_injection_power_entry {'):
+                         wma.index('static void wma_injection_work(')],
+            'NATIVE_POWER_START': '\n'.join(function(wma, name) for name in [
+                'wma_injection_native_valid', 'wma_injection_helper_start_continue',
+                'wma_injection_helper_up_send',
+            ]),
             'SELECT_MAC': function(wma, 'wma_injection_select_mac'),
             'GET_SNAPSHOT': function(wma, 'wma_injection_get_helper_snapshot'),
         }
         for marker, name in {'REFILL': 'wma_injection_refill', 'TX': 'wma_injection_tx',
                              'LOOKUP': 'wma_injection_get_tx_params',
                              'COMPLETE': 'wma_injection_dp_complete',
+                             'RELEASE': 'wma_injection_dp_release',
+                             'RESUME': 'wma_injection_coex_resume',
+                             'PRE_STOP': 'wma_injection_pre_stop_cleanup',
+                             'INIT': 'wma_injection_init',
                              'DEINIT': 'wma_injection_deinit'}.items():
             replacements[marker] = function(wma, name)
         for marker, body in replacements.items():
@@ -124,11 +164,15 @@ def verify(root):
         'packet_assertions': packet_assertions, 'queue_assertions': queue_assertions,
         'malformed_packets': 12000, 'sanitizers': 'ASan+UBSan',
         'source_sha256': {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-                          for name in (HDD, WMA, DP, PARAMS, HTT, 'net/wireless/radiotap.c')},
+                          for name in (HDD, WMA, DP, PARAMS, POWER, HTT, MLME,
+                                       MLME_HEADER, MLME_CONTROL, 'net/wireless/radiotap.c')},
         'limits': ['Uses actual cfg80211 radiotap iterator, frame parser and HTT encoder.',
-                   'Actual WMA queuing, deferred refill, slot lookup, completion and teardown use mocked scheduling/DP.',
+                   'Actual WMA queue, refill, lookup, completion/release, init, stop and coex-resume functions use mocked scheduling/DP.',
+                   'Actual MLME READY, ownership, snapshot and generation checks cover restart and failed-drain admission.',
+                   'Actual private WMA power cache, layout and admission functions cover zero/negative limits, failed/overlapping sends, regulatory changes, overrides and vdev reuse with mocked regulatory and object services.',
+                   'Actual native helper START continuation and UP gate reject missing/failed/stale TPC programming; WMI sends and vdev state-machine delivery are mocked.',
                    'Helper MAC selection and snapshot identity use actual WMA functions; firmware address handling needs device testing.',
-                   'SKBs, DMA and synchronization primitives are mocks; firmware, ACKs and WPS require device testing.'],
+                   'Native helper creation/STOP/DELETE, HDD channel setup, SKBs, DMA and synchronization primitives are mocks or excluded; firmware, races, ACKs and WPS require device testing.'],
     }
 
 

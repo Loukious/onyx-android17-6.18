@@ -29,6 +29,7 @@
 #include <cdp_txrx_cmn.h>
 #include <wlan_cfg.h>
 #include "wlan_utility.h"
+#include "wlan_mlme_sta_mon.h"
 
 void mlo_get_link_information(struct qdf_mac_addr *mld_addr,
 			      struct mlo_link_info *info)
@@ -703,7 +704,12 @@ mlo_link_set_active(struct wlan_objmgr_psoc *psoc,
 		}
 	}
 
-	return mlo_tx_ops->link_set_active(psoc, param);
+	req->sta_mon_fw_pending = true;
+	status = mlo_tx_ops->link_set_active(psoc, param);
+	if (QDF_IS_STATUS_ERROR(status))
+		req->sta_mon_fw_pending = false;
+
+	return status;
 }
 
 /**
@@ -752,6 +758,8 @@ mlo_link_set_active_resp_vdev_handler(struct wlan_objmgr_psoc *psoc,
 	if (!req)
 		return;
 
+	/* The actual firmware response, not timeout/cancel, proves completion. */
+	req->sta_mon_fw_pending = false;
 	if (req->ctx.set_mlo_link_cb)
 		req->ctx.set_mlo_link_cb(vdev, req->ctx.cb_arg, event);
 
@@ -819,6 +827,10 @@ mlo_ser_set_link_cb(struct wlan_serialization_command *cmd,
 			req->ctx.set_mlo_link_cb(vdev, req->ctx.cb_arg, NULL);
 		break;
 	case WLAN_SER_CB_RELEASE_MEM_CMD:
+		if (!req->sta_mon_fw_pending)
+			wlan_mlme_sta_mon_update_end(psoc);
+		else
+			mlo_err("retain monitor exclusion after unconfirmed set-link command");
 		wlan_objmgr_vdev_release_ref(vdev, WLAN_MLO_MGR_ID);
 		qdf_mem_free(req);
 		break;
@@ -838,15 +850,20 @@ QDF_STATUS mlo_ser_set_link_req(struct mlo_link_set_active_req *req)
 	enum wlan_serialization_status ser_cmd_status;
 	QDF_STATUS status;
 	struct wlan_objmgr_vdev *vdev;
+	struct wlan_objmgr_psoc *psoc;
 
 	if (!req)
 		return QDF_STATUS_E_INVAL;
 
 	vdev = req->ctx.vdev;
+	psoc = wlan_vdev_get_psoc(vdev);
+	if (!wlan_mlme_sta_mon_admission_begin(psoc))
+		return QDF_STATUS_E_BUSY;
 	status = wlan_objmgr_vdev_try_get_ref(vdev, WLAN_MLO_MGR_ID);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		mlo_err("vdev %d unable to get reference",
 			wlan_vdev_get_id(vdev));
+		wlan_mlme_sta_mon_admission_end(psoc);
 		return status;
 	}
 
@@ -860,6 +877,8 @@ QDF_STATUS mlo_ser_set_link_req(struct mlo_link_set_active_req *req)
 	cmd.is_blocking = true;
 	cmd.umac_cmd = (void *)req;
 
+	req->sta_mon_fw_pending = false;
+	wlan_mlme_sta_mon_update_begin(psoc);
 	ser_cmd_status = wlan_serialization_request(&cmd);
 	switch (ser_cmd_status) {
 	case WLAN_SER_CMD_PENDING:
@@ -874,9 +893,11 @@ QDF_STATUS mlo_ser_set_link_req(struct mlo_link_set_active_req *req)
 		status = QDF_STATUS_E_FAILURE;
 	}
 
+	wlan_mlme_sta_mon_admission_end(psoc);
 	if (QDF_IS_STATUS_SUCCESS(status))
 		return status;
 
+	wlan_mlme_sta_mon_update_end(psoc);
 	wlan_objmgr_vdev_release_ref(vdev, WLAN_MLO_MGR_ID);
 
 	return status;

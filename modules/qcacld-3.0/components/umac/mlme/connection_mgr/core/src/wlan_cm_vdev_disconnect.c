@@ -77,6 +77,9 @@ QDF_STATUS cm_disconnect_start_ind(struct wlan_objmgr_vdev *vdev,
 		return QDF_STATUS_E_INVAL;
 	}
 	mlo_sta_stop_reconfig_timer(vdev);
+	wlan_mlme_sta_mon_disconnect_ind(psoc, wlan_vdev_get_id(vdev),
+			req->source == CM_OSIF_DISCONNECT &&
+			req->reason_code == REASON_DEAUTH_NETWORK_LEAVING);
 	if (req->source != CM_MLO_LINK_SWITCH_DISCONNECT)
 		ml_nlink_conn_change_notify(
 			psoc, wlan_vdev_get_id(vdev),

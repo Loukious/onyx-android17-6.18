@@ -50,7 +50,21 @@
 		(((_val) << _wrd ## _ ## _field ## _LSB) &	\
 		_wrd ## _ ## _field ## _MASK))
 
-#ifdef DP_RX_BUFFER_OPTIMIZATION
+#if defined(QCA_WIFI_WCN7750) && defined(CONFIG_4_BYTES_TLV_TAG) && \
+	!defined(NO_RX_PKT_HDR_TLV)
+/*
+ * The 264-byte prefix plus L3 padding and a full Ethernet MTU no longer
+ * fits the 1664-byte optimization. Keep normal data in a single buffer.
+ */
+#if !defined(RX_DATA_BUFFER_SIZE) || RX_DATA_BUFFER_SIZE < 2048
+#undef RX_DATA_BUFFER_SIZE
+#define RX_DATA_BUFFER_SIZE 2048
+#endif
+#if !defined(RX_MONITOR_BUFFER_SIZE) || RX_MONITOR_BUFFER_SIZE < 2048
+#undef RX_MONITOR_BUFFER_SIZE
+#define RX_MONITOR_BUFFER_SIZE 2048
+#endif
+#elif defined(DP_RX_BUFFER_OPTIMIZATION)
 /*
  * BUFFER_SIZE = 120 RX TLV bytes + 2 bytes L3_hdr_padding +
  *               1536 data bytes + 6 spare bytes
@@ -71,7 +85,7 @@
 #ifndef RX_MONITOR_BUFFER_SIZE
 #define RX_MONITOR_BUFFER_SIZE  2048
 #endif
-#endif /* DP_RX_BUFFER_OPTIMIZATION */
+#endif /* RX buffer layout */
 
 #define RXDMA_OPTIMIZATION
 
@@ -2199,6 +2213,68 @@ uint8_t hal_rx_get_filter_category(hal_soc_handle_t hal_soc_hdl,
 	struct hal_soc *hal_soc = (struct hal_soc *)hal_soc_hdl;
 
 	return hal_soc->ops->hal_rx_get_filter_category(buf);
+}
+
+/**
+ * hal_rx_mon_shared_tlv_supported() - Check shared-buffer monitor RX support
+ * @hal_soc_hdl: HAL SOC handle
+ *
+ * Check the TLV readers before enabling filters that feed the shared RAW
+ * classifier or the private helper RX copy. The older compact layout has
+ * no filter category and cannot distinguish normal errors from monitor RX.
+ *
+ * Return: true if the required TLV fields and readers are available
+ */
+static inline bool
+hal_rx_mon_shared_tlv_supported(hal_soc_handle_t hal_soc_hdl)
+{
+#if defined(CONFIG_WORD_BASED_TLV) && !defined(BE_NON_AP_COMPACT_TLV)
+	return false;
+#else
+	struct hal_soc *hal_soc = (struct hal_soc *)hal_soc_hdl;
+
+	if (!hal_soc || !hal_soc->ops ||
+	    !hal_soc->ops->hal_rx_get_filter_category ||
+	    !hal_soc->ops->hal_rx_mpdu_start_tlv_tag_valid ||
+	    !hal_soc->ops->hal_rx_tlv_msdu_done_get ||
+	    !hal_soc->ops->hal_rx_tlv_decap_format_get ||
+	    !hal_soc->ops->hal_rx_msdu_end_l3_hdr_padding_get ||
+	    !hal_soc->ops->hal_rx_tlv_mpdu_fcs_err_get ||
+	    !hal_soc->ops->hal_rx_desc_is_first_msdu ||
+	    !hal_soc->ops->hal_rx_mon_hw_desc_get_mpdu_status ||
+	    !hal_soc->ops->hal_rx_hw_desc_get_ppduid_get ||
+	    !hal_soc->ops->hal_rx_tlv_mpdu_len_err_get ||
+	    !hal_soc->ops->hal_rx_priv_info_set_in_tlv ||
+	    !hal_soc->ops->hal_rx_priv_info_get_from_tlv ||
+	    !hal_soc->ops->hal_rx_mpdu_start_offset_get ||
+	    !hal_soc->ops->hal_rx_msdu_end_offset_get)
+		return false;
+
+#ifndef NO_RX_PKT_HDR_TLV
+	/* The helper copy requires genuine bounded header bytes and metadata. */
+	if (!hal_soc->ops->hal_rx_pkt_tlv_offset_get ||
+	    !hal_soc->ops->hal_rx_desc_get_80211_hdr ||
+	    !hal_soc->ops->hal_rx_mpdu_get_addr1 ||
+	    !hal_soc->ops->hal_rx_mpdu_get_addr2 ||
+	    !hal_soc->ops->hal_rx_mpdu_get_addr3 ||
+	    !hal_soc->ops->hal_rx_get_mpdu_frame_control_valid ||
+	    !hal_soc->ops->hal_rx_get_mpdu_sequence_control_valid ||
+	    !hal_soc->ops->hal_rx_get_frame_ctrl_field ||
+	    !hal_soc->ops->hal_rx_get_rx_sequence ||
+	    !hal_soc->ops->hal_rx_tlv_msdu_len_get)
+		return false;
+#endif
+
+#ifdef CONFIG_WORD_BASED_TLV
+	/* Bit 0 selects the tag; bit 1 selects MSDU_END qword 0. */
+	if (!hal_soc->ops->hal_rx_mpdu_start_wmask_get ||
+	    !hal_soc->ops->hal_rx_msdu_end_wmask_get ||
+	    !hal_soc->ops->hal_rx_mpdu_start_wmask_get() ||
+	    !(hal_soc->ops->hal_rx_msdu_end_wmask_get() & (1U << 1)))
+		return false;
+#endif
+	return true;
+#endif
 }
 
 static inline

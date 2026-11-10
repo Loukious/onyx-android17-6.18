@@ -28,6 +28,7 @@
  */
 
 #include "sch_api.h"
+#include "wlan_mlme_sta_mon.h"
 #include "lim_utils.h"
 #include "lim_types.h"
 #include "lim_security_utils.h"
@@ -4381,6 +4382,7 @@ lim_prepare_for11h_channel_switch(struct mac_context *mac, struct pe_session *pe
 		return QDF_STATUS_E_INVAL;
 
 	/* Flag to indicate 11h channel switch in progress */
+	wlan_mlme_sta_mon_invalidate(mac->psoc, WLAN_INVALID_VDEV_ID);
 	pe_session->gLimSpecMgmt.dot11hChanSwState = eLIM_11H_CHANSW_RUNNING;
 
 	/** We are safe to switch channel at this point */

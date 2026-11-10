@@ -55,6 +55,7 @@
 #include "wlan_dp_ucfg_api.h"
 #include "qdf_ssr_driver_dump.h"
 #include "wlan_hdd_ioctl.h"
+#include "wlan_mlme_sta_mon.h"
 
 #ifdef MODULE
 #ifdef WLAN_WEAR_CHIPSET
@@ -352,6 +353,9 @@ static void hdd_soc_recovery_cleanup(void)
 	hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
 	if (!hdd_ctx)
 		return;
+
+	/* Pause optional traffic before shutdown notifiers force completion events. */
+	wlan_mlme_sta_mon_invalidate(hdd_ctx->psoc, WLAN_INVALID_VDEV_ID);
 
 	/* cancel/flush any pending/active idle shutdown work */
 	hdd_psoc_idle_timer_stop(hdd_ctx);
@@ -939,6 +943,10 @@ static int __hdd_soc_recovery_reinit(struct device *dev,
 		hdd_err("hdd_ctx is null!");
 		return qdf_status_to_os_return(QDF_STATUS_E_RESOURCES);
 	}
+	if (READ_ONCE(hdd_ctx->sta_mon_shutdown_blocked)) {
+		hdd_err("Retained STA monitor DMA state prevents recovery reuse");
+		return -EBUSY;
+	}
 
 	hdd_soc_load_lock(dev);
 	cds_set_driver_in_bad_state(false);
@@ -1043,6 +1051,10 @@ static void __hdd_soc_remove(struct device *dev)
 	QDF_BUG(hdd_ctx);
 	if (!hdd_ctx)
 		return;
+	if (!hdd_sta_mon_prepare_stop(hdd_ctx)) {
+		hdd_err("Retaining pinned WLAN resources after incomplete monitor drain");
+		return;
+	}
 
 	pr_info("%s: Removing driver v%s\n", WLAN_MODULE_NAME,
 		QWLAN_VERSIONSTR);

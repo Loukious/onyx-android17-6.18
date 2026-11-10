@@ -1484,6 +1484,10 @@ struct hdd_adapter {
 #ifdef FEATURE_MONITOR_MODE_SUPPORT
 	bool monitor_mode_vdev_up_in_progress;
 #endif
+	bool sta_mon_coexist;
+	bool sta_mon_pm_held;
+	bool sta_mon_stop_failed;
+	bool sta_mon_module_held;
 
 	struct rcpi_info rcpi;
 	bool send_mode_change;
@@ -2459,6 +2463,18 @@ struct hdd_context {
 	enum hdd_work_status monitor_restore_work_status;
 	char monitor_restore_iface[IFNAMSIZ];
 	bool monitor_restore_pending;
+#endif
+	struct qdf_delayed_work sta_mon_stop_work;
+	bool sta_mon_work_initialized;
+	bool sta_mon_shutdown_blocked;
+#ifdef FEATURE_WLAN_SCAN_PNO
+	/* One cfg80211 PNO request may wait for native exclusive ownership. */
+	struct mutex sta_mon_pno_lock;
+	struct qdf_delayed_work sta_mon_pno_work;
+	struct pno_scan_req_params *sta_mon_pno_req;
+	struct net_device *sta_mon_pno_dev;
+	uint64_t sta_mon_pno_reqid;
+	bool sta_mon_pno_initialized;
 #endif
 };
 
@@ -6086,4 +6102,11 @@ static inline void hdd_wiphy_unlock(struct wiphy *wiphy, struct wireless_dev *de
 	wiphy_unlock(wiphy);
 }
 #endif
+bool hdd_sta_monitor_coexist_enabled(void);
+bool hdd_sta_mon_prepare_stop(struct hdd_context *hdd_ctx);
+int hdd_sta_mon_get_channel(struct hdd_adapter *adapter,
+			    struct wlan_channel *channel);
+int hdd_sta_mon_set_channel(struct hdd_adapter *adapter,
+			    const struct wlan_channel *channel);
+
 #endif /* end #if !defined(WLAN_HDD_MAIN_H) */

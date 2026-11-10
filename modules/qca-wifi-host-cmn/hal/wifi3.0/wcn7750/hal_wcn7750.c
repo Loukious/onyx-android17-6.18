@@ -1146,6 +1146,22 @@ static inline uint32_t hal_rx_tlv_l3_type_get_7750(uint8_t *buf)
 }
 
 #ifdef CONFIG_WORD_BASED_TLV
+#ifdef BE_NON_AP_COMPACT_TLV
+/**
+ * hal_rx_get_filter_category_7750() - Get the compact RX filter category
+ * @buf: Start of RX packet TLVs in the final MSDU scatter buffer
+ *
+ * The compact MPDU_START omits the category. MSDU_END qword 0 carries it
+ * in the non-AP layout and must only be read after MSDU_DONE.
+ *
+ * Return: RXPCU filter category
+ */
+static uint8_t hal_rx_get_filter_category_7750(uint8_t *buf)
+{
+	return HAL_RX_MSDU_END(buf).rxpcu_mpdu_filter_in_category;
+}
+#endif
+
 /**
  * hal_rx_priv_info_set_in_tlv_7750() - Save the private info to
  *                             the reserved bytes of rx_tlv_hdr
@@ -2456,6 +2472,10 @@ static void hal_hw_txrx_ops_attach_7750(struct hal_soc *hal_soc)
 					hal_rx_msdu_end_wmask_get_be;
 	hal_soc->ops->hal_rx_mpdu_start_tlv_tag_valid =
 					hal_rx_mpdu_start_tlv_tag_valid_7750;
+#ifdef BE_NON_AP_COMPACT_TLV
+	hal_soc->ops->hal_rx_get_filter_category =
+					hal_rx_get_filter_category_7750;
+#endif
 #else
 	hal_soc->ops->hal_rx_priv_info_set_in_tlv =
 					hal_rx_priv_info_set_in_tlv_be;

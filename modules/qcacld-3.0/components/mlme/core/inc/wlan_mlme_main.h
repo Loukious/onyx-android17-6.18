@@ -32,6 +32,7 @@
 #include <wlan_objmgr_peer_obj.h>
 #include "wlan_wfa_config_public_struct.h"
 #include "wlan_connectivity_logging.h"
+#include "wlan_mlme_sta_mon.h"
 
 #define MAC_MAX_ADD_IE_LENGTH       2048
 /* Join probe request Retry  timer default (200)ms */
@@ -152,6 +153,22 @@ struct wlan_mlme_tx_ops {
 					     uint8_t csa_status);
 };
 
+struct wlan_mlme_sta_mon_control {
+	struct wlan_mlme_sta_mon_snapshot snapshot;
+	enum wlan_mlme_sta_mon_state state;
+	wlan_mlme_sta_mon_stop_cb stop;
+	void *arg;
+	uint32_t updates;
+	uint32_t admissions;
+	uint64_t handoff_generation;
+	enum wlan_mlme_sta_mon_handoff_phase handoff_phase;
+	uint8_t handoff_sta_vdev_id;
+	bool handoff_disconnect_seen;
+	bool exclusive_lease;
+	bool attached;
+	bool fw_uncertain;
+};
+
 /**
  * struct wlan_mlme_psoc_ext_obj -MLME ext psoc priv object
  * @cfg:     cfg items
@@ -164,6 +181,7 @@ struct wlan_mlme_tx_ops {
  * @scan_requester_id: mlme scan requester id
  * @miracast_opt_wakelock: wakelock to allow to stop miracast_opt in time
  * @miracast_opt_timer: timer to stop miracast_opt in time to avoid F/W assert
+ * @sta_mon: Host admission and generation for optional associated-STA monitor
  */
 struct wlan_mlme_psoc_ext_obj {
 	struct wlan_mlme_cfg cfg;
@@ -176,6 +194,7 @@ struct wlan_mlme_psoc_ext_obj {
 	wlan_scan_requester scan_requester_id;
 	qdf_wake_lock_t miracast_opt_wakelock;
 	qdf_timer_t miracast_opt_timer;
+	struct wlan_mlme_sta_mon_control sta_mon;
 };
 
 /**

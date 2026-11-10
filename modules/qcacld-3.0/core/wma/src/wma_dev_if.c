@@ -26,6 +26,7 @@
 
 #include "wma.h"
 #include "wma_api.h"
+#include "wlan_mlme_sta_mon.h"
 #include "cds_api.h"
 #include "wmi_unified_api.h"
 #include "wlan_qct_sys.h"
@@ -63,6 +64,7 @@
 #include <cdp_txrx_cmn.h>
 #include <cdp_txrx_misc.h>
 #include <cdp_txrx_ctrl.h>
+#include <cdp_txrx_injection.h>
 
 #include "wlan_policy_mgr_api.h"
 #include "wma_nan_datapath.h"
@@ -461,6 +463,10 @@ wma_cdp_vdev_detach(ol_txrx_soc_handle soc, tp_wma_handle wma_handle,
 		return;
 	}
 
+	/* The native target DELETE path owns this helper's single DP detach. */
+	if (wlan_vdev_is_injection_helper(vdev))
+		return;
+
 	if (soc && wlan_vdev_get_id(vdev) != WLAN_INVALID_VDEV_ID)
 		cdp_vdev_detach(soc, vdev_id, NULL, NULL);
 }
@@ -489,6 +495,7 @@ wma_release_vdev_ref(struct wma_txrx_node *iface)
 		wma_debug("no vdev delete");
 		return;
 	}
+	wma_sta_mon_beacon_vdev_detach(vdev);
 	iface->vdev_active = false;
 	iface->vdev = NULL;
 	if (vdev)
@@ -681,11 +688,18 @@ wma_vdev_self_peer_delete(tp_wma_handle wma_handle,
 	uint8_t vdev_id = pdel_vdev_req_param->vdev_id;
 	struct wma_txrx_node *iface = &wma_handle->interfaces[vdev_id];
 
-	if (mlme_vdev_uses_self_peer(iface->type, iface->sub_type)) {
+	if (wlan_vdev_is_injection_helper(iface->vdev) ||
+	    mlme_vdev_uses_self_peer(iface->type, iface->sub_type)) {
 		status = wma_self_peer_remove(wma_handle, pdel_vdev_req_param);
 		if (QDF_IS_STATUS_ERROR(status)) {
 			wma_err("can't remove selfpeer, send rsp session: %d",
 				vdev_id);
+			if (wlan_vdev_is_injection_helper(iface->vdev)) {
+				/* Keep the native owner until a real peer delete. */
+				pdel_vdev_req_param->status = status;
+				mlme_vdev_self_peer_delete_resp(pdel_vdev_req_param);
+				return status;
+			}
 			wma_handle_vdev_detach(wma_handle, pdel_vdev_req_param);
 			mlme_vdev_self_peer_delete_resp(pdel_vdev_req_param);
 			cds_trigger_recovery(QDF_SELF_PEER_DEL_FAILED);
@@ -704,6 +718,7 @@ QDF_STATUS wma_vdev_detach(struct del_vdev_params *pdel_vdev_req_param)
 {
 	QDF_STATUS status = QDF_STATUS_SUCCESS;
 	uint8_t vdev_id;
+	bool injection_helper;
 	struct wma_txrx_node *iface = NULL;
 	tp_wma_handle wma_handle = cds_get_context(QDF_MODULE_ID_WMA);
 
@@ -716,6 +731,7 @@ QDF_STATUS wma_vdev_detach(struct del_vdev_params *pdel_vdev_req_param)
 		wma_err("vdev %d is NULL", vdev_id);
 		return QDF_STATUS_E_INVAL;
 	}
+	injection_helper = wlan_vdev_is_injection_helper(iface->vdev);
 
 	status = wma_check_for_deferred_peer_delete(wma_handle,
 						    pdel_vdev_req_param);
@@ -738,7 +754,9 @@ QDF_STATUS wma_vdev_detach(struct del_vdev_params *pdel_vdev_req_param)
 	if (iface->type != WMI_VDEV_TYPE_MONITOR)
 		iface->vdev_active = false;
 
-	if (!mlme_vdev_uses_self_peer(iface->type, iface->sub_type) ||
+	/* A real peer response may already have cleared iface->vdev. */
+	if ((!injection_helper &&
+	     !mlme_vdev_uses_self_peer(iface->type, iface->sub_type)) ||
 	    !wmi_service_enabled(wma_handle->wmi_handle,
 	    wmi_service_sync_delete_cmds)) {
 		status = wma_handle_vdev_detach(wma_handle,
@@ -1316,7 +1334,10 @@ wma_set_and_update_mac_id(tp_wma_handle wma, struct mac_context *mac_ctx,
 		return;
 	}
 
-	wlan_mlme_set_vdev_mac_id(wma->pdev, rsp->vdev_id, mac_id);
+	if (wma->interfaces[rsp->vdev_id].type == WMI_VDEV_TYPE_MONITOR)
+		wlan_mlme_sta_mon_set_start_mac_id(wma->pdev, rsp->vdev_id, mac_id);
+	else
+		wlan_mlme_set_vdev_mac_id(wma->pdev, rsp->vdev_id, mac_id);
 
 	if (wlan_vdev_mlme_is_mlo_ap(vdev_mlme->vdev) ||
 	    wma->interfaces[rsp->vdev_id].type ==
@@ -1387,6 +1408,9 @@ QDF_STATUS wma_vdev_start_resp_handler(struct vdev_mlme_obj *vdev_mlme,
 		wma_err("Invalid vdev");
 		return QDF_STATUS_E_FAILURE;
 	}
+
+	/* A START response precedes the effective TPC table for this channel. */
+	wma_injection_power_reset(iface->vdev);
 
 	if (rsp->status == QDF_STATUS_SUCCESS) {
 		wma->interfaces[rsp->vdev_id].tx_streams =
@@ -1541,9 +1565,19 @@ wma_vdev_set_param(wmi_unified_t wmi_handle, uint32_t if_id,
 		return QDF_STATUS_E_INVAL;
 	}
 
+	if (param_id == wmi_vdev_param_nth_beacon_to_host)
+		return wma_sta_mon_beacon_set_param(wmi_handle, if_id,
+					param_value,
+					wma_sta_mon_beacon_cookie(if_id));
+
 	param.vdev_id = if_id;
 	param.param_id = param_id;
 	param.param_value = param_value;
+
+	if (param_id == wmi_vdev_param_tx_pwrlimit ||
+	    param_id == wmi_vdev_param_txpower_scale ||
+	    param_id == wmi_vdev_param_txpower_scale_decr_db)
+		wma_injection_power_override(if_id);
 
 	return wmi_unified_vdev_set_param_send(wmi_handle, &param);
 }
@@ -2268,6 +2302,11 @@ send_peer_create:
 		goto remove_peer;
 	}
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (wlan_vdev_is_injection_helper(wma->interfaces[vdev_id].vdev))
+		wma_injection_helper_peer_created(vdev_id);
+#endif
+
 	wma_debug("Created peer peer_addr "QDF_MAC_ADDR_FMT" vdev_id %d, peer_count - %d",
 		  QDF_MAC_ADDR_REF(peer_addr), vdev_id,
 		  wma->interfaces[vdev_id].peer_count + 1);
@@ -2933,7 +2972,9 @@ void wma_cleanup_vdev(struct wlan_objmgr_vdev *vdev)
 		return;
 	}
 
+	wma_sta_mon_beacon_vdev_detach(vdev);
 	wma_cdp_vdev_detach(soc, wma_handle, vdev_id);
+	wma_injection_power_set_owner(vdev, false);
 	wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_WMA_ID);
 	wma_handle->interfaces[vdev_id].vdev = NULL;
 	wma_handle->interfaces[vdev_id].vdev_active = false;
@@ -2951,7 +2992,8 @@ QDF_STATUS wma_vdev_self_peer_create(struct vdev_mlme_obj *vdev_mlme)
 	if (!wma_handle)
 		return QDF_STATUS_E_FAILURE;
 
-	if (mlme_vdev_uses_self_peer(vdev_mlme->mgmt.generic.type,
+	if (wlan_vdev_is_injection_helper(vdev) ||
+	    mlme_vdev_uses_self_peer(vdev_mlme->mgmt.generic.type,
 				     vdev_mlme->mgmt.generic.subtype)) {
 		status = wma_create_peer(wma_handle,
 					 vdev->vdev_mlme.macaddr,
@@ -3237,6 +3279,8 @@ QDF_STATUS wma_post_vdev_create_setup(struct wlan_objmgr_vdev *vdev)
 	vdev_id = wlan_vdev_get_id(vdev);
 	wma_handle->interfaces[vdev_id].vdev = vdev;
 	wma_handle->interfaces[vdev_id].vdev_active = true;
+	wma_injection_power_set_owner(vdev, true);
+	wma_sta_mon_beacon_vdev_attach(vdev);
 
 	vdev_mlme = wlan_vdev_mlme_get_cmpt_obj(vdev);
 	if (!vdev_mlme) {
@@ -3250,6 +3294,10 @@ QDF_STATUS wma_post_vdev_create_setup(struct wlan_objmgr_vdev *vdev)
 		vdev_mlme->mgmt.generic.type;
 	wma_handle->interfaces[vdev_id].sub_type =
 		vdev_mlme->mgmt.generic.subtype;
+
+	/* Private RAW helper setup must not change the STA/pdev policy. */
+	if (wlan_vdev_is_injection_helper(vdev))
+		return wma_vdev_set_data_tx_callback(vdev);
 
 	wma_get_keep_sta_alive_method(mac->psoc, &sta_keep_alive);
 
@@ -3878,7 +3926,8 @@ int wma_peer_delete_handler(void *handle, uint8_t *cmd_param_info,
 	case WMA_DEL_P2P_SELF_STA_RSP_START:
 		data = (struct del_sta_self_rsp_params *)req_msg->user_data;
 		wma_debug("Calling vdev detach handler");
-		wma_handle_vdev_detach(wma, data->self_sta_param);
+		data->self_sta_param->status =
+			wma_handle_vdev_detach(wma, data->self_sta_param);
 		mlme_vdev_self_peer_delete_resp(data->self_sta_param);
 		qdf_mem_free(data);
 		break;
@@ -4023,7 +4072,8 @@ void wma_hold_req_timer(void *data)
 			wma_trigger_recovery_assert_on_fw_timeout(
 				WMA_DELETE_STA_REQ,
 				QDF_PEER_DELETION_TIMEDOUT);
-		wma_handle_vdev_detach(wma, del_sta->self_sta_param);
+		if (!wlan_vdev_is_injection_helper(del_sta->self_sta_param->vdev))
+			wma_handle_vdev_detach(wma, del_sta->self_sta_param);
 		mlme_vdev_self_peer_delete_resp(del_sta->self_sta_param);
 		qdf_mem_free(tgt_req->user_data);
 	} else if ((tgt_req->msg_type == WMA_DELETE_STA_REQ) &&

@@ -18,6 +18,7 @@
  * DOC: contains MLO manager Link Switch related functionality
  */
 #include <wlan_mlo_mgr_link_switch.h>
+#include "wlan_mlme_sta_mon.h"
 #include <wlan_mlo_mgr_main.h>
 #include <wlan_mlo_mgr_sta.h>
 #include <wlan_serialization_api.h>
@@ -1567,6 +1568,10 @@ QDF_STATUS mlo_mgr_link_switch_notify(struct wlan_objmgr_vdev *vdev,
 	}
 
 	notify_reason = mlo_mgr_link_switch_get_notify_reason(vdev);
+	if (notify_reason == MLO_LINK_SWITCH_NOTIFY_REASON_PRE_START_PRE_SER ||
+	    notify_reason == MLO_LINK_SWITCH_NOTIFY_REASON_PRE_START_POST_SER)
+		wlan_mlme_sta_mon_invalidate(wlan_vdev_get_psoc(vdev),
+					     WLAN_INVALID_VDEV_ID);
 	for (i = 0; i < WLAN_UMAC_COMP_ID_MAX; i++) {
 		if (!mlo_mgr_ctx->lswitch_notifier[i].in_use)
 			continue;
@@ -1802,6 +1807,7 @@ mlo_mgr_link_state_switch_info_handler(struct wlan_objmgr_psoc *psoc,
 		return QDF_STATUS_E_INVAL;
 	}
 
+	wlan_mlme_sta_mon_update_begin(psoc);
 	for (i = 0; i < info->num_params; i++) {
 		wlan_connectivity_mld_link_status_event(
 				psoc,
@@ -1810,6 +1816,7 @@ mlo_mgr_link_state_switch_info_handler(struct wlan_objmgr_psoc *psoc,
 				psoc, mld_ctx,
 				info->link_switch_param[i].active_link_bitmap);
 	}
+	wlan_mlme_sta_mon_update_end(psoc);
 
 	return status;
 }

@@ -1931,6 +1931,8 @@ QDF_STATUS hdd_wlan_shutdown(void)
 	hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
 	if (!hdd_ctx)
 		return QDF_STATUS_E_FAILURE;
+	if (!hdd_sta_mon_prepare_stop(hdd_ctx))
+		return QDF_STATUS_E_BUSY;
 
 	if (ucfg_ipa_is_enabled()) {
 		ucfg_ipa_uc_force_pipe_shutdown(hdd_ctx->pdev);

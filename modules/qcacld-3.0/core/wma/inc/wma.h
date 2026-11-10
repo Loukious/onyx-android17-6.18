@@ -939,6 +939,8 @@ struct wma_pf_sym_hist {
  * @log_completion_timer: log completion timer
  * @old_hw_mode_index: Previous configured HW mode index
  * @new_hw_mode_index: Current configured HW mode index
+ * @sta_mon_hw_mode_pending: HW mode response still excludes monitor handoff
+ * @sta_mon_dual_mac_pending: Dual MAC response still excludes monitor handoff
  * @ocb_config_req: OCB request context
  * @self_gen_frm_pwr: Self-generated frame power
  * @tx_chain_mask_cck: Is the CCK tx chain mask enabled
@@ -1064,6 +1066,8 @@ typedef struct {
 	qdf_mc_timer_t log_completion_timer;
 	uint32_t old_hw_mode_index;
 	uint32_t new_hw_mode_index;
+	bool sta_mon_hw_mode_pending;
+	bool sta_mon_dual_mac_pending;
 	uint16_t self_gen_frm_pwr;
 	bool tx_chain_mask_cck;
 	qdf_mc_timer_t service_ready_ext_timer;

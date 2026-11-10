@@ -38,6 +38,7 @@
 #include <qdf_platform.h>
 #include <wlan_reg_services_api.h>
 #include <wlan_objmgr_vdev_obj.h>
+#include <cdp_txrx_injection.h>
 
 #define MAX_PWR_FCC_CHAN_12 8
 #define MAX_PWR_FCC_CHAN_13 2
@@ -3473,6 +3474,8 @@ void reg_modify_sp_channels(struct regulatory_channel *chan_list)
 void reg_compute_pdev_current_chan_list(struct wlan_regulatory_pdev_priv_obj
 					*pdev_priv_obj)
 {
+	uint64_t ticket = wma_injection_reg_begin(pdev_priv_obj->pdev_ptr);
+
 	reg_modify_6g_afc_chan_list(pdev_priv_obj);
 
 	reg_copy_6g_cur_mas_chan_list_to_cmn(pdev_priv_obj);
@@ -3536,6 +3539,7 @@ void reg_compute_pdev_current_chan_list(struct wlan_regulatory_pdev_priv_obj
 	reg_modify_sec_chan_list_for_6g_edge_chan(pdev_priv_obj);
 
 	reg_disable_enable_opclass_channels(pdev_priv_obj);
+	wma_injection_reg_end(pdev_priv_obj->pdev_ptr, ticket);
 }
 
 void reg_reset_reg_rules(struct reg_rule_info *reg_rules)

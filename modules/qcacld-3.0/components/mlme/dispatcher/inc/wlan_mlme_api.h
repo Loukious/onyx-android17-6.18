@@ -27,6 +27,7 @@
 #include <wlan_objmgr_psoc_obj.h>
 #include <wlan_cmn.h>
 #include "sme_api.h"
+#include "wlan_mlme_sta_mon.h"
 
 #define DISABLE_MCS_12_13_2G_40M 1
 

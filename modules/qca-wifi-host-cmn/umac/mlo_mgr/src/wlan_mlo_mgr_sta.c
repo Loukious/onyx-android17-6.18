@@ -24,6 +24,7 @@
 #include <wlan_cm_public_struct.h>
 #include <wlan_mlo_mgr_main.h>
 #include <wlan_cm_api.h>
+#include <wlan_mlme_sta_mon.h>
 #include <wlan_mlo_mgr_cmn.h>
 #include <wlan_scan_api.h>
 #include <scheduler_api.h>
@@ -750,7 +751,7 @@ static void mlo_clear_sta_key_mgmt(struct wlan_objmgr_vdev *vdev)
 }
 #endif
 
-QDF_STATUS mlo_connect(struct wlan_objmgr_vdev *vdev,
+static QDF_STATUS mlo_connect_admitted(struct wlan_objmgr_vdev *vdev,
 		       struct wlan_cm_connect_req *req)
 {
 	struct wlan_mlo_dev_context *mlo_dev_ctx;
@@ -805,6 +806,23 @@ QDF_STATUS mlo_connect(struct wlan_objmgr_vdev *vdev,
 	}
 
 	return wlan_cm_start_connect(vdev, req);
+}
+
+QDF_STATUS mlo_connect(struct wlan_objmgr_vdev *vdev,
+		       struct wlan_cm_connect_req *req)
+{
+	struct wlan_objmgr_psoc *psoc;
+	QDF_STATUS status;
+
+	if (!vdev)
+		return QDF_STATUS_E_INVAL;
+	psoc = wlan_vdev_get_psoc(vdev);
+	if (!wlan_mlme_sta_mon_admission_begin(psoc))
+		return QDF_STATUS_E_BUSY;
+	status = mlo_connect_admitted(vdev, req);
+	wlan_mlme_sta_mon_admission_end(psoc);
+
+	return status;
 }
 
 static inline void
