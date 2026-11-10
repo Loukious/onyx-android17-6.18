@@ -229,6 +229,8 @@ struct sap_context {
 	uint8_t sap_sta_id;
 	bool dfs_cac_offload;
 	bool is_chan_change_inprogress;
+	/* Optional monitor admission waits for a fresh completed AP transition. */
+	bool sta_mon_transition;
 	/* Disabled mcs13 by sap or not */
 	bool disabled_mcs13;
 	qdf_list_t owe_pending_assoc_ind_list;

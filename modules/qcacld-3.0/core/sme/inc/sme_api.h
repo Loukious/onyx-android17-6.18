@@ -1833,6 +1833,10 @@ QDF_STATUS sme_wifi_start_logger(mac_handle_t mac_handle,
  */
 bool sme_is_any_session_in_middle_of_roaming(mac_handle_t mac_handle);
 
+/* Caller holds the real AP vdev reference and validates its MLME epoch. */
+bool sme_is_ap_channel_update_pending(mac_handle_t mac_handle,
+				      struct wlan_objmgr_vdev *vdev);
+
 /**
  * sme_send_flush_logs_cmd_to_fw() - Initiate command to FW to flush logs
  *

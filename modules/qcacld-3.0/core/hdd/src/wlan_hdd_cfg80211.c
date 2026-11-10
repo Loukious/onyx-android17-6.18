@@ -941,6 +941,11 @@ static const struct ieee80211_iface_limit wlan_hdd_sta_mon_iface_limit[] = {
 	{ .max = 1, .types = BIT(NL80211_IFTYPE_MONITOR) },
 };
 
+static const struct ieee80211_iface_limit wlan_hdd_ap_mon_iface_limit[] = {
+	{ .max = 1, .types = BIT(NL80211_IFTYPE_AP) },
+	{ .max = 1, .types = BIT(NL80211_IFTYPE_MONITOR) },
+};
+
 static struct ieee80211_iface_combination
 	wlan_hdd_iface_combination[] = {
 	/* STA */
@@ -1044,6 +1049,13 @@ static struct ieee80211_iface_combination
 		.max_interfaces = 2,
 		.num_different_channels = 1,
 		.n_limits = ARRAY_SIZE(wlan_hdd_sta_mon_iface_limit),
+	},
+	/* One started AP owns the monitor's complete, fixed operating channel. */
+	{
+		.limits = wlan_hdd_ap_mon_iface_limit,
+		.max_interfaces = 2,
+		.num_different_channels = 1,
+		.n_limits = ARRAY_SIZE(wlan_hdd_ap_mon_iface_limit),
 	},
 #if defined(WLAN_FEATURE_NAN) && \
 	   (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0))
@@ -25538,6 +25550,11 @@ static void wlan_hdd_update_iface_combination(struct hdd_context *hdd_ctx,
 		if (wlan_hdd_iface_combination[i].limits ==
 		    wlan_hdd_sta_mon_iface_limit &&
 		    (!hdd_sta_monitor_coexist_enabled() ||
+		     !ucfg_dp_sta_mon_coex_supported(psoc)))
+			continue;
+		if (wlan_hdd_iface_combination[i].limits ==
+		    wlan_hdd_ap_mon_iface_limit &&
+		    (!hdd_ap_monitor_coexist_enabled() ||
 		     !ucfg_dp_sta_mon_coex_supported(psoc)))
 			continue;
 		/* Filter for non-DBS targets */

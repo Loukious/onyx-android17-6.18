@@ -10776,6 +10776,24 @@ QDF_STATUS sme_wifi_start_logger(mac_handle_t mac_handle,
 	return status;
 }
 
+bool sme_is_ap_channel_update_pending(mac_handle_t mac_handle,
+				      struct wlan_objmgr_vdev *vdev)
+{
+	struct mac_context *mac = MAC_CONTEXT(mac_handle);
+	struct pe_session *session;
+
+	if (!mac || !vdev)
+		return true;
+	/* PE sessions live in the MAC session array. The caller's epoch detects
+	 * concurrent stop/reuse; compare the referenced native identity as well.
+	 */
+	session = pe_find_session_by_vdev_id(mac, wlan_vdev_get_id(vdev));
+	return !session || READ_ONCE(session->vdev) != vdev ||
+		READ_ONCE(session->opmode) != QDF_SAP_MODE ||
+		READ_ONCE(session->bw_update_include_ch_sw_ie) ||
+		READ_ONCE(session->dfsIncludeChanSwIe);
+}
+
 bool sme_is_any_session_in_middle_of_roaming(mac_handle_t mac_handle)
 {
 	struct mac_context *mac_ctx = MAC_CONTEXT(mac_handle);

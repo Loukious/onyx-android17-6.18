@@ -44,6 +44,7 @@ struct wlan_objmgr_vdev {
     enum qdf_opmode opmode;
     struct wlan_channel channel;
     bool fw_uncertain;
+    bool injection_helper;
 };
 struct vdev_mlme_obj { struct wlan_objmgr_vdev *vdev; };
 struct vdev_up_params { uint8_t vdev_id; };
@@ -64,6 +65,7 @@ typedef struct wma_handle *tp_wma_handle;
 #define QDF_IS_STATUS_ERROR(s) ((s) != 0)
 #define QDF_IS_STATUS_SUCCESS(s) ((s) == 0)
 #define WLAN_INVALID_VDEV_ID 0xff
+#define U32_MAX UINT32_MAX
 #define HZ 100
 #define WMA_INJECTION_SLOT_COUNT 256
 #define WMA_INJECTION_QUEUE_LIMIT 256
@@ -214,6 +216,10 @@ static uint8_t wlan_vdev_get_id(struct wlan_objmgr_vdev *v) { return v->id; }
 static enum qdf_opmode wlan_vdev_mlme_get_opmode(struct wlan_objmgr_vdev *v)
 {
     return v->opmode;
+}
+static bool wlan_vdev_is_injection_helper(struct wlan_objmgr_vdev *v)
+{
+    return v->injection_helper;
 }
 static struct wlan_channel *wlan_vdev_mlme_get_bss_chan(struct wlan_objmgr_vdev *v)
 {
@@ -444,6 +450,32 @@ static void ready_coex_fixture(uint64_t generation)
         .snapshot = { .generation = generation, .sta_vdev_id = 0,
                       .mon_vdev_id = 3, .channel.ch_freq = 5260 },
     };
+    CHECK(wlan_mlme_sta_mon_set_ready(&psoc, generation));
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, generation));
+}
+
+static struct wlan_mlme_sta_mon_snapshot quiesced_ap_fixture(uint64_t generation)
+{
+    /* Owner/channel acquisition is an input; arming and later gates are real. */
+    control = (struct wlan_mlme_sta_mon_control){
+        .attached = true, .state = WLAN_STA_MON_QUIESCED,
+        .stop = notify_stop, .arg = &stop_notifications,
+        .snapshot = { .generation = generation,
+                      .sta_vdev_id = WLAN_INVALID_VDEV_ID,
+                      .mon_vdev_id = WLAN_INVALID_VDEV_ID },
+    };
+    return (struct wlan_mlme_sta_mon_snapshot){
+        .generation = generation, .sta_vdev_id = 0, .mon_vdev_id = 3,
+        .ap_owner = true,
+        .channel = { .ch_freq = 5260, .ch_cfreq1 = 5290, .ch_width = CH_WIDTH_80MHZ },
+    };
+}
+
+static void ready_ap_fixture(uint64_t generation)
+{
+    struct wlan_mlme_sta_mon_snapshot snapshot = quiesced_ap_fixture(generation - 1);
+    CHECK(wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    CHECK(snapshot.generation == generation && control.state == WLAN_STA_MON_ARMING);
     CHECK(wlan_mlme_sta_mon_set_ready(&psoc, generation));
     CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, generation));
 }
@@ -722,6 +754,212 @@ static void test_deinit_dma_ownership(const struct cdp_tx_injection_params *para
     wma_injection_deinit(&fake_wma);
 }
 
+static void check_ap_admissions(void)
+{
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, WLAN_INVALID_VDEV_ID));
+    CHECK(!wlan_mlme_sta_mon_ap_is_owner(&psoc, 3));
+    CHECK(!wlan_mlme_sta_mon_ap_is_owner(&psoc, 4));
+    CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
+    CHECK(!wlan_mlme_sta_mon_ap_csa_admission_begin(&psoc, 0));
+    CHECK(wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 0, 5260, false));
+    CHECK(control.admissions == 1);
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 0, 0, false));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(!wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 0, 5180, false));
+    CHECK(!wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 0, 5260, true));
+    CHECK(!wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 4, 5260, false));
+    CHECK(wlan_mlme_sta_mon_mgmt_tx_begin(&psoc, 0, false));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(wlan_mlme_sta_mon_mgmt_tx_begin(&psoc, 0, true));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(!wlan_mlme_sta_mon_mgmt_tx_begin(&psoc, 3, false));
+    CHECK(!wlan_mlme_sta_mon_mgmt_tx_begin(&psoc, 4, true));
+    CHECK(!control.admissions && !sta_mon_lock);
+}
+
+static void test_ap_admissions(void)
+{
+    struct wlan_mlme_sta_mon_snapshot snapshot, active;
+    init_coex_fixture();
+    snapshot = quiesced_ap_fixture(401);
+    CHECK(!wlan_mlme_sta_mon_ap_is_owner(&psoc, WLAN_INVALID_VDEV_ID));
+
+    /* A scan/connect or already admitted management send must finish first. */
+    CHECK(wlan_mlme_sta_mon_admission_begin(&psoc));
+    CHECK(wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 4, 5180, true));
+    CHECK(control.admissions == 2 && !wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(control.admissions == 1 && !wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    CHECK(snapshot.generation == 401 && control.snapshot.generation == 401);
+    CHECK(control.state == WLAN_STA_MON_QUIESCED && !control.snapshot.ap_owner);
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    snapshot.exclusive = true;
+    CHECK(!wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    snapshot.exclusive = false;
+    CHECK(wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    CHECK(snapshot.generation == 402 && control.state == WLAN_STA_MON_ARMING);
+    check_ap_admissions();
+
+    CHECK(wlan_mlme_sta_mon_set_ready(&psoc, snapshot.generation));
+    CHECK(wlan_mlme_sta_mon_get_snapshot(&psoc, 3, snapshot.generation, &active));
+    CHECK(active.ap_owner && !active.exclusive && active.sta_vdev_id == 0);
+    check_ap_admissions();
+    CHECK(!wlan_mlme_sta_mon_exclusive_reserve(&psoc, 3, snapshot.generation));
+    CHECK(!control.exclusive_lease && !control.handoff_generation);
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, snapshot.generation));
+
+    wlan_mlme_sta_mon_disconnect_ind(&psoc, 4, false);
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, snapshot.generation));
+    CHECK(!stop_notifications);
+    wlan_mlme_sta_mon_invalidate(&psoc, 0);
+    CHECK(control.state == WLAN_STA_MON_QUIESCING && stop_notifications == 1);
+    CHECK(!wlan_mlme_sta_mon_token_valid(&psoc, 3, snapshot.generation));
+    check_ap_admissions();
+    wlan_mlme_sta_mon_update_begin(&psoc);
+    CHECK(control.updates == 1 && control.state == WLAN_STA_MON_QUIESCING);
+    CHECK(!wlan_mlme_sta_mon_ap_csa_admission_begin(&psoc, 4));
+    CHECK(wlan_mlme_sta_mon_ap_csa_admission_begin(&psoc, 0));
+    CHECK(control.admissions == 1);
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    wlan_mlme_sta_mon_update_end(&psoc);
+    CHECK(!control.updates && !control.admissions);
+    CHECK(!wlan_mlme_sta_mon_ap_csa_admission_begin(&psoc, 0));
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    wma_injection_pre_stop_cleanup();
+    CHECK(wma_injection_ctx.coex_resume_ready && !wma_injection_ctx.in_flight);
+    CHECK(wlan_mlme_sta_mon_quiesced(&psoc));
+    CHECK(!wlan_mlme_sta_mon_ap_is_owner(&psoc, WLAN_INVALID_VDEV_ID));
+    CHECK(wlan_mlme_sta_mon_admission_begin(&psoc));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 4, 5180, true));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(wlan_mlme_sta_mon_ap_csa_admission_begin(&psoc, 4));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(!control.admissions);
+    wma_injection_deinit(&fake_wma);
+}
+
+static void test_ap_handoff_guards(void)
+{
+    struct wlan_mlme_sta_mon_snapshot next;
+    init_coex_fixture();
+    ready_ap_fixture(421);
+    CHECK(!wlan_mlme_sta_mon_exclusive_reserve(&psoc, 3, 421));
+
+    /* Even a stale reservation cannot hand off an AP's still-owned channel. */
+    control.exclusive_lease = true;
+    control.handoff_generation = 421;
+    control.handoff_phase = WLAN_STA_MON_HANDOFF_DISCONNECTED;
+    control.handoff_disconnect_seen = true;
+    control.state = WLAN_STA_MON_HANDOFF;
+    next = control.snapshot;
+    next.exclusive = true;
+    next.ap_owner = false;
+    next.sta_vdev_id = WLAN_INVALID_VDEV_ID;
+    CHECK(!wlan_mlme_sta_mon_handoff_valid(&psoc, 421));
+    CHECK(!wlan_mlme_sta_mon_handoff_start(&psoc, &next));
+    CHECK(control.state == WLAN_STA_MON_HANDOFF && control.snapshot.ap_owner);
+    control.state = WLAN_STA_MON_ARMING;
+    control.handoff_phase = WLAN_STA_MON_HANDOFF_RESTART;
+    CHECK(!wlan_mlme_sta_mon_handoff_ready(&psoc, &next));
+    CHECK(control.state == WLAN_STA_MON_ARMING && control.snapshot.ap_owner);
+
+    /* An otherwise valid STA handoff must also reject an AP destination. */
+    control.snapshot.ap_owner = false;
+    control.state = WLAN_STA_MON_HANDOFF;
+    control.handoff_phase = WLAN_STA_MON_HANDOFF_DISCONNECTED;
+    next.ap_owner = true;
+    CHECK(wlan_mlme_sta_mon_handoff_valid(&psoc, 421));
+    CHECK(!wlan_mlme_sta_mon_handoff_start(&psoc, &next));
+    next.ap_owner = false;
+    CHECK(wlan_mlme_sta_mon_handoff_start(&psoc, &next));
+    next.ap_owner = true;
+    CHECK(!wlan_mlme_sta_mon_handoff_ready(&psoc, &next));
+    CHECK(control.state == WLAN_STA_MON_ARMING && !control.snapshot.ap_owner);
+    next.ap_owner = false;
+    CHECK(wlan_mlme_sta_mon_handoff_ready(&psoc, &next));
+    CHECK(control.state == WLAN_STA_MON_READY && control.snapshot.exclusive);
+    wma_injection_deinit(&fake_wma);
+}
+
+static void test_ap_invalidation_ownership(const struct cdp_tx_injection_params *params)
+{
+    struct sk_buff packets[3] = {0};
+    struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+    init_coex_fixture();
+    ready_ap_fixture(441);
+    CHECK(wma_injection_coex_resume(3, 441) == QDF_STATUS_SUCCESS);
+    CHECK(wma_injection_tx(&packets[0], 3, params) == QDF_STATUS_SUCCESS);
+    wma_injection_refill(true);
+    *helper = (struct wma_injection_helper){
+        .native = true, .created = true, .dp_attached = true,
+        .vdev = &monitor_vdev, .monitor_vdev_id = 3, .generation = 441,
+    };
+    CHECK(wma_injection_tx(&packets[1], 3, params) == QDF_STATUS_SUCCESS);
+    wlan_mlme_sta_mon_invalidate(&psoc, 0);
+    CHECK(control.state == WLAN_STA_MON_QUIESCING && stop_notifications == 1);
+    CHECK(!wma_injection_ctx.paused); /* The stop mock only records notification. */
+    CHECK(wma_injection_tx(&packets[2], 3, params) == QDF_STATUS_E_AGAIN);
+    CHECK(injection_accepted == 2 && wma_injection_ctx.pending.len == 1);
+    CHECK(!packets[2].freed && !packets[2].sent && !packets[2].reset);
+    wma_injection_pre_stop_cleanup();
+    CHECK(packets[1].freed == 1 && !packets[1].sent && !wma_injection_ctx.pending.len);
+    CHECK(helper->native && !destroyed && !wma_injection_ctx.coex_resume_ready);
+    CHECK(wma_injection_ctx.in_flight == 1 && wma_injection_ctx.slots[1].nbuf == &packets[0]);
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
+    tx_rejected(params);
+
+    /* A status report cannot release the DMA slot or native AP lease. */
+    CHECK(wma_injection_dp_complete(NULL, &packets[0], 0));
+    wma_injection_pre_stop_cleanup();
+    CHECK(wma_injection_ctx.in_flight == 1 && !injection_completed && !destroyed);
+    CHECK(helper->native && !packets[0].freed);
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    wma_injection_dp_release(&packets[0], 1);
+    CHECK(!wma_injection_ctx.in_flight && !wma_injection_ctx.slots[1].nbuf);
+    CHECK(injection_completed == 1 && helper->native && !packets[0].freed);
+    retain_helper = true;
+    wma_injection_pre_stop_cleanup();
+    CHECK(helper->native && !wma_injection_ctx.coex_resume_ready && destroyed == 1);
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
+    retain_helper = false;
+    wma_injection_pre_stop_cleanup();
+    CHECK(!helper->native && wma_injection_ctx.coex_resume_ready && destroyed == 2);
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    /* Only now does the fixture have the teardown proof expected from HDD. */
+    CHECK(wlan_mlme_sta_mon_quiesced(&psoc));
+    CHECK(!wlan_mlme_sta_mon_ap_is_owner(&psoc, WLAN_INVALID_VDEV_ID));
+    CHECK(wlan_mlme_sta_mon_admission_begin(&psoc));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    wma_injection_deinit(&fake_wma);
+}
+
+static void test_ap_firmware_uncertainty(const struct cdp_tx_injection_params *params)
+{
+    init_coex_fixture();
+    ready_ap_fixture(461);
+    wlan_mlme_sta_mon_fw_timeout(&psoc, 4);
+    CHECK(!control.fw_uncertain && wlan_mlme_sta_mon_token_valid(&psoc, 3, 461));
+    wlan_mlme_sta_mon_fw_timeout(&psoc, 3);
+    CHECK(control.fw_uncertain && control.state == WLAN_STA_MON_QUIESCING);
+    tx_rejected(params);
+    wma_injection_pre_stop_cleanup();
+    CHECK(wma_injection_ctx.coex_resume_ready && !wma_injection_ctx.in_flight);
+    CHECK(!wlan_mlme_sta_mon_quiesced(&psoc));
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    wlan_mlme_sta_mon_detach(&psoc);
+    CHECK(!control.attached && control.state == WLAN_STA_MON_OFF);
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, WLAN_INVALID_VDEV_ID));
+    CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
+    CHECK(!wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 4, 5260, false));
+    CHECK(!control.admissions);
+    wma_injection_deinit(&fake_wma);
+}
+
 static struct wlan_objmgr_vdev power_sta, power_helper;
 
 static struct reg_tpc_power_info power_fixture(void)
@@ -736,7 +974,7 @@ static struct reg_tpc_power_info power_fixture(void)
         .channel = { .ch_freq = 5260, .ch_cfreq1 = 5290, .ch_width = CH_WIDTH_80MHZ },
     };
     power_helper = (struct wlan_objmgr_vdev){ .psoc = &psoc, .id = 4,
-                                             .opmode = QDF_SAP_MODE };
+        .opmode = QDF_SAP_MODE, .injection_helper = true };
     wma_injection_power_set_owner(&power_sta, true);
     wma_injection_power_set_owner(&power_helper, true);
     for (unsigned int i = 0; i < power.num_pwr_levels; i++)
@@ -756,6 +994,84 @@ static QDF_STATUS power_acquire(struct wma_injection_helper *helper, int8_t *lim
 {
     return wma_injection_native_power(&fake_wma, helper, &power_sta,
                                       &power_sta.channel, false, limit);
+}
+
+static QDF_STATUS ap_power_acquire(struct wma_injection_helper *helper, int8_t *limit)
+{
+    return wma_injection_native_power(&fake_wma, helper, &power_sta,
+                                      &power_sta.channel, true, limit);
+}
+
+static void test_ap_power_owner(void)
+{
+    struct reg_tpc_power_info power = power_fixture();
+    struct wma_injection_helper helper = { .vdev = &power_helper };
+    struct wma_injection_power_entry *entry = &wma_injection_power.entry[0];
+    const enum channel_state forbidden[] = {
+        CHANNEL_STATE_DFS, CHANNEL_STATE_PASSIVE, CHANNEL_STATE_DISABLE,
+        CHANNEL_STATE_INVALID,
+    };
+    uint64_t ticket, revision;
+    int8_t limit = 99;
+
+    wma_injection_power_set_owner(&power_sta, false);
+    CHECK(!entry->owner);
+    power_sta.opmode = QDF_SAP_MODE;
+    wma_injection_power_set_owner(&power_sta, true);
+    CHECK(entry->owner == &power_sta && !entry->valid);
+    CHECK(!wma_injection_power.entry[power_helper.id].owner);
+    CHECK(!wma_injection_tpc_begin(&power_helper, &power));
+    CHECK(ap_power_acquire(&helper, &limit) == QDF_STATUS_E_NOSUPPORT && limit == 99);
+    power.chan_power_info[1].tx_power = 17;
+    power_send(&power, QDF_STATUS_SUCCESS);
+    CHECK(ap_power_acquire(&helper, &limit) == QDF_STATUS_SUCCESS && limit == 17);
+    CHECK(helper.power_owner == &power_sta && helper.power_owner_id == power_sta.id);
+    CHECK(wma_injection_native_power_valid(&helper) && helper.power.eirp_power == 17);
+    for (unsigned int i = 0; i < 3; i++) CHECK(helper.power.chan_power_info[i].tx_power == 17);
+    CHECK(!memcmp(&entry->power, &power, sizeof(power)));
+    CHECK(power.chan_power_info[0].tx_power == 23 && power.chan_power_info[2].tx_power == 23);
+
+    /* AP power admission requires both the bond and every constituent enabled. */
+    for (unsigned int i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++) {
+        limit = 99;
+        pdev.bonded_state = forbidden[i];
+        CHECK(ap_power_acquire(&helper, &limit) == QDF_STATUS_E_NOSUPPORT && limit == 99);
+        pdev.bonded_state = CHANNEL_STATE_ENABLE;
+        pdev.state_exception_freq = 5320;
+        pdev.exception_state = forbidden[i];
+        CHECK(ap_power_acquire(&helper, &limit) == QDF_STATUS_E_NOSUPPORT && limit == 99);
+        pdev.state_exception_freq = 0;
+    }
+    CHECK(ap_power_acquire(&helper, &limit) == QDF_STATUS_SUCCESS && limit == 17);
+    CHECK(!memcmp(&entry->power, &power, sizeof(power)));
+    revision = helper.power_revision;
+    ready_ap_fixture(501);
+
+    /* The helper cannot publish its own TPC table or invalidate the real AP. */
+    CHECK(!wma_injection_tpc_begin(&power_helper, &power));
+    wma_injection_power_override(power_helper.id);
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, 501) && !stop_notifications);
+    CHECK(!wma_injection_power.entry[power_helper.id].owner);
+    CHECK(entry->valid && !entry->overridden && entry->revision == revision);
+
+    ticket = wma_injection_tpc_begin(&power_sta, &power);
+    CHECK(ticket && !wma_injection_native_power_valid(&helper));
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, 501) && !stop_notifications);
+    wma_injection_tpc_end(&power_sta, ticket, QDF_STATUS_SUCCESS);
+    CHECK(wma_injection_native_power_valid(&helper) && entry->revision == revision);
+    power.chan_power_info[1].tx_power = 11;
+    ticket = wma_injection_tpc_begin(&power_sta, &power);
+    CHECK(ticket && !wlan_mlme_sta_mon_token_valid(&psoc, 3, 501));
+    CHECK(control.state == WLAN_STA_MON_QUIESCING && stop_notifications == 1);
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
+    wma_injection_tpc_end(&power_sta, ticket, QDF_STATUS_SUCCESS);
+    CHECK(entry->valid && !wma_injection_native_power_valid(&helper));
+    CHECK(!memcmp(&entry->power, &power, sizeof(power)));
+    wma_injection_pre_stop_cleanup();
+    CHECK(wma_injection_ctx.coex_resume_ready);
+    CHECK(wlan_mlme_sta_mon_quiesced(&psoc));
+    wma_injection_deinit(&fake_wma);
 }
 
 static void test_power_limits(void)
@@ -1154,6 +1470,11 @@ int main(void)
     test_resume_guards();
     test_failed_drain(&p);
     test_deinit_dma_ownership(&p);
+    test_ap_admissions();
+    test_ap_handoff_guards();
+    test_ap_invalidation_ownership(&p);
+    test_ap_firmware_uncertainty(&p);
+    test_ap_power_owner();
     test_power_limits();
     test_power_update_order();
     test_power_regulatory_and_reuse();

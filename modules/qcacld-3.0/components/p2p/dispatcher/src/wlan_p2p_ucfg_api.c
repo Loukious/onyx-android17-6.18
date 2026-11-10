@@ -378,7 +378,9 @@ QDF_STATUS ucfg_p2p_mgmt_tx(struct wlan_objmgr_psoc *soc,
 		return QDF_STATUS_E_FAILURE;
 	}
 
-	if (!wlan_mlme_sta_mon_admission_begin(soc))
+	if (!wlan_mlme_sta_mon_mgmt_admission_begin(soc, mgmt_frm->vdev_id,
+						  mgmt_frm->chan_freq,
+						  mgmt_frm->off_chan))
 		return QDF_STATUS_E_BUSY;
 	tx_action = qdf_mem_malloc(sizeof(*tx_action));
 	if (!tx_action) {

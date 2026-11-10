@@ -6103,6 +6103,10 @@ static inline void hdd_wiphy_unlock(struct wiphy *wiphy, struct wireless_dev *de
 }
 #endif
 bool hdd_sta_monitor_coexist_enabled(void);
+bool hdd_ap_monitor_coexist_enabled(void);
+bool hdd_monitor_coexist_enabled(void);
+/* Success holds an MLME update reference until the AP stop path exits. */
+int hdd_ap_mon_stop_begin(struct wlan_hdd_link_info *link_info);
 bool hdd_sta_mon_prepare_stop(struct hdd_context *hdd_ctx);
 int hdd_sta_mon_get_channel(struct hdd_adapter *adapter,
 			    struct wlan_channel *channel);

@@ -752,6 +752,7 @@ QDF_STATUS hdd_set_sap_ht2040_mode(struct wlan_hdd_link_info *link_info,
 {
 	QDF_STATUS qdf_ret_status = QDF_STATUS_E_FAILURE;
 	struct hdd_adapter *adapter = link_info->adapter;
+	struct wlan_objmgr_psoc *psoc = adapter->hdd_ctx->psoc;
 	mac_handle_t mac_handle;
 
 	hdd_debug("change HT20/40 mode");
@@ -762,9 +763,14 @@ QDF_STATUS hdd_set_sap_ht2040_mode(struct wlan_hdd_link_info *link_info,
 			hdd_err("mac handle is null");
 			return QDF_STATUS_E_FAULT;
 		}
+		if (!wlan_mlme_sta_mon_admission_begin(psoc))
+			return QDF_STATUS_E_BUSY;
+		wlan_mlme_sta_mon_update_begin(psoc);
 		qdf_ret_status = sme_set_ht2040_mode(mac_handle,
 						     link_info->vdev_id,
 						     channel_type, true);
+		wlan_mlme_sta_mon_update_end(psoc);
+		wlan_mlme_sta_mon_admission_end(psoc);
 		if (qdf_ret_status == QDF_STATUS_E_FAILURE) {
 			hdd_err("Failed to change HT20/40 mode");
 			return QDF_STATUS_E_FAILURE;
@@ -2671,8 +2677,10 @@ QDF_STATUS hdd_hostapd_sap_event_cb(struct sap_context *sap_ctx,
 
 		if (sap_ctx->is_chan_change_inprogress) {
 			hdd_debug("check for possible hw mode change");
+			wlan_mlme_sta_mon_update_begin(hdd_ctx->psoc);
 			status = policy_mgr_set_hw_mode_on_channel_switch(
 				hdd_ctx->psoc, link_info->vdev_id);
+			wlan_mlme_sta_mon_update_end(hdd_ctx->psoc);
 			if (QDF_IS_STATUS_ERROR(status))
 				hdd_debug("set hw mode change not done");
 		}
@@ -2693,6 +2701,7 @@ QDF_STATUS hdd_hostapd_sap_event_cb(struct sap_context *sap_ctx,
 		 * so once this event gets set, current worker thread might get
 		 * pre-empted by caller thread.
 		 */
+		WRITE_ONCE(sap_ctx->sta_mon_transition, false);
 		qdf_status = qdf_event_set(&hostapd_state->qdf_event);
 		if (!QDF_IS_STATUS_SUCCESS(qdf_status)) {
 			hdd_err("qdf_event_set failed! status: %d", qdf_status);
@@ -3809,7 +3818,8 @@ next_adapter:
 	return false;
 }
 
-int hdd_softap_set_channel_change(struct wlan_hdd_link_info *link_info,
+static int
+hdd_softap_set_channel_change_admitted(struct wlan_hdd_link_info *link_info,
 				  int target_chan_freq, uint32_t ccfs1,
 				  enum phy_ch_width target_bw,
 				  uint32_t punct_bitmap, bool forced,
@@ -4113,6 +4123,52 @@ end:
 		policy_mgr_ap_csa_end(hdd_ctx->psoc, link_info->vdev_id,
 				      true, true);
 
+	return ret;
+}
+
+int hdd_softap_set_channel_change(struct wlan_hdd_link_info *link_info,
+				  int target_chan_freq, uint32_t ccfs1,
+				  enum phy_ch_width target_bw,
+				  uint32_t punct_bitmap, bool forced,
+				  bool allow_blocking)
+{
+	struct hdd_context *hdd_ctx;
+	struct sap_context *sap;
+	bool user_request, owner;
+	int ret;
+
+	if (!link_info)
+		return -EINVAL;
+	if (!hdd_ap_monitor_coexist_enabled() ||
+	    link_info->adapter->device_mode != QDF_SAP_MODE)
+		return hdd_softap_set_channel_change_admitted(link_info,
+			target_chan_freq, ccfs1, target_bw, punct_bitmap,
+			forced, allow_blocking);
+	hdd_ctx = link_info->adapter->hdd_ctx;
+	sap = WLAN_HDD_GET_SAP_CTX_PTR(link_info);
+	if (!sap)
+		return -EINVAL;
+	user_request = sap->csa_reason == CSA_REASON_USER_INITIATED;
+	if (user_request && !wlan_mlme_sta_mon_admission_begin(hdd_ctx->psoc))
+		return -EBUSY;
+
+	owner = wlan_mlme_sta_mon_ap_is_owner(hdd_ctx->psoc, link_info->vdev_id);
+	wlan_mlme_sta_mon_update_begin(hdd_ctx->psoc);
+	WRITE_ONCE(sap->sta_mon_transition, true);
+	if (owner && allow_blocking &&
+	    !cds_is_fw_down() && !cds_is_driver_recovering()) {
+		/* Wait only on the helper's real responses, never the RTNL worker. */
+		wma_injection_pre_stop_cleanup();
+		if (!wma_injection_coex_is_quiesced())
+			wlan_mlme_sta_mon_fw_timeout(hdd_ctx->psoc,
+						    WLAN_INVALID_VDEV_ID);
+	}
+	/* Required RF safety changes proceed after optional RX/TX invalidation. */
+	ret = hdd_softap_set_channel_change_admitted(link_info, target_chan_freq,
+			ccfs1, target_bw, punct_bitmap, forced, allow_blocking);
+	wlan_mlme_sta_mon_update_end(hdd_ctx->psoc);
+	if (user_request)
+		wlan_mlme_sta_mon_admission_end(hdd_ctx->psoc);
 	return ret;
 }
 
@@ -7992,6 +8048,7 @@ static int __wlan_hdd_cfg80211_stop_ap(struct wiphy *wiphy,
 	mac_handle_t mac_handle;
 	struct hdd_ap_ctx *ap_ctx;
 	struct wlan_hdd_link_info *link_info;
+	bool ap_update = false;
 
 	hdd_enter_dev(dev);
 
@@ -8002,6 +8059,13 @@ static int __wlan_hdd_cfg80211_stop_ap(struct wiphy *wiphy,
 	}
 
 	ap_ctx = WLAN_HDD_GET_AP_CTX_PTR(link_info);
+	if (adapter->device_mode == QDF_SAP_MODE &&
+	    hdd_ap_monitor_coexist_enabled()) {
+		ret = hdd_ap_mon_stop_begin(link_info);
+		if (ret)
+			return ret;
+		ap_update = true;
+	}
 
 	ret = wlan_hdd_validate_context(hdd_ctx);
 	/*
@@ -8016,6 +8080,8 @@ static int __wlan_hdd_cfg80211_stop_ap(struct wiphy *wiphy,
 
 	if (hdd_ctx->is_wiphy_suspended) {
 		hdd_debug("wiphy is suspended");
+		if (ap_update)
+			wlan_mlme_sta_mon_update_end(hdd_ctx->psoc);
 		return -EINVAL;
 	}
 
@@ -8189,6 +8255,8 @@ static int __wlan_hdd_cfg80211_stop_ap(struct wiphy *wiphy,
 exit:
 	qdf_mem_free(ap_ctx->beacon);
 	ap_ctx->beacon = NULL;
+	if (ap_update)
+		wlan_mlme_sta_mon_update_end(hdd_ctx->psoc);
 	if (QDF_IS_STATUS_SUCCESS(status))
 		hdd_place_marker(adapter, "STOP with SUCCESS", NULL);
 	else

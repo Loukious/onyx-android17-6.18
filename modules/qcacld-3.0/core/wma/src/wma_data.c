@@ -304,7 +304,9 @@ void wma_injection_power_set_owner(struct wlan_objmgr_vdev *vdev, bool attached)
 		wma_injection_power_invalidate(entry);
 		entry->owner = attached &&
 			(wlan_vdev_mlme_get_opmode(vdev) == QDF_STA_MODE ||
-			 wlan_vdev_mlme_get_opmode(vdev) == QDF_MONITOR_MODE) ?
+			 wlan_vdev_mlme_get_opmode(vdev) == QDF_MONITOR_MODE ||
+			 (wlan_vdev_mlme_get_opmode(vdev) == QDF_SAP_MODE &&
+			  !wlan_vdev_is_injection_helper(vdev))) ?
 			vdev : NULL;
 		entry->overridden = false;
 	}
@@ -569,12 +571,12 @@ wma_injection_native_power_valid(struct wma_injection_helper *helper)
 }
 
 static bool wma_injection_power_channel_allowed(enum channel_state state,
-					       bool exclusive)
+					       bool require_enabled)
 {
-	if (exclusive)
+	if (require_enabled)
 		return state == CHANNEL_STATE_ENABLE;
-	/* Retain subordinate operation on the connected STA's DFS/passive
-	 * channel, but never infer permission from a disabled channel's power.
+	/* Only a connected STA can lend its subordinate DFS/passive permission.
+	 * AP-owned and exclusive injection require an actively enabled channel.
 	 */
 	return state == CHANNEL_STATE_ENABLE || state == CHANNEL_STATE_DFS ||
 		state == CHANNEL_STATE_PASSIVE;
@@ -583,7 +585,7 @@ static bool wma_injection_power_channel_allowed(enum channel_state state,
 static QDF_STATUS
 wma_injection_native_power(tp_wma_handle wma, struct wma_injection_helper *helper,
 			   struct wlan_objmgr_vdev *sta,
-			   const struct wlan_channel *channel, bool exclusive,
+			   const struct wlan_channel *channel, bool require_enabled,
 			   int8_t *start_limit)
 {
 	uint8_t id = wlan_vdev_get_id(sta);
@@ -615,12 +617,12 @@ wma_injection_native_power(tp_wma_handle wma, struct wma_injection_helper *helpe
 	state = wlan_reg_get_bonded_channel_state_for_pwrmode(
 		wma->pdev, channel->ch_freq, channel->ch_width, secondary,
 		REG_CURRENT_PWR_MODE);
-	if (!wma_injection_power_channel_allowed(state, exclusive))
+	if (!wma_injection_power_channel_allowed(state, require_enabled))
 		goto out;
 	for (freq = first; freq < first + width; freq += 20) {
 		state = wlan_reg_get_bonded_channel_state_for_pwrmode(
 			wma->pdev, freq, CH_WIDTH_20MHZ, 0, REG_CURRENT_PWR_MODE);
-		if (!wma_injection_power_channel_allowed(state, exclusive))
+		if (!wma_injection_power_channel_allowed(state, require_enabled))
 			goto out;
 		reg_power = wlan_reg_get_channel_reg_power_for_freq(wma->pdev, freq);
 		if (reg_power == REG_INVALID_TXPOWER || reg_power > 127)
@@ -1242,7 +1244,8 @@ wma_injection_native_channel(tp_wma_handle wma,
 		goto out;
 
 	status = wma_injection_native_power(wma, helper, owner, channel,
-					    snapshot->exclusive, &power_limit);
+					    snapshot->exclusive || snapshot->ap_owner,
+					    &power_limit);
 	if (QDF_IS_STATUS_ERROR(status))
 		goto out;
 	/* The legacy MLME byte holds the firmware's signed dBm minimum. */
@@ -1343,6 +1346,13 @@ __wma_injection_ensure_native(tp_wma_handle wma, uint8_t monitor_vdev_id,
 	    !wmi_service_enabled(wma->wmi_handle, wmi_service_sync_delete_cmds) ||
 	    wlan_psoc_nif_feat_cap_get(wma->psoc, WLAN_SOC_F_TESTMODE_ENABLE))
 		return QDF_STATUS_E_AGAIN;
+	/* The real AP must remain supported when the private SAP comes up. */
+	if (snapshot.ap_owner &&
+	    !wmi_service_enabled(wma->wmi_handle,
+		wmi_service_dual_beacon_on_single_mac_scc_support) &&
+	    !wmi_service_enabled(wma->wmi_handle,
+		wmi_service_dual_beacon_on_single_mac_mcc_support))
+		return QDF_STATUS_E_NOSUPPORT;
 	if (helper->native || helper->created) {
 		if (!wma_injection_wait_for_idle())
 			return QDF_STATUS_E_BUSY;

@@ -4998,12 +4998,14 @@ bool policy_mgr_is_sta_mon_concurrency(struct wlan_objmgr_psoc *psoc);
 
 /**
  * policy_mgr_check_mon_concurrency() - Checks if monitor intf can be added.
+ * @ap_owner: HDD has validated one stable AP as the shared-channel owner
  * @psoc: pointer to psoc object
  *
  * Return: QDF_STATUS_SUCCESS if allowed, else send failure
  *
  */
-QDF_STATUS policy_mgr_check_mon_concurrency(struct wlan_objmgr_psoc *psoc);
+QDF_STATUS policy_mgr_check_mon_concurrency(struct wlan_objmgr_psoc *psoc,
+					  bool ap_owner);
 
 /**
  * policy_mgr_get_hw_dbs_max_bw() - Computes DBS BW

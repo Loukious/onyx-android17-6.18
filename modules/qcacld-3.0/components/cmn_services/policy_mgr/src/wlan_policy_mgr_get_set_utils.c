@@ -13498,7 +13498,8 @@ bool policy_mgr_is_sta_mon_concurrency(struct wlan_objmgr_psoc *psoc)
 	return false;
 }
 
-QDF_STATUS policy_mgr_check_mon_concurrency(struct wlan_objmgr_psoc *psoc)
+QDF_STATUS policy_mgr_check_mon_concurrency(struct wlan_objmgr_psoc *psoc,
+					  bool ap_owner)
 {
 	uint8_t num_open_session = 0;
 
@@ -13515,10 +13516,13 @@ QDF_STATUS policy_mgr_check_mon_concurrency(struct wlan_objmgr_psoc *psoc)
 
 	num_open_session = policy_mgr_get_sap_mode_count(psoc, NULL);
 
-	if (num_open_session) {
+	if (ap_owner ? num_open_session != 1 : num_open_session != 0) {
 		policy_mgr_err("cannot add monitor mode, due to SAP concurrency");
 		return QDF_STATUS_E_INVAL;
 	}
+	if (ap_owner && policy_mgr_mode_specific_connection_count(
+					psoc, PM_STA_MODE, NULL))
+		return QDF_STATUS_E_BUSY;
 
 	num_open_session = policy_mgr_mode_specific_connection_count(
 					psoc,

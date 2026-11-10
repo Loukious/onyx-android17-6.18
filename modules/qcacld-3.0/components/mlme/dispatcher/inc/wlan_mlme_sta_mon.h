@@ -27,11 +27,13 @@ enum wlan_mlme_sta_mon_handoff_phase {
 
 struct wlan_mlme_sta_mon_snapshot {
 	uint64_t generation;
+	/* Historical name: the real STA or AP which owns the shared channel. */
 	uint8_t sta_vdev_id;
 	uint8_t mon_vdev_id;
 	uint8_t pdev_id;
 	uint8_t mac_id;
 	bool exclusive;
+	bool ap_owner;
 	struct wlan_channel channel;
 };
 
@@ -80,12 +82,26 @@ bool wlan_mlme_sta_mon_get_active_snapshot(
 				struct wlan_objmgr_psoc *psoc,
 				struct wlan_mlme_sta_mon_snapshot *out);
 
-/* Submission admission does not change ordinary shared-mode invalidation.
+/* AP ownership holds the channel until native/DP teardown has completed.
+ * WLAN_INVALID_VDEV_ID selects any AP owner, including quiescing resources.
+ */
+bool wlan_mlme_sta_mon_ap_is_owner(struct wlan_objmgr_psoc *psoc,
+				 uint8_t vdev_id);
+
+/* Submission admission does not change ordinary STA shared-mode invalidation.
+ * AP shared mode rejects competing radio work until its monitor is quiesced.
  * An asynchronous request must retain its existing update reference or publish
  * an observable active state before ending this submission admission.
  */
 bool wlan_mlme_sta_mon_admission_begin(struct wlan_objmgr_psoc *psoc);
 void wlan_mlme_sta_mon_admission_end(struct wlan_objmgr_psoc *psoc);
+/* The owning AP may submit ordinary on-channel management traffic. */
+bool wlan_mlme_sta_mon_mgmt_admission_begin(struct wlan_objmgr_psoc *psoc,
+					  uint8_t vdev_id, uint32_t frequency,
+					  bool offchannel);
+/* Mandatory AP CSA only: caller already holds an update reference. */
+bool wlan_mlme_sta_mon_ap_csa_admission_begin(struct wlan_objmgr_psoc *psoc,
+					    uint8_t vdev_id);
 bool wlan_mlme_sta_mon_mgmt_tx_begin(struct wlan_objmgr_psoc *psoc,
 				    uint8_t vdev_id, bool teardown_frame);
 /* Reserve without invalidating the shared generation, so a failed preflight
@@ -127,7 +143,7 @@ void wlan_mlme_sta_mon_channel_changed(struct wlan_objmgr_psoc *psoc,
 void wlan_mlme_sta_mon_set_start_mac_id(struct wlan_objmgr_pdev *pdev,
 				       uint8_t vdev_id, uint8_t mac_id);
 
-/* WLAN_INVALID_VDEV_ID invalidates for any radio/STA transition. */
+/* WLAN_INVALID_VDEV_ID invalidates for any radio/owner transition. */
 void wlan_mlme_sta_mon_invalidate(struct wlan_objmgr_psoc *psoc,
 				  uint8_t sta_vdev_id);
 void wlan_mlme_sta_mon_invalidate_owner(struct wlan_objmgr_psoc *psoc,

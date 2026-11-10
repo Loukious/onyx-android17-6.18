@@ -67,10 +67,10 @@ when the monitor is closed. Cancelled or replaced requests must not be replayed.
 Android remains responsible for reconnecting after teardown. Use a separate
 supported adapter when both channels must stay active independently.
 
-AP/monitor support, including an Android or hostapd hotspot alongside
-monitor/injection, is deferred. The internal injection helper does not provide
-a hotspot with connected clients. The automatic-handoff and shared-channel
-WPS results are recorded below.
+For a Kali hostapd AP, use the separate [AP/monitor workflow](#run-a-kali-hostapd-ap-with-mon0).
+The internal injection helper is distinct from that real AP and does not
+provide a hotspot with connected clients. The automatic-handoff and
+shared-channel WPS results below qualify the STA workflow.
 
 ### Setup and teardown
 
@@ -241,6 +241,124 @@ A receive pool retired during the preceding module replacement still retained
 five pages. Its destruction fell between the old and new recorder sessions,
 so its original ownership was not recovered. The successful bounded observation
 does not establish that every delayed crash or unrelated Android error is fixed.
+
+## Run a Kali hostapd AP with mon0
+
+Patch 0252 adds experimental AP/monitor coexistence for the internal WCN7750.
+Bounded device checks passed on channel 5 at 20 MHz. This is a Kali hostapd
+workflow using ordinary nl80211 AP operations; it does not integrate Android's hotspot
+framework. Load the matched driver with `ap_monitor_coexist=1` in the normal
+module-loading step. The flag defaults to off and is read-only after loading.
+Module replacement still requires the framework shutdown and driver drain
+described above.
+
+For example, the module-loading command can include both independent opt-ins:
+
+```sh
+insmod /path/to/qca_cld3_wcn7750.ko ap_monitor_coexist=1 sta_monitor_coexist=1
+```
+
+`sta_monitor_coexist=1` is optional and enables the alternative connected-STA
+workflow. It does not permit connected STA+AP+MON operation. Before starting
+hostapd, fully stop Android Wi-Fi management, its HAL/supplicant ownership, and
+background or scheduled scanning, including scan-always-available and PNO.
+Verify that no STA connection or scan remains; disabling the Wi-Fi toggle
+alone can leave background scanning enabled. Keep Android's Wi-Fi management
+stopped for the AP session.
+
+Start one real, non-MLO AP first. Admission requires a ready BSS on an enabled,
+non-DFS 2.4/5 GHz channel with 20, 40 or 80 MHz bandwidth. `mon0` inherits the
+AP's **full channel definition**, including primary frequency, bandwidth and
+center frequency. A second center segment, puncturing, 6 GHz, CAC, an ongoing
+channel change, or another active owner prevents admission. Use a fixed legal
+channel in hostapd's configuration, with `interface=wlan0` and
+`driver=nl80211` (adjust the interface name for the device).
+
+With Android management already stopped and the matched opt-in driver loaded,
+run the following in Kali:
+
+```sh
+hostapd -B /path/to/hostapd.conf
+# Wait for AP-ENABLED in hostapd's log before creating the monitor.
+iw dev wlan0 info
+iw dev wlan0 interface add mon0 type monitor
+ip link set mon0 up
+iw dev mon0 info
+# Capture or inject on the inherited channel, then stop those processes.
+ip link set mon0 down
+iw dev mon0 del
+```
+
+Keep hostapd running through monitor creation, use and teardown. Closing and
+deleting `mon0` releases the native monitor and private helper; it does not
+stop the real AP or delete its clients, keys or beacon. Stop or reconfigure
+hostapd after the monitor has fully closed.
+
+| Operation while the AP monitor owns resources | Result |
+| --- | --- |
+| Monitor requests the identical full channel definition | Success with no radio retune. |
+| Monitor requests a different primary, width, center or puncturing | Busy before any handoff, drain or AP disconnection. |
+| User requests AP CSA or another competing radio operation | Busy; close the monitor before changing the AP channel or starting another role. |
+| Normal on-channel AP management and client traffic | Continues through the real AP's normal paths. |
+| Required regulatory, firmware or AP-stop transition | Invalidates optional capture/injection; it does not promise continuous monitor service. |
+
+The AP, monitor and separate non-beaconing injection helper share airtime and
+radio/vdev/peer resources. Firmware capability and resource checks can reject
+helper setup. Heavy capture or injection can affect client throughput and
+latency. Stop failure or uncertain firmware completion retains resources and
+rejects unsafe reuse. There is no automatic monitor replay or seamless AP and
+client recovery across a Wi-Fi subsystem restart (SSR). A failed or deferred
+AP transition keeps monitor admission closed until a fresh successful AP
+completion or restart.
+
+The existing [capture contracts](#capture-limits) still apply. The bounded
+Ethernet/EAPOL fallback accepts plaintext FromDS traffic addressed to the
+private helper; it does not establish complete capture of the real AP's
+clients' ToDS traffic. Capturing the AP's own transmitted beacons is also
+unqualified. RAW and WMI management reception may provide useful frames, with
+their documented metadata and filtering limits. The earlier STA/WPS results
+qualify the separate STA workflow; AP checks are recorded below.
+
+### AP device check (2026-11-10)
+
+The matched driver built locally in 102 seconds. Its SHA256 was
+`62e4fa177654ac0f897fd71cb63863cfaad3417a0976e0085689710b2fb4f3bf`.
+Three immediate-start checks completed all 60 injected frames without a
+transmit error. These checks cover the fix that refreshes the real AP's
+current transmit-power limits before monitor admission; a late regulatory
+update could otherwise leave the initial power cache invalid.
+
+A separate USB Wi-Fi client joined the Kali hostapd WPA2 AP on channel 5 at
+20 MHz and obtained a DHCP lease. It received all 243 UDP echoes in the
+measured window before the deliberate client deauthentication. Monitor
+creation, quiet injection, rejected channel requests, and monitor close/reopen
+preserved the AP and client association. All 21 new injected frames completed
+without send failures, failed or unknown completions, or timeouts.
+
+The single directed deauthentication caused the test client to reconnect and
+complete a new WPA2 handshake. All 11 missed UDP replies followed that event;
+the next 287 replies succeeded. Overall, 599 of 610 requests received replies.
+Traffic also passed during the monitor itself (180/180), across monitor
+close/reopen (59/59), and after reopening before deauthentication (10/10).
+
+The two monitor captures contained 1,032 received records and 21 outgoing TX
+copies. Received records included 419 beacons from the other AP on channel 5
+and nine management frames from the lab client. All received records reported
+2432 MHz. The filtered capture contained no local AP beacons, local client data
+or plaintext EAPOL; successful client traffic does not imply those frames are
+available through `mon0`.
+
+The different-channel monitor request returned busy, and hostapd rejected a
+requested channel switch while the monitor was active. Stopping hostapd with
+the monitor still open brought the monitor down and released the helper's
+module references. Cleanup restored Android's previous Wi-Fi connection and
+removed the temporary client profile and lab route. The phone's boot ID was
+unchanged, and the PC's primary Wi-Fi connection stayed on its original network.
+The trial's kernel-log interval had no panic, oops or SSR signature. Existing
+DP/MLO/TPC/beacon warnings remained; this is not a claim of warning-free logs.
+
+This is a bounded 2.4 GHz/20 MHz check. AP operation at other supported widths
+or on 5 GHz, long-duration stability, and recovery across SSR remain unqualified.
 
 ## Host support
 

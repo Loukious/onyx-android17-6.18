@@ -58,6 +58,14 @@ sta_mon_control(struct wlan_objmgr_psoc *psoc)
 	return obj ? &obj->sta_mon : NULL;
 }
 
+static bool sta_mon_ap_lease_locked(struct wlan_mlme_sta_mon_control *ctrl)
+{
+	return ctrl->snapshot.ap_owner &&
+		(ctrl->fw_uncertain ||
+		 (ctrl->attached && ctrl->state != WLAN_STA_MON_OFF &&
+		  ctrl->state != WLAN_STA_MON_QUIESCED));
+}
+
 static void sta_mon_invalidate_locked(struct wlan_mlme_sta_mon_control *ctrl)
 {
 	ctrl->snapshot.generation++;
@@ -114,6 +122,7 @@ bool wlan_mlme_sta_mon_attach(struct wlan_objmgr_psoc *psoc)
 		ctrl->snapshot.sta_vdev_id = WLAN_INVALID_VDEV_ID;
 		ctrl->snapshot.mon_vdev_id = WLAN_INVALID_VDEV_ID;
 		ctrl->snapshot.exclusive = false;
+		ctrl->snapshot.ap_owner = false;
 		ok = true;
 	}
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
@@ -131,6 +140,8 @@ void wlan_mlme_sta_mon_detach(struct wlan_objmgr_psoc *psoc)
 	ctrl->snapshot.generation++;
 	ctrl->attached = false;
 	ctrl->state = WLAN_STA_MON_OFF;
+	if (!ctrl->fw_uncertain)
+		ctrl->snapshot.ap_owner = false;
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
 }
 
@@ -158,7 +169,8 @@ bool wlan_mlme_sta_mon_arm(struct wlan_objmgr_psoc *psoc,
 	if (!ctrl || !snapshot)
 		return false;
 	spin_lock_irqsave(&sta_mon_lock, flags);
-	if (ctrl->stop && ctrl->attached && !ctrl->updates && !ctrl->fw_uncertain &&
+	if (ctrl->stop && ctrl->attached && !ctrl->updates && !ctrl->admissions &&
+	    !ctrl->fw_uncertain && !(snapshot->ap_owner && snapshot->exclusive) &&
 	    ctrl->state == WLAN_STA_MON_QUIESCED &&
 	    ctrl->snapshot.generation == snapshot->generation) {
 		snapshot->generation++;
@@ -262,6 +274,7 @@ bool wlan_mlme_sta_mon_quiesced(struct wlan_objmgr_psoc *psoc)
 		ctrl->state = WLAN_STA_MON_QUIESCED;
 		ctrl->exclusive_lease = false;
 		ctrl->snapshot.exclusive = false;
+		ctrl->snapshot.ap_owner = false;
 	}
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
 	return ok;
@@ -507,6 +520,23 @@ void wlan_mlme_sta_mon_update_end(struct wlan_objmgr_psoc *psoc)
 }
 
 
+bool wlan_mlme_sta_mon_ap_is_owner(struct wlan_objmgr_psoc *psoc,
+				 uint8_t vdev_id)
+{
+	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
+	unsigned long flags;
+	bool owner;
+
+	if (!ctrl)
+		return false;
+	spin_lock_irqsave(&sta_mon_lock, flags);
+	owner = sta_mon_ap_lease_locked(ctrl) &&
+		(vdev_id == WLAN_INVALID_VDEV_ID ||
+		 ctrl->snapshot.sta_vdev_id == vdev_id);
+	spin_unlock_irqrestore(&sta_mon_lock, flags);
+	return owner;
+}
+
 bool wlan_mlme_sta_mon_admission_begin(struct wlan_objmgr_psoc *psoc)
 {
 	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
@@ -517,7 +547,51 @@ bool wlan_mlme_sta_mon_admission_begin(struct wlan_objmgr_psoc *psoc)
 		return true;
 	spin_lock_irqsave(&sta_mon_lock, flags);
 	ok = !ctrl->exclusive_lease && !ctrl->handoff_generation &&
+		!sta_mon_ap_lease_locked(ctrl) &&
 		ctrl->admissions != U32_MAX;
+	if (ok)
+		ctrl->admissions++;
+	spin_unlock_irqrestore(&sta_mon_lock, flags);
+	return ok;
+}
+
+bool wlan_mlme_sta_mon_mgmt_admission_begin(struct wlan_objmgr_psoc *psoc,
+					  uint8_t vdev_id, uint32_t frequency,
+					  bool offchannel)
+{
+	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
+	unsigned long flags;
+	bool ok;
+
+	if (!ctrl)
+		return true;
+	spin_lock_irqsave(&sta_mon_lock, flags);
+	ok = !ctrl->exclusive_lease && !ctrl->handoff_generation &&
+		ctrl->admissions != U32_MAX;
+	if (ok && sta_mon_ap_lease_locked(ctrl))
+		ok = ctrl->snapshot.sta_vdev_id == vdev_id && !offchannel &&
+			(!frequency || frequency == ctrl->snapshot.channel.ch_freq);
+	if (ok)
+		ctrl->admissions++;
+	spin_unlock_irqrestore(&sta_mon_lock, flags);
+	return ok;
+}
+
+bool wlan_mlme_sta_mon_ap_csa_admission_begin(struct wlan_objmgr_psoc *psoc,
+					    uint8_t vdev_id)
+{
+	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
+	unsigned long flags;
+	bool ok;
+
+	if (!ctrl)
+		return true;
+	spin_lock_irqsave(&sta_mon_lock, flags);
+	ok = !ctrl->exclusive_lease && !ctrl->handoff_generation &&
+		ctrl->admissions != U32_MAX;
+	if (ok && sta_mon_ap_lease_locked(ctrl))
+		ok = ctrl->updates && ctrl->state == WLAN_STA_MON_QUIESCING &&
+			ctrl->snapshot.sta_vdev_id == vdev_id;
 	if (ok)
 		ctrl->admissions++;
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
@@ -540,7 +614,8 @@ void wlan_mlme_sta_mon_admission_end(struct wlan_objmgr_psoc *psoc)
 static bool sta_mon_handoff_valid_locked(
 		struct wlan_mlme_sta_mon_control *ctrl, uint64_t generation)
 {
-	return ctrl->attached && !ctrl->fw_uncertain && !ctrl->updates &&
+	return ctrl->attached && !ctrl->snapshot.ap_owner &&
+		!ctrl->fw_uncertain && !ctrl->updates &&
 		ctrl->exclusive_lease && generation &&
 		ctrl->handoff_generation == generation &&
 		ctrl->snapshot.generation == generation &&
@@ -559,7 +634,9 @@ bool wlan_mlme_sta_mon_mgmt_tx_begin(struct wlan_objmgr_psoc *psoc,
 	if (!ctrl)
 		return true;
 	spin_lock_irqsave(&sta_mon_lock, flags);
-	ok = !ctrl->exclusive_lease && !ctrl->handoff_generation;
+	ok = !ctrl->exclusive_lease && !ctrl->handoff_generation &&
+		(!sta_mon_ap_lease_locked(ctrl) ||
+		 ctrl->snapshot.sta_vdev_id == vdev_id);
 	if (!ok && teardown_frame &&
 	    sta_mon_handoff_valid_locked(ctrl, ctrl->handoff_generation) &&
 	    ctrl->state == WLAN_STA_MON_HANDOFF &&
@@ -585,6 +662,7 @@ bool wlan_mlme_sta_mon_exclusive_reserve(struct wlan_objmgr_psoc *psoc,
 		return false;
 	spin_lock_irqsave(&sta_mon_lock, flags);
 	if (ctrl->attached && ctrl->stop && !ctrl->fw_uncertain &&
+	    !ctrl->snapshot.ap_owner &&
 	    !ctrl->updates && !ctrl->admissions && !ctrl->handoff_generation &&
 	    ctrl->state == WLAN_STA_MON_READY && generation &&
 	    ctrl->snapshot.mon_vdev_id == monitor_id &&
@@ -721,7 +799,7 @@ bool wlan_mlme_sta_mon_handoff_start(struct wlan_objmgr_psoc *psoc,
 	unsigned long flags;
 	bool ok = false;
 
-	if (!ctrl || !next || !next->exclusive)
+	if (!ctrl || !next || !next->exclusive || next->ap_owner)
 		return false;
 	spin_lock_irqsave(&sta_mon_lock, flags);
 	if (sta_mon_handoff_valid_locked(ctrl, next->generation) &&
@@ -765,7 +843,7 @@ bool wlan_mlme_sta_mon_handoff_ready(struct wlan_objmgr_psoc *psoc,
 	unsigned long flags;
 	bool ok = false;
 
-	if (!ctrl || !next || !next->exclusive)
+	if (!ctrl || !next || !next->exclusive || next->ap_owner)
 		return false;
 	spin_lock_irqsave(&sta_mon_lock, flags);
 	if (sta_mon_handoff_valid_locked(ctrl, next->generation) &&
@@ -818,7 +896,10 @@ void wlan_mlme_sta_mon_disconnect_ind(struct wlan_objmgr_psoc *psoc,
 	    ctrl->handoff_sta_vdev_id == vdev_id &&
 	    !ctrl->handoff_disconnect_seen) {
 		ctrl->handoff_disconnect_seen = true;
-	} else if (ctrl->stop) {
+	} else if (ctrl->stop &&
+		   (!sta_mon_ap_lease_locked(ctrl) ||
+		    vdev_id == WLAN_INVALID_VDEV_ID ||
+		    ctrl->snapshot.sta_vdev_id == vdev_id)) {
 		sta_mon_invalidate_locked(ctrl);
 	}
 	spin_unlock_irqrestore(&sta_mon_lock, flags);

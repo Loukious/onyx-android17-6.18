@@ -231,7 +231,7 @@ Unsupported targets, including 6 GHz, are rejected before disconnecting Android.
 While exclusive, Android scans and new connections cannot run. Closing the
 monitor releases the radio and resumes any still-valid deferred Android
 scheduled scan (PNO), allowing Android to reconnect. The internal radio does
-not provide two independent channels at once. AP/monitor support is deferred.
+not provide two independent channels at once.
 
 Device testing passed a channel 52/80 MHz to channel 1/20 MHz handoff while
 retaining the same monitor interface and capture process. Android rejoined
@@ -246,6 +246,30 @@ reception, channel preservation, per-packet FCS handling and early-reply
 retention; that build needs no wrapper or compatibility preload. Capture
 availability and metadata differ between RAW, firmware management and bounded
 EAPOL copies. See the [setup, limits and runtime results](port/wlan-test/README.md#keep-android-wi-fi-connected).
+
+### Run a Kali hostapd AP with a monitor
+
+Patch 0252 adds a separate experimental AP/monitor option. Bounded device
+checks passed with a WPA2 client on channel 5 at 20 MHz. Load the matched module
+with
+`ap_monitor_coexist=1`; it is disabled by default and read-only after loading.
+The existing `sta_monitor_coexist=1` can also be supplied to enable the
+alternative STA workflow. These flags do not enable connected STA+AP+MON
+operation.
+
+This path uses Kali hostapd with an ordinary nl80211 AP interface. Fully stop
+Android Wi-Fi management and background/scheduled scanning first. Start
+hostapd, wait for the AP to become ready, then create and raise `mon0`. One real,
+non-MLO AP owns the complete channel definition: enabled non-DFS 2.4/5 GHz,
+20/40/80 MHz, matching primary and center frequencies, no second segment and
+no puncturing. An unequal monitor retune or user-requested AP channel switch
+returns busy; close the monitor before reconfiguring the AP.
+
+Closing and deleting `mon0` releases its resources while hostapd retains the
+AP. Both share airtime and radio resources, so capture and injection can affect
+client throughput and latency. Android hotspot integration and seamless
+recovery across a Wi-Fi subsystem restart are outside this mode. See the
+[AP setup, device results and capture limits](port/wlan-test/README.md#run-a-kali-hostapd-ap-with-mon0).
 
 ### Migrate from 6.6 or a different KMI generation
 

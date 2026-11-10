@@ -3360,10 +3360,12 @@ void wma_process_update_opmode(tp_wma_handle wma_handle,
 	wmi_host_channel_width ch_width, wmi_opmode_chwidth;
 	uint8_t pdev_id;
 	struct wlan_objmgr_peer *peer;
+	struct wlan_objmgr_vdev *peer_vdev;
 	struct wlan_objmgr_psoc *psoc = wma_handle->psoc;
 	enum wlan_phymode peer_phymode;
 	uint32_t fw_phymode;
 	enum wlan_peer_type peer_type;
+	bool ap_client;
 
 	pdev_id = wlan_objmgr_pdev_get_pdev_id(wma_handle->pdev);
 	peer = wlan_objmgr_get_peer(psoc, pdev_id,
@@ -3381,6 +3383,12 @@ void wma_process_update_opmode(tp_wma_handle wma_handle,
 		return;
 	}
 
+	/* A SAP client's operating mode does not change its AP's RF channel. */
+	peer_vdev = wlan_peer_get_vdev(peer);
+	ap_client = peer_vdev &&
+		wlan_vdev_get_id(peer_vdev) == update_vht_opmode->smesessionId &&
+		wlan_vdev_mlme_get_opmode(peer_vdev) == QDF_SAP_MODE &&
+		!wlan_vdev_is_injection_helper(peer_vdev);
 	wlan_peer_obj_lock(peer);
 	peer_phymode = wlan_peer_get_phymode(peer);
 	wlan_peer_obj_unlock(peer);
@@ -3403,7 +3411,9 @@ void wma_process_update_opmode(tp_wma_handle wma_handle,
 		return;
 	}
 
-	wlan_mlme_sta_mon_invalidate(psoc, update_vht_opmode->smesessionId);
+	if (!ap_client)
+		wlan_mlme_sta_mon_invalidate(psoc,
+					    update_vht_opmode->smesessionId);
 	wma_set_peer_param(wma_handle, update_vht_opmode->peer_mac,
 			   WMI_HOST_PEER_CHWIDTH, wmi_opmode_chwidth,
 			   update_vht_opmode->smesessionId);

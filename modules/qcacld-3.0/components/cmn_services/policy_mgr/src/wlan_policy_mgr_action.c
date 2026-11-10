@@ -1747,8 +1747,12 @@ QDF_STATUS policy_mgr_next_actions(
 {
 	QDF_STATUS status;
 
-	if (!wlan_mlme_sta_mon_admission_begin(psoc))
+	if (reason == POLICY_MGR_UPDATE_REASON_CHANNEL_SWITCH_SAP) {
+		if (!wlan_mlme_sta_mon_ap_csa_admission_begin(psoc, session_id))
+			return QDF_STATUS_E_BUSY;
+	} else if (!wlan_mlme_sta_mon_admission_begin(psoc)) {
 		return QDF_STATUS_E_BUSY;
+	}
 	status = policy_mgr_next_actions_admitted(psoc, session_id, action,
 						reason, request_id);
 	wlan_mlme_sta_mon_admission_end(psoc);

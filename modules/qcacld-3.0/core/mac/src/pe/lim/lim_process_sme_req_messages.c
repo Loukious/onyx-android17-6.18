@@ -8920,6 +8920,7 @@ static void __lim_process_sme_set_ht2040_mode(struct mac_context *mac,
 	uint16_t staId = 0;
 	tpDphHashNode sta = NULL;
 	tSirMacHTChannelWidth opmode_chwidth;
+	bool ap_update;
 
 	pe_debug("received Set HT 20/40 mode message");
 	if (!msg_buf) {
@@ -8937,6 +8938,21 @@ static void __lim_process_sme_set_ht2040_mode(struct mac_context *mac,
 			 QDF_MAC_ADDR_REF(pSetHT2040Mode->bssid.bytes));
 		return;
 	}
+
+	if (pSetHT2040Mode->cbMode != PHY_SINGLE_CHANNEL_CENTERED &&
+	    pSetHT2040Mode->cbMode != PHY_DOUBLE_CHANNEL_LOW_PRIMARY &&
+	    pSetHT2040Mode->cbMode != PHY_DOUBLE_CHANNEL_HIGH_PRIMARY) {
+		pe_err("Invalid cbMode");
+		return;
+	}
+
+	/* CSR has already accepted this request and updated its channel mode.
+	 * Invalidate before changing the AP, and exclude new monitor snapshots
+	 * until its beacon and peer updates have been submitted.
+	 */
+	ap_update = pe_session->opmode == QDF_SAP_MODE;
+	if (ap_update)
+		wlan_mlme_sta_mon_update_begin(mac->psoc);
 
 	pe_debug("Update session entry for cbMod=%d",
 		pSetHT2040Mode->cbMode);
@@ -8965,7 +8981,7 @@ static void __lim_process_sme_set_ht2040_mode(struct mac_context *mac,
 		break;
 	default:
 		pe_err("Invalid cbMode");
-		return;
+		goto out;
 	}
 
 	/* Update beacon */
@@ -8982,7 +8998,7 @@ static void __lim_process_sme_set_ht2040_mode(struct mac_context *mac,
 		if (sta->valid && sta->htSupportedChannelWidthSet) {
 			pHtOpMode = qdf_mem_malloc(sizeof(tUpdateVHTOpMode));
 			if (!pHtOpMode)
-				return;
+				goto out;
 			opmode_chwidth =
 				(pe_session->htSecondaryChannelOffset ==
 				 PHY_SINGLE_CHANNEL_CENTERED) ?
@@ -9005,7 +9021,7 @@ static void __lim_process_sme_set_ht2040_mode(struct mac_context *mac,
 							    &msg))) {
 				pe_err("Not able to post WMA_UPDATE_OP_MODE message to WMA");
 				qdf_mem_free(pHtOpMode);
-				return;
+				goto out;
 			}
 			pe_debug("Notified FW about OP mode chwidth: %d",
 				 pHtOpMode->chwidth);
@@ -9014,7 +9030,9 @@ static void __lim_process_sme_set_ht2040_mode(struct mac_context *mac,
 			pe_debug("station does not support HT40");
 	}
 
-	return;
+out:
+	if (ap_update)
+		wlan_mlme_sta_mon_update_end(mac->psoc);
 }
 #endif
 
@@ -9799,6 +9817,12 @@ lim_process_sap_ch_width_update(struct mac_context *mac_ctx,
 		goto fail;
 	}
 
+	/* This queued policy update may be needed for an ongoing transition.
+	 * Revoke the old monitor owner before touching channel/beacon state;
+	 * do not depend on the later per-client operating-mode messages.
+	 */
+	wlan_mlme_sta_mon_update_begin(mac_ctx->psoc);
+
 	ch_params.ch_width = req->ch_width;
 	wlan_reg_set_channel_params_for_pwrmode(mac_ctx->pdev,
 						session->curr_op_freq,
@@ -9828,6 +9852,7 @@ lim_process_sap_ch_width_update(struct mac_context *mac_ctx,
 	lim_update_bcn_with_new_ch_width(mac_ctx, session, req->ch_width);
 	/* Send updated bw info of each peer to firmware */
 	lim_update_new_ch_width_to_fw(mac_ctx, session, req->ch_width);
+	wlan_mlme_sta_mon_update_end(mac_ctx->psoc);
 
 	/*
 	 * Release the SER command only after this, otherwise it may cause
