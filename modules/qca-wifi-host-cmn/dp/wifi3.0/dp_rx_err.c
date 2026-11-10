@@ -3152,6 +3152,7 @@ dp_rx_err_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
 				bm_action = HAL_BM_ACTION_RELEASE_MSDU_LIST;
 			else {
 				for (i = 0; i < num_msdus; i++) {
+					qdf_dma_addr_t buf_paddr;
 					struct dp_rx_desc *rx_desc =
 						soc->arch_ops.
 						dp_rx_desc_cookie_2_va(
@@ -3176,6 +3177,19 @@ dp_rx_err_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
 						dup_desc_dbg(soc,
 							     ring_desc,
 							     rx_desc);
+						continue;
+					}
+
+					/* The cookie may refer to a replenished buffer. */
+					buf_paddr = msdu ?
+						qdf_nbuf_get_frag_paddr(msdu, 0) : 0;
+					if (qdf_unlikely(!msdu ||
+							 msdu_list.paddr[i] != buf_paddr)) {
+						DP_STATS_INC(soc, rx.err.nbuf_sanity_fail, 1);
+						dp_rx_err_info_rl("RXDMA cookie 0x%x paddr 0x%llx expected 0x%llx",
+							msdu_list.sw_cookie[i],
+							(unsigned long long)msdu_list.paddr[i],
+							(unsigned long long)buf_paddr);
 						continue;
 					}
 
