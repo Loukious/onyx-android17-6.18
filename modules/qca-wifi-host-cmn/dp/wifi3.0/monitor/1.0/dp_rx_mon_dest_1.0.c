@@ -372,7 +372,8 @@ dp_rx_mon_mpdu_pop(struct dp_soc *soc, uint32_t mac_id,
 					DP_STATS_INC(dp_pdev,
 						     replenish.nbuf_alloc_fail,
 						     1);
-					qdf_frag_free(rx_desc_tlv);
+					dp_rx_mon_buffer_free(rx_desc);
+					msdu = NULL;
 					dp_rx_mon_dest_debug("failed to allocate parent buffer to hold all frag");
 					drop_mpdu = true;
 					goto next_msdu;
