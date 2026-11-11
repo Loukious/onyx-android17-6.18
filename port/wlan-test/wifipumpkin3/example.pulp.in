@@ -1,0 +1,31 @@
+set interface __AP_INTERFACE__
+set interface_net __STA_INTERFACE__
+set mode static
+set proxy noproxy
+set plugin sniffkin3 false
+set plugin responder false
+set dhcpmode.pydns_server false
+set dhcpmode.pydhcp_server true
+set dhcpmode.dhcpd_server false
+set dhcpconf.router 172.29.78.1
+set dhcpconf.netmask 255.255.255.0
+set dhcpconf.subnet 172.29.78.0
+set dhcpconf.broadcast 172.29.78.255
+set dhcpconf.range 172.29.78.20/172.29.78.30
+set dhcpconf.leasetimeDef 3600
+set dhcpconf.leasetimeMax 7200
+set ssid __AP_SSID__
+set bssid __AP_INTERFACE_MAC__
+set channel __STA_CHANNEL__
+set security true
+set security.wpa_type 2
+set security.wpa_algorithms CCMP
+set security.wpa_sharedkey __PRIVATE_PSK__
+set hostapd_config true
+set hostapd_config.driver nl80211
+set hostapd_config.hw_mode g
+set hostapd_config.ieee80211n 1
+set hostapd_config.wmm_enabled 1
+set hostapd_config.ht_capab [SHORT-GI-20]
+set hostapd_config.ctrl_interface /tmp/wifipumpkin3-coexist-hostapd
+start

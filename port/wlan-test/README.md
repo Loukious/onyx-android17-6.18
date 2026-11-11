@@ -259,8 +259,10 @@ insmod /path/to/qca_cld3_wcn7750.ko ap_monitor_coexist=1 sta_monitor_coexist=1
 ```
 
 `sta_monitor_coexist=1` is optional and enables the alternative connected-STA
-workflow. It does not permit connected STA+AP+MON operation. Before starting
-hostapd, fully stop Android Wi-Fi management, its HAL/supplicant ownership, and
+workflow. Those two flags alone do not permit connected STA+AP+MON operation;
+the [separate triple-interface option](#keep-android-wi-fi-connected-with-a-kali-ap-and-monitor)
+is described below. For this AP-only workflow, before starting hostapd, fully
+stop Android Wi-Fi management, its HAL/supplicant ownership, and
 background or scheduled scanning, including scan-always-available and PNO.
 Verify that no STA connection or scan remains; disabling the Wi-Fi toggle
 alone can leave background scanning enabled. Keep Android's Wi-Fi management
@@ -359,6 +361,111 @@ DP/MLO/TPC/beacon warnings remained; this is not a claim of warning-free logs.
 
 This is a bounded 2.4 GHz/20 MHz check. AP operation at other supported widths
 or on 5 GHz, long-duration stability, and recovery across SSR remain unqualified.
+
+## Keep Android Wi-Fi connected with a Kali AP and monitor
+
+Patch 0253 adds a separate experimental `sta_ap_monitor_coexist=1` module
+parameter for the internal WCN7750. It defaults to off and is read-only after
+loading. The existing STA/monitor and AP/monitor parameters enable their
+alternative workflows; neither is a substitute for this third opt-in. Load
+the exact matched driver using the normal framework shutdown and drain, then
+reconnect Android before starting the AP. Android manages its station normally
+during this session.
+
+Admission requires exactly one stable connected non-MLO STA and one ready
+non-MLO AP on the same physical radio and **full channel definition**: primary
+frequency, width, center frequencies and puncturing. Driver admission limits
+are enabled non-DFS 2.4/5 GHz at 20/40/80 MHz, with no second center segment or
+puncturing; device qualification covers only channel 5 at 20 MHz. Firmware must
+also grant enough vdev IDs, peers and beacon capacity for the real STA/AP,
+monitor and private non-beaconing injection helper. Down or deleting interfaces
+can still consume resources.
+
+Keep Android connected and create a separate, idle AP interface. Adjust the
+station name and use a private hostapd configuration with `interface=ap0`,
+`driver=nl80211` and the station's complete current channel definition. Wait
+for `AP-ENABLED` before creating the separate monitor. For a plain hostapd
+session, run these commands inside Kali:
+
+```sh
+iw dev wlan0 info
+iw dev wlan0 link
+iw dev wlan0 interface add ap0 type __ap
+hostapd -B /path/to/hostapd.conf
+# Wait for AP-ENABLED in the owned hostapd log.
+iw dev ap0 info
+iw dev wlan0 interface add mon0 type monitor
+ip link set mon0 up
+iw dev mon0 info
+# Capture or inject on the inherited channel, then stop those processes.
+ip link set mon0 down
+iw dev mon0 del
+# Stop the owned hostapd process after monitor teardown.
+iw dev ap0 del
+```
+
+Plain hostapd does not configure AP-client DHCP or Internet forwarding. For
+application-managed DHCP, scoped forwarding/NAT and directed injection, use
+the [Wifipumpkin3 v6 bundle](wifipumpkin3/README.md), including its Android BPF
+mount preparation and explicit upstream DNS selection.
+
+The AP owns the monitor's channel and transmit power; the station is a second
+tracked owner. All roles share airtime. Monitor retuning, scanning, off-channel
+work and competing connection requests are blocked while the AP lease is
+held. Station disconnect or a mandatory owner/channel transition quiesces
+optional monitor injection. After the station reconnects on the same complete
+channel, recreate/reopen the monitor; this path does not automatically resume
+it or allow an exclusive channel handoff. AP teardown also quiesces the monitor
+and releases its helper. Close/delete the monitor before an ordinary AP stop
+or reconfiguration. Uncertain native stop or DMA completion keeps resources
+quarantined and prevents unsafe reuse.
+
+The existing [capture contracts](#capture-limits) and AP-client capture limits
+above still apply. Successful forwarding and injection do not establish full
+capture of the local AP's beacons, client ToDS data or plaintext EAPOL through
+`mon0`.
+
+### Triple-interface device checks (2026-11-11)
+
+The frozen v6 application passed all 17 main runtime audit checks on
+Onyx/WCN7750, non-MLO channel 5, 2432 MHz, HT20/20 MHz. Static mode, noproxy and
+Python DHCP were used with interception, AP-local DNS and packet-sniffing
+backends disabled. A separate USB AP client completed source-bound SSH banner
+retrieval, certificate-validated TLS 1.3 HTTPS with HTTP 200, and DNS queries
+forwarded to an explicit upstream resolver, both before monitor creation and
+during monitor/injection. Correlated AP and STA packet captures verified
+forwarding, SNAT, replies and matching payloads.
+
+The USB client received all 423 UDP echoes before the deliberate directed
+frame. Across the complete trial it received 561 of 568 replies, with seven
+timeouts and no unexpected replies. Wifipumpkin3's actual `ModPump`/
+`ThreadDeauth` worker sent one AP-to-client frame; together with 20 quiet test
+frames, all 21 driver completions succeeded with no send failures, failed or
+unknown completions, or timeouts. Completion counters alone do not prove RF
+receipt. Stopping the AP owner quiesced the monitor and helper.
+
+The actual application exited with status zero. Its current scoped-network
+journal was restored with no pending cleanup; the firewall was restored exactly
+apart from counters and printer timestamps. All 137 ordered policy rules and
+12 routes were restored with every recorded field retained, along with the
+forwarding setting. The boot remained unchanged.
+
+A separate companion lifecycle check passed all 30 assertions with
+observations: disconnecting the station quiesced the monitor while the AP
+remained enabled; reconnecting on the same channel and recreating/reopening
+the monitor restored injection, with 20 successful completions before and 20
+after reconnect and no injection errors. AP stop quiesced the monitor while
+the station stayed connected. Scoped cleanup removed only owned resources and
+restored the firewall and forwarding setting. Four Android/Netd policy rules
+added during reconnection were retained, so this separate check does not claim
+exact restoration of the entire policy-rule list. Its boot and module identity
+were unchanged, and its bounded log interval contained no crash or SSR marker.
+
+These results cover this short non-MLO 2.4 GHz/20 MHz profile. Other channels
+and widths, DFS, MLO, AP-local DNS, interception/sniffing backends, long-duration
+stability and SSR recovery remain unqualified. The companion test establishes
+lifecycle and completions; its separate result does not independently establish
+RF receipt or client Internet/DNS behavior.
 
 ## Host support
 

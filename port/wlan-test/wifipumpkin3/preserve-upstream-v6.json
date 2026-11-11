@@ -1,0 +1,85 @@
+{
+  "schema": "wfp3-preserve-upstream-review/v1",
+  "revision": "v6",
+  "package_version": "1.1.7-0kali3",
+  "kali_source": "14b8c4d960cd33816ba9c64cb1fba69a44170b10",
+  "patch": "preserve-upstream-v6.patch",
+  "patch_sha256": "db5ac72a5655e8019c4d5166dec42fca816575524be16bdb9be3af0a60297efb",
+  "overlay": "preserve-upstream-v6-overlay.tar.gz",
+  "overlay_sha256": "d5fc28ebe1400c7bdc0440dc560cf23c23e1b64e9b7f410cd79c6f3c02061e8a",
+  "files": [
+    {
+      "path": "wifipumpkin3/__main__.py",
+      "before_sha256": "357bb859451ca1c97f7ce8887ca43455b3474debab32392c15f772aa2d5a535b",
+      "after_sha256": "a9678a11459624f83645cc87bc0ef48b4659c904528a4f5eede3f8ebfec3361d",
+      "bytes": 10753
+    },
+    {
+      "path": "wifipumpkin3/core/common/console.py",
+      "before_sha256": "50eec73b9b251128d9e38c0529256927533fe7bcd38e64367cfec26c977ef66f",
+      "after_sha256": "f2859bfe8159ed8a80e16fc29a4c9c07defa5f3a9f45343c3c77535fc2319734",
+      "bytes": 20545
+    },
+    {
+      "path": "wifipumpkin3/core/common/scoped_network.py",
+      "before_sha256": null,
+      "after_sha256": "195fb35a2cb06b370162a8823a3bde12a0a361b75362b8507bff2419b7a41594",
+      "bytes": 15765
+    },
+    {
+      "path": "wifipumpkin3/core/common/threads.py",
+      "before_sha256": "5fd22a190f3ad96db225d26cf729b2f9ab12d7e997e178cad9c5afe802bc3fcf",
+      "after_sha256": "f94e3fc3a1f2a387bc740b3d87d32f4a890c64f566aa4f91f2bfb6acf3ffa9be",
+      "bytes": 9169
+    },
+    {
+      "path": "wifipumpkin3/core/packets/dhcpserver.py",
+      "before_sha256": "b8428de19f55abeda25f483659b708d87526d607d7acf7e4e341db4502d64b4f",
+      "after_sha256": "3e8b652a58dbdbc9a649657cbc7c7cbcbcc2f65beb08a8cf5c407f8c23525753",
+      "bytes": 10012
+    },
+    {
+      "path": "wifipumpkin3/core/packets/wireless.py",
+      "before_sha256": "cd07e107dc224a35b9a82763a5377376c182c2d8c5e7f6c6687c64d9169da954",
+      "after_sha256": "924d141edae59a7b4ba9dc44181392046ffe682f4170c33b6232edc430457eb5",
+      "bytes": 3522
+    },
+    {
+      "path": "wifipumpkin3/core/servers/dhcp/pyDHCP.py",
+      "before_sha256": "25b59624c5a22559c4f1242aa31faba6471b00b7cd2ac1cb6be9dbd99bb1a0a7",
+      "after_sha256": "a80f98ecc4b53b562fd9fd33d4d79b3cf58e1da44bd77458117e7d22d67e1da5",
+      "bytes": 2360
+    },
+    {
+      "path": "wifipumpkin3/core/wirelessmode/static.py",
+      "before_sha256": "4f97872a29ca3e47548ef7b4ab16a82c489e4acf6d83d8e07333df278094f2b1",
+      "after_sha256": "a79baacde28b4e670ed8c566205130037c3c747fa008f59a38474c8a5bf55289",
+      "bytes": 11815
+    },
+    {
+      "path": "wifipumpkin3/core/wirelessmode/wirelessmode.py",
+      "before_sha256": "4508d8688ed845dfd54f4a9387e530589524ed3cf4e2added2ad134f5eecc970",
+      "after_sha256": "41dcff2fa4565c17baed728d0f2c17dd6126a3d3ec3d848e3765bed6d239ac48",
+      "bytes": 7726
+    },
+    {
+      "path": "wifipumpkin3/modules/wifi/wifideauth.py",
+      "before_sha256": "292319bb078f77e4f642273996fe9221df49837ffd65f8800202b94e798200dd",
+      "after_sha256": "21f24f174a200105049dfc347b1b3c8a0c2848c0c7f47e5e19c80cbf695ada4e",
+      "bytes": 19256
+    }
+  ],
+  "v1_patch_sha256": "47b7124011455507c2d755e19c0374517f02d4d637e8f6d366891843eb55be53",
+  "change": "Scoped AP forwarding/NAT with verified owned-route cleanup, address-free AP identity, bounded application/worker lifecycle, explicit DHCP DNS with independent lab omission, and bounded native WFP deauthentication on an existing same-radio/full-channel monitor; recognize iproute JSON omission of its default RTPROT_BOOT when checking owned route cleanup",
+  "validation": "46 host checks PASS: 19 scoped/identity/preflight including observed omitted-default-protocol cleanup, 10 real DHCP/CLI propagation, 5 bounded lifecycle; unchanged12 native deauth/Scapy checks remain verified by identical source hashes; runtime v6 validation pending root",
+  "baseline": "effective Kali source after distro quilt patches",
+  "v2_patch_sha256": "7a5d299263e94625eb9ab2e95512e5fec6ea8602df671bb2fff907a8dbbe8ebe",
+  "v3_patch_sha256": "2485c35f1592c4a65b0a32ded1d05355b7d8ce362ae1639789b23ff6d1e14799",
+  "v4_patch_sha256": "6464918e3775cee7c41abfe9b8a2fc37d6b2c82f635df74d9dcc9568a83b7638",
+  "provenance": {
+    "deauth_review": "f567901092c872742f26ae08519e2315b9b34de1d43371ac4430ac872a43175e",
+    "dhcp_dns_review_sha256": "97a32eff6ae503f62b59b16183000090c057f20463b050eabfdc9e1a4a4a925f",
+    "route_cleanup_snapshot": "v4/source"
+  },
+  "v5_patch_sha256": "6968b325d220bad2bf85f9a3d41c3db9856fb5f0a5e6be2e6cc91d76f14e6e46"
+}

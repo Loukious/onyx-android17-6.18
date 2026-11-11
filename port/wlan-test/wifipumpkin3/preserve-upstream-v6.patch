@@ -1,0 +1,915 @@
+--- a/wifipumpkin3/__main__.py
++++ b/wifipumpkin3/__main__.py
+@@ -5,6 +5,7 @@
+ getLogger("scapy.runtime").setLevel(ERROR)
+ import argparse
+ import sys
++from wifipumpkin3.core.packets.dhcpserver import dhcp_dns_ipv4
+ from PyQt5 import QtCore
+ from wifipumpkin3 import PumpkinShell
+ from wifipumpkin3.core.utility.printer import (
+@@ -21,10 +22,14 @@
+ from os import getuid
+ from wifipumpkin3.core.servers.rest.application import RestControllerAPI
+ import threading
++import signal
+ 
+ 
+ 
+ def parser_args_func(parse_args, config):
++    config.set("accesspoint", "preserve_upstream", parse_args.preserve_upstream)
++    config.set("accesspoint", "lab_dhcp", parse_args.lab_dhcp)
++    config.set("accesspoint", "dhcp_dns", " ".join(parse_args.dhcp_dns))
+     if parse_args.nocolors:
+         set_nocolors()
+ 
+@@ -243,8 +248,23 @@
+         dest="version",
+         version="%(prog)s v{} branch: {}".format(__version__, __branch__),
+     )
++    parser.add_argument("--preserve-upstream", action="store_true",
++                        help="Use scoped AP routes/firewall rules and preserve the selected upstream")
++    parser.add_argument("--lab-dhcp", action="store_true",
++                        help="Omit gateway and DNS DHCP options for a client that retains another connection")
++    parser.add_argument("--dhcp-dns", action="append", type=dhcp_dns_ipv4,
++                        default=[], metavar="IPv4",
++                        help="Advertise an explicit IPv4 DNS resolver with preserved upstream; repeat for multiple resolvers")
++    parser.add_argument("--run-seconds", type=int, default=0,
++                        help="Run a preserved-upstream pulp session headlessly for 1–300 seconds")
+ 
+     parse_args = parser.parse_args()
++    if parse_args.run_seconds and (not parse_args.preserve_upstream or not 1 <= parse_args.run_seconds <= 300):
++        parser.error("--run-seconds requires --preserve-upstream and a duration from 1 to 300")
++    if parse_args.dhcp_dns and not parse_args.preserve_upstream:
++        parser.error("--dhcp-dns requires --preserve-upstream")
++    if len(parse_args.dhcp_dns) > 63:
++        parser.error("--dhcp-dns supports at most 63 IPv4 resolver addresses")
+     parser_args_func(parse_args, config)
+ 
+     # check is rootuser
+@@ -254,5 +274,31 @@
+     wp3_header()
+ 
+     prompt = PumpkinShell(parse_args)
++    if parse_args.run_seconds:
++        # Process QProcess/QThread signals while no interactive terminal exists.
++        # The pulp script still drives the actual WFP3 application/controllers.
++        stopping = False
++        def finish(*unused):
++            nonlocal stopping
++            if stopping:
++                return
++            stopping = True
++            status = 0 if getattr(prompt.wireless_controller.ActiveReactor, "isRunning", False) else 1
++            try:
++                prompt.killThreads()
++            except Exception as error:
++                print(error, file=sys.stderr)
++                status = 1
++            app.exit(status)
++        signal.signal(signal.SIGTERM, finish)
++        signal.signal(signal.SIGINT, finish)
++        deadline = QtCore.QTimer()
++        deadline.setSingleShot(True)
++        deadline.timeout.connect(finish)
++        deadline.start(parse_args.run_seconds * 1000)
++        tick = QtCore.QTimer()
++        tick.timeout.connect(lambda: None)
++        tick.start(200)
++        return app.exec_()
+     prompt.cmdloop("Starting prompt...")
+     sys.exit(app.exec_())
+--- a/wifipumpkin3/core/common/console.py
++++ b/wifipumpkin3/core/common/console.py
+@@ -247,6 +247,11 @@
+         # )
+ 
+         if not self.parse_args.restmode:
++            if self.conf.get("accesspoint", "preserve_upstream", format=bool):
++                self.wireless_controller.ActiveReactor.signalApIsRuning.connect(
++                    self.signalHostApdProcessIsRunning)
++                self.wireless_controller.ActiveReactor.start()
++                return
+             self.wireless_controller.ActiveReactor.start()
+             self.wireless_controller.ActiveReactor.signalApIsRuning.connect(
+                 self.signalHostApdProcessIsRunning
+@@ -276,6 +281,8 @@
+             self.threads["RogueAP"].insert(0, self.wireless_controller.ActiveReactor)
+ 
+     def killThreads(self):
++        if self.conf.get("accesspoint", "preserve_upstream", format=bool):
++            return self.stop_preserved_upstream()
+ 
+         # kill all modules on background
+         if len(self.threads["Modules"]) > 0:
+@@ -305,6 +312,30 @@
+ 
+         for line in self.wireless_controller.Activated.getSettings().SettingsAP["kill"]:
+             exec_bash(line)
++        self.threads["RogueAP"] = []
++
++    def stop_preserved_upstream(self):
++        self.conf.set("accesspoint", "status_ap", False)
++        # Include hostapd even if it failed before the AP-ready callback added
++        # it to RogueAP. Stop each owned reactor independently.
++        reactors = [self.wireless_controller.ActiveReactor,
++                    self.dhcp_controller.ActiveReactor] + self.threads["RogueAP"]
++        seen, errors = set(), []
++        for reactor in reactors:
++            if reactor is None or isinstance(reactor, list) or id(reactor) in seen:
++                continue
++            seen.add(id(reactor))
++            try:
++                reactor.stop()
++                if isinstance(reactor, QtCore.QThread) and not reactor.wait(2500):
++                    raise RuntimeError("An application worker did not stop: " + reactor.objectName())
++            except Exception as error:
++                errors.append(str(error))
++        if errors:
++            raise RuntimeError("WFP3 worker cleanup failed: " + "; ".join(errors))
++        network = getattr(self.wireless_controller.Activated.getSettings(), "scoped_network", None)
++        if network is not None:
++            network.close()
+         self.threads["RogueAP"] = []
+ 
+     def do_ignore(self, args):
+--- a/wifipumpkin3/core/common/scoped_network.py
++++ b/wifipumpkin3/core/common/scoped_network.py
+@@ -0,0 +1,284 @@
++"""Own only one AP's IPv4 configuration in an existing network namespace.
++
++No shell commands, interface-name heuristics, global firewall flushes, or
++default routing/policy changes. The journal retains exact inverse commands
++for root-owned recovery if the application is killed before normal cleanup.
++"""
++import atexit
++import ipaddress
++import json
++import os
++from pathlib import Path
++import re
++import secrets
++import shutil
++import subprocess
++import sys
++
++
++class ScopedNetwork:
++    FORWARD = Path("/proc/sys/net/ipv4/ip_forward")
++
++    def __init__(self, ap, upstream, router, netmask, iptables, state_dir, bssid):
++        for name in (ap, upstream):
++            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", name):
++                raise ValueError("Select explicit AP and upstream interface names")
++        if ap == upstream:
++            raise ValueError("The AP and upstream must be different interfaces")
++        self.ap, self.upstream = ap, upstream
++        self.address = ipaddress.IPv4Interface("{}/{}".format(router, netmask))
++        self.network = self.address.network
++        if self.address.ip in (self.network.network_address, self.network.broadcast_address):
++            raise ValueError("AP address must be a usable subnet address")
++        self.ip = shutil.which("ip")
++        if not self.ip or not iptables or not os.path.isfile(iptables):
++            raise ValueError("ip and the selected iptables backend are required")
++        self.iptables = iptables
++        self.bssid = bssid.lower()
++        self.token = secrets.token_hex(5).upper()
++        self.journal = Path(state_dir) / ("scoped-network-" + self.token + ".json")
++        self.undo = []
++        self.plan = []
++        self.before = {}
++        self.route_cleanup_observations = []
++        self.owner = os.getpid()
++        self.status = "preflight"
++
++    def run(self, argv):
++        result = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
++                                stderr=subprocess.PIPE, timeout=10)
++        if result.returncode:
++            raise RuntimeError("{}: {}".format(" ".join(argv), result.stderr.strip()))
++        return result.stdout
++
++    def query(self, *argv, ipv4=True):
++        return json.loads(self.run([self.ip, "-j", *(["-4"] if ipv4 else []), *argv]))
++
++    def identity(self, name):
++        # An existing down/address-free AP may be absent from `ip -4 address`.
++        # Link identity and flags must come from the family-independent view.
++        records = self.query("link", "show", "dev", name, ipv4=False)
++        if len(records) != 1:
++            raise RuntimeError("Interface identity is unavailable: " + name)
++        link = dict(records[0])
++        addresses = self.query("address", "show", "dev", name)
++        if len(addresses) > 1 or (addresses and addresses[0].get("ifindex") != link["ifindex"]):
++            raise RuntimeError("Interface changed during IPv4 lookup: " + name)
++        link["addr_info"] = addresses[0].get("addr_info", []) if addresses else []
++        return link, (link["ifindex"], link["address"].lower())
++
++    def check_ap(self):
++        if self.identity(self.ap)[1] != tuple(self.before["ap_identity"]):
++            raise RuntimeError("AP interface was replaced; refusing to change its addresses or link")
++
++    def save(self):
++        data = {"schema": "wifipumpkin3-scoped-network/v1", "status": self.status,
++                "pid": self.owner, "ap": self.ap, "upstream": self.upstream,
++                "token": self.token, "before": self.before,
++                "planned": self.plan, "pending_cleanup": self.undo,
++                "route_cleanup_observations": self.route_cleanup_observations}
++        temporary = self.journal.with_suffix(".new")
++        with temporary.open("w") as stream:
++            os.chmod(temporary, 0o600)
++            json.dump(data, stream, indent=2)
++            stream.write("\n")
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary, self.journal)
++
++    def prepare(self):
++        ap, ap_identity = self.identity(self.ap)
++        upstream, upstream_identity = self.identity(self.upstream)
++        if ap_identity == upstream_identity or ap_identity[1] != self.bssid:
++            raise ValueError("Use the existing AP interface's own MAC as the hostapd BSSID")
++        if "UP" not in upstream.get("flags", []):
++            raise ValueError("The selected upstream interface is not up")
++        if ap.get("addr_info"):
++            raise ValueError("Preserved-upstream mode requires an AP interface without IPv4 addresses")
++        for link in self.query("address", "show"):
++            for addr in link.get("addr_info", []):
++                existing = ipaddress.IPv4Network("{}/{}".format(addr["local"], addr["prefixlen"]), strict=False)
++                if self.network.overlaps(existing):
++                    raise ValueError("The AP subnet overlaps an existing interface subnet")
++        routes = self.query("route", "show", "table", "all")
++        gateways = {r["gateway"] for r in routes if r.get("dev") == self.upstream
++                    and r.get("dst") == "default" and r.get("gateway")}
++        if len(gateways) != 1:
++            raise ValueError("An unambiguous IPv4 gateway is required on the selected upstream")
++        gateway = ipaddress.IPv4Address(gateways.pop())
++        addresses = [ipaddress.IPv4Interface("{}/{}".format(a["local"], a["prefixlen"]))
++                     for a in upstream.get("addr_info", [])]
++        addresses = [a for a in addresses if gateway in a.network]
++        if len(addresses) != 1:
++            raise ValueError("Cannot match the upstream gateway to a connected IPv4 address")
++        uplink = addresses[0]
++        rules = self.query("rule", "show")
++        tables = {str(r.get("table", 254)) for r in routes + rules}
++        priorities = {r["priority"] for r in rules}
++        table = next((i for i in range(52000, 53000) if str(i) not in tables), None)
++        priority = next((i for i in range(17500, 18500, 2)
++                         if i not in priorities and i + 1 not in priorities), None)
++        if table is None or priority is None:
++            raise RuntimeError("No unused scoped routing table/priority pair is available")
++        forward = self.FORWARD.read_text().strip()
++        if forward not in ("0", "1"):
++            raise RuntimeError("Cannot determine the existing IPv4 forwarding setting")
++        self.before = {"ap_identity": ap_identity, "upstream_identity": upstream_identity,
++                       "ap_up": "UP" in ap.get("flags", []), "ip_forward": forward,
++                       "table": table, "priority": priority, "gateway": str(gateway),
++                       "upstream_address": str(uplink), "ap_address": str(self.address)}
++        ip = [self.ip, "-4"]
++
++        def add(command, inverse, ap_change=False):
++            self.plan.append({"command": command, "inverse": inverse, "ap_change": ap_change})
++
++        if not self.before["ap_up"]:
++            add(ip + ["link", "set", "dev", self.ap, "up"],
++                ip + ["link", "set", "dev", self.ap, "down"], True)
++        add(ip + ["address", "add", str(self.address), "dev", self.ap],
++            ip + ["address", "del", str(self.address), "dev", self.ap], True)
++        # hostapd may cycle the AP link after this setup. Linux removes explicit
++        # AP routes on link-down, but recreates the address's connected main-table
++        # route on link-up. Use that route for AP replies instead of owning a
++        # private-table copy which can disappear before traffic or cleanup.
++        for route in ([str(uplink.network), "dev", self.upstream, "src", str(uplink.ip)],
++                      ["default", "via", str(gateway), "dev", self.upstream]):
++            add(ip + ["route", "add", "table", str(table)] + route,
++                ip + ["route", "del", "table", str(table)] + route)
++        for rule in (["priority", str(priority), "from", str(self.network), "iif", self.ap, "lookup", str(table)],
++                     ["priority", str(priority + 1), "to", str(self.network), "lookup", "main"]):
++            add(ip + ["rule", "add"] + rule, ip + ["rule", "del"] + rule)
++        chains = {"input": "WP3_" + self.token + "_I", "forward": "WP3_" + self.token + "_F",
++                  "nat": "WP3_" + self.token + "_N"}
++
++        def firewall(table_name, operation, args):
++            inverse = {"-N": "-X", "-A": "-D", "-I": "-D"}[operation]
++            prefix = [self.iptables, "-w", "5", "-t", table_name]
++            add(prefix + [operation] + args, prefix + [inverse] + args)
++
++        for name, chain in chains.items():
++            firewall("nat" if name == "nat" else "filter", "-N", [chain])
++        firewall("filter", "-A", [chains["input"], "-p", "udp", "--sport", "68", "--dport", "67", "-j", "ACCEPT"])
++        firewall("filter", "-A", [chains["input"], "-s", str(self.network), "-d", str(self.address.ip), "-j", "ACCEPT"])
++        firewall("filter", "-A", [chains["forward"], "-j", "ACCEPT"])
++        firewall("nat", "-A", [chains["nat"], "-j", "MASQUERADE"])
++        firewall("filter", "-I", ["INPUT", "-i", self.ap, "-j", chains["input"]])
++        firewall("filter", "-I", ["FORWARD", "-i", self.ap, "-o", self.upstream,
++                                   "-s", str(self.network), "-j", chains["forward"]])
++        firewall("filter", "-I", ["FORWARD", "-i", self.upstream, "-o", self.ap,
++                                   "-d", str(self.network), "-m", "conntrack", "--ctstate",
++                                   "RELATED,ESTABLISHED", "-j", chains["forward"]])
++        firewall("nat", "-I", ["POSTROUTING", "-s", str(self.network), "-o", self.upstream,
++                                "-j", chains["nat"]])
++        self.save()
++
++    def start(self):
++        self.prepare()
++        atexit.register(self.at_exit)
++        try:
++            for operation in self.plan:
++                self.check_ap()
++                if self.identity(self.upstream)[1] != tuple(self.before["upstream_identity"]):
++                    raise RuntimeError("Upstream interface identity changed during configuration")
++                self.run(operation["command"])
++                self.undo.append({"argv": operation["inverse"], "ap_change": operation["ap_change"]})
++                self.save()
++            if self.before["ip_forward"] == "0":
++                self.FORWARD.write_text("1\n")
++                self.undo.append({"ip_forward": "0"})
++                self.save()
++            self.status = "active"
++            self.save()
++            print("[*] Scoped AP networking journal: {}".format(self.journal))
++        except BaseException:
++            self.close()
++            raise
++
++    def close(self):
++        if os.getpid() != self.owner or not self.before:
++            return
++        remaining, errors = [], []
++        for operation in reversed(self.undo):
++            try:
++                if "ip_forward" in operation:
++                    current = self.FORWARD.read_text().strip()
++                    if current not in ("0", "1"):
++                        raise RuntimeError("IPv4 forwarding state is unavailable")
++                    if current != operation["ip_forward"]:
++                        self.FORWARD.write_text(operation["ip_forward"] + "\n")
++                else:
++                    if operation["ap_change"]:
++                        self.check_ap()
++                    argv = operation["argv"]
++                    if argv[:4] != [self.ip, "-4", "route", "del"] or self.owned_route_present(argv):
++                        self.run(argv)
++            except Exception as error:
++                remaining.append(operation)
++                errors.append(str(error))
++        self.undo = list(reversed(remaining))
++        self.status = "cleanup_incomplete" if errors else "restored"
++        self.save()
++        if errors:
++            raise RuntimeError("Scoped cleanup incomplete; keep journal {}: {}".format(self.journal, "; ".join(errors)))
++
++    def owned_route_present(self, argv):
++        """Delete only the expected owned route, or prove it already absent.
++
++        Kernel STA teardown can remove a route using the old source address.
++        Do not turn ESRCH into success: query the actual table before deletion,
++        record its state, and refuse a same-prefix replacement or query failure.
++        A deletion race remains a cleanup error and can be retried with a new
++        authoritative query. No foreign route is deleted or normalized away.
++        """
++        if len(argv) < 9 or argv[4] != "table" or argv[5] != str(self.before["table"]):
++            raise RuntimeError("Route inverse does not address our reserved table")
++        expected = {"table": argv[5], "dst": argv[6], "dev": argv[argv.index("dev") + 1]}
++        for option, key in (("via", "gateway"), ("src", "prefsrc")):
++            if option in argv:
++                expected[key] = argv[argv.index(option) + 1]
++        routes = self.query("route", "show", "table", "all")
++        table_routes = [route for route in routes if str(route.get("table", "main")) == argv[5]]
++        def prefix(value):
++            return ipaddress.IPv4Network("0.0.0.0/0" if value == "default" else value)
++        matches = [route for route in table_routes if prefix(route.get("dst", "default")) == prefix(expected["dst"])]
++        observation = {"expected": expected, "observed_table_routes": table_routes,
++                       "action": "already_absent" if not matches else "verify_before_delete"}
++        self.route_cleanup_observations.append(observation)
++        if not matches:
++            return False
++        allowed = {"table", "dst", "dev", "gateway", "prefsrc", "protocol", "scope", "flags", "type", "metric"}
++        scope = "global" if "gateway" in expected else "link"
++        if (len(matches) != 1 or set(matches[0]) - allowed or
++                any(matches[0].get(key) != expected.get(key) for key in ("dev", "gateway", "prefsrc")) or
++                matches[0].get("protocol", "boot") != "boot" or matches[0].get("scope", "global") != scope or
++                matches[0].get("type", "unicast") != "unicast" or matches[0].get("metric", 0) != 0 or
++                matches[0].get("flags", []) not in ([], ["linkdown"])):
++            observation["action"] = "foreign_replacement_refused"
++            raise RuntimeError("Owned route was replaced; refusing cleanup: {}".format(expected))
++        observation["action"] = "delete_verified"
++        return True
++
++    def at_exit(self):
++        if self.undo:
++            try:
++                self.close()
++            except Exception as error:
++                print(error, file=sys.stderr)
++
++
++def validate_services(conf):
++    """Reject interception backends whose firewall ownership is not scoped."""
++    if not conf.get("ap_mode", "static", format=bool):
++        raise ValueError("Preserved-upstream mode currently supports static AP mode")
++    if not conf.get("proxy_plugins", "noproxy", format=bool):
++        raise ValueError("Select noproxy; preserved-upstream mode still provides routed NAT")
++    for group in ("proxy_plugins", "mitm_modules"):
++        for name in conf.get_all_childname(group):
++            if name != "noproxy" and conf.get(group, name, format=bool):
++                raise ValueError("Disable {} before using preserved-upstream mode".format(name))
++    if not conf.get("accesspoint", "pydhcp_server", format=bool) or conf.get("accesspoint", "dhcpd_server", format=bool):
++        raise ValueError("Select Wifipumpkin3's Python DHCP server for preserved-upstream mode")
++    if (not conf.get("accesspoint", "lab_dhcp", format=bool) and
++            not conf.get("accesspoint", "pydns_server", format=bool) and
++            not (conf.get("accesspoint", "dhcp_dns") or "").split()):
++        raise ValueError("Supply --dhcp-dns when the local DNS server is disabled")
+--- a/wifipumpkin3/core/common/threads.py
++++ b/wifipumpkin3/core/common/threads.py
+@@ -155,7 +155,7 @@
+     statusAPError = pyqtSignal(object)
+     signalApIsRuning = pyqtSignal(bool)
+ 
+-    def __init__(self, cmd, session):
++    def __init__(self, cmd, session, bounded=False):
+         QObject.__init__(self)
+         self.cmd = cmd
+         self.session = session
+@@ -169,6 +169,8 @@
+         self.queue = Queue()
+         self.isRunning = False
+         self.started = False
++        self.bounded = bounded
++        self.output_pending = ""
+ 
+     def getpid(self):
+         """return the pid of current process in background"""
+@@ -180,6 +182,7 @@
+ 
+     def read_OutputCommand(self):
+         self.data = str(self.procHostapd.readAllStandardOutput(), encoding="ascii")
++        self.output_pending = (self.output_pending + self.data)[-4096:]
+         if (
+             "AP-STA-DISCONNECTED" in self.data.rstrip()
+             or "inactivity (timer DEAUTH/REMOVE)" in self.data.rstrip()
+@@ -190,17 +193,28 @@
+             if self.data.find(error) != -1:
+                 return self.statusAPError.emit(self.data)
+         # process hostapd is running
+-        if self.started and not self.isRunning:
++        if self.started and not self.isRunning and (not self.bounded or "AP-ENABLED" in self.output_pending):
++            self.isRunning = True
+             self.signalApIsRuning.emit(True)
+-            self.isRunning = True
++
++    def process_finished(self, *unused):
++        self.started = False
++        self.isRunning = False
+ 
+     def start(self):
+         self.procHostapd = QProcess(self)
+         self.procHostapd.setProcessChannelMode(QProcess.MergedChannels)
++        if self.bounded:
++            self.started = True
++            self.procHostapd.readyReadStandardOutput.connect(self.read_OutputCommand)
++            self.procHostapd.finished.connect(self.process_finished)
+         self.procHostapd.start(
+             list(self.cmd.keys())[0], self.cmd[list(self.cmd.keys())[0]]
+         )
+-        self.procHostapd.readyReadStandardOutput.connect(self.read_OutputCommand)
++        if not self.bounded:
++            self.procHostapd.readyReadStandardOutput.connect(self.read_OutputCommand)
++        if self.bounded and not self.procHostapd.waitForStarted(3000):
++            raise RuntimeError("WFP3 could not start its hostapd process")
+         self.started = True
+         print(
+             display_messages(
+@@ -217,7 +231,14 @@
+         if hasattr(self, "procHostapd"):
+             self.started = False
+             self.isRunning = False
+-            self.procHostapd.terminate()
++            if not self.bounded:
++                self.procHostapd.terminate()
++            elif self.procHostapd.state() != QProcess.NotRunning:
++                self.procHostapd.terminate()
++                if not self.procHostapd.waitForFinished(3000):
++                    self.procHostapd.kill()
++                    if not self.procHostapd.waitForFinished(2000):
++                        raise RuntimeError("WFP3's hostapd process did not stop")
+ 
+ 
+ class WorkerProcess(QThread):
+--- a/wifipumpkin3/core/packets/dhcpserver.py
++++ b/wifipumpkin3/core/packets/dhcpserver.py
+@@ -24,6 +24,15 @@
+ # limitations under the License.
+ 
+ 
++def dhcp_dns_ipv4(value):
++    """Require an explicit unicast IPv4 resolver, without choosing one."""
++    address = ip.IPv4Address(value)
++    if (address.is_unspecified or address.is_multicast or address.is_loopback
++            or address.is_reserved or address == ip.IPv4Address("255.255.255.255")):
++        raise ValueError("DHCP DNS must be a unicast IPv4 resolver address")
++    return str(address)
++
++
+ class IpAddressClass(object):
+     """class for generator ipaddress"""
+ 
+@@ -57,8 +66,12 @@
+ class DHCPProtocol(QObject):
+     _request = pyqtSignal(object)
+ 
+-    def __init__(self, DHCPConf, output):
++    def __init__(self, DHCPConf, output, lab_dhcp=False, dhcp_dns=None):
+         QObject.__init__(self)
++        self.lab_dhcp = lab_dhcp
++        self.dhcp_dns = tuple(dhcp_dns_ipv4(value) for value in (dhcp_dns or ()))
++        if len(self.dhcp_dns) > 63:
++            raise ValueError("DHCP DNS option supports at most 63 IPv4 addresses")
+         self.dhcp_conf = DHCPConf
+         self.IPADDR = iter(IpAddressClass(self.dhcp_conf["range"]))
+         self.leases = {}
+@@ -129,6 +142,16 @@
+             Refactor.writeFileDataToJson(C.CLIENTS_CONNECTED, self.leases, "w")
+             send = True
+         if send:
++            if self.dhcp_dns:
++                # Set both OFFER and ACK after copying any client options.
++                # Explicit DNS uses the AP router as the sole gateway.
++                packet.set_option("router", [self.dhcp_conf["router"]], validate=False)
++                packet.set_option("domain_name_servers", list(self.dhcp_dns), validate=False)
++            if self.lab_dhcp:
++                # This is an explicit lab-client option, independent of NAT.
++                # Drop client-supplied copies too, on both OFFER and ACK.
++                packet._options.pop(3, None)
++                packet._options.pop(6, None)
+             self.output_signal.emit("SEND to {}:\n{}\n".format(addr, packet))
+             ipaddr, port = addr
+             if ipaddr == "0.0.0.0":
+@@ -160,14 +183,19 @@
+ class DHCPThread(QThread):
+     send_output = pyqtSignal(object)
+ 
+-    def __init__(self, iface, DHCPconf):
++    def __init__(self, iface, DHCPconf, lab_dhcp=False, bounded=False, dhcp_dns=None):
+         QThread.__init__(self)
+         self.iface = iface
+         self.dhcp_conf = DHCPconf
+-        self.DHCPProtocol = DHCPProtocol(self.dhcp_conf, self.send_output)
++        self.DHCPProtocol = DHCPProtocol(self.dhcp_conf, self.send_output,
++                                         lab_dhcp=lab_dhcp, dhcp_dns=dhcp_dns)
+         self.started = False
++        self.bounded = bounded
++        self.stop_requested = False
+ 
+     def run(self):
++        if self.bounded and self.stop_requested:
++            return
+         self.started = True
+ 
+         server_address = self.dhcp_conf["router"]
+@@ -178,6 +206,8 @@
+         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
++        if self.bounded:
++            self.sock.settimeout(0.5)
+         self.sock.bind(("", server_port))
+         self.sock.setsockopt(
+             socket.SOL_SOCKET, socket.SO_BINDTODEVICE, str(self.iface + "\0").encode()
+@@ -188,13 +218,17 @@
+         # self.DHCP._request.connect(self.get_DHCP_Response)
+         self.DHCPProtocol.connection_made(self.sock)
+         # log.debug("Starting UDP server")
+-        while self.started:
++        while self.started and not (self.bounded and self.stop_requested):
+             try:
+                 message, address = self.sock.recvfrom(1024)
+                 self.DHCPProtocol.datagram_received(message, address)
++            except socket.timeout:
++                continue
+             except Exception as e:
+                 # OSError: [Errno 9] Bad file descriptor when close socket
+                 print(display_messages("socket error: {}".format(e), error=True))
++        if self.bounded:
++            self.sock.close()
+ 
+     def getpid(self):
+         """return the pid of current process in background"""
+@@ -205,6 +239,7 @@
+         return self.objectName()
+ 
+     def stop(self):
++        self.stop_requested = True
+         self.started = False
+         Refactor.writeFileDataToJson(C.CLIENTS_CONNECTED, {}, "w")
+         print(
+@@ -212,4 +247,5 @@
+                 "thread {} successfully stopped".format(self.objectName()), info=True
+             )
+         )
+-        self.sock.close()
++        if hasattr(self, "sock"):
++            self.sock.close()
+--- a/wifipumpkin3/core/packets/wireless.py
++++ b/wifipumpkin3/core/packets/wireless.py
+@@ -1,5 +1,6 @@
+ from scapy.all import *
+ from PyQt5.QtCore import QThread
++from threading import Event
+ from wifipumpkin3.core.utility.printer import display_messages, setcolor
+ 
+ # This file is part of the wifipumpkin3 Open Source Project.
+@@ -21,11 +22,18 @@
+ 
+ 
+ class ThreadDeauth(QThread):
+-    def __init__(self, mac_blacklist, client, interface):
++    def __init__(self, mac_blacklist, client, interface, frame_limit=0, direction="both"):
+         QThread.__init__(self)
+-        self._mac_blacklist = mac_blacklist
+-        self.client = client
++        if not 0 <= frame_limit <= 1000 or direction not in ("both", "ap-to-client"):
++            raise ValueError("Invalid deauthentication count or direction")
++        self._mac_blacklist = tuple(sorted(target.replace("-", ":") for target in mac_blacklist))
++        self.client = client.replace("-", ":")
+         self.interface = interface
++        self.frame_limit = frame_limit
++        self.direction = direction
++        self.frames_sent = 0
++        self.error = None
++        self._stop_event = Event()
+         self.status = False
+         self.pkts = list()
+ 
+@@ -41,9 +49,10 @@
+             )
+             / Dot11Deauth(reason=7)
+         )
+-        pkt2 = Dot11(addr1=bssid, addr2=client, addr3=client) / Dot11Deauth()
+         self.pkts.append(pkt1)
+-        self.pkts.append(pkt2)
++        if self.direction == "both":
++            self.pkts.append(RadioTap() / Dot11(type=0, subtype=12, addr1=bssid,
++                                               addr2=client, addr3=bssid) / Dot11Deauth(reason=7))
+ 
+     def run(self):
+         print(
+@@ -52,20 +61,32 @@
+                 info=True,
+             )
+         )
++        if self._stop_event.is_set():
++            return
+         self.status = True
+-        conf.iface = self.interface
+-        for target in self._mac_blacklist:
+-            self.build_packetRadioTap(target, self.client)
+-
+-        while self.status:
+-            for packet in self.pkts:
+-                sendp(packet, verbose=False, count=1, iface=self.interface)
++        try:
++            self.pkts = []
++            for target in self._mac_blacklist:
++                self.build_packetRadioTap(target, self.client)
++            while self.pkts and not self._stop_event.is_set():
++                for packet in self.pkts:
++                    if self._stop_event.is_set() or (self.frame_limit and self.frames_sent >= self.frame_limit):
++                        return
++                    sendp(packet, verbose=False, count=1, iface=self.interface)
++                    self.frames_sent += 1
++                    if self.frame_limit and self.frames_sent < self.frame_limit:
++                        self._stop_event.wait(0.1)
++        except Exception as error:
++            self.error = str(error)
++            print(display_messages("Deauth worker failed: " + self.error, error=True))
++        finally:
++            self.status = False
+ 
+     def stop(self):
++        self._stop_event.set()
+         self.status = False
+         print(
+             display_messages(
+                 "thread {} successfully stopped".format(self.objectName()), info=True
+             )
+         )
+-        self.pkts = list()
+--- a/wifipumpkin3/core/servers/dhcp/pyDHCP.py
++++ b/wifipumpkin3/core/servers/dhcp/pyDHCP.py
+@@ -53,7 +53,11 @@
+             )
+ 
+     def boot(self):
+-        self.reactor = DHCPThread(self.ifaceHostapd, self.DHCPConf)
++        self.reactor = DHCPThread(
++            self.ifaceHostapd, self.DHCPConf,
++            lab_dhcp=self.conf.get("accesspoint", "lab_dhcp", format=bool),
++            bounded=self.conf.get("accesspoint", "preserve_upstream", format=bool),
++            dhcp_dns=(self.conf.get("accesspoint", "dhcp_dns") or "").split())
+         self.reactor.DHCPProtocol._request.connect(self.observerDHCPLeasesClient)
+         self.reactor.send_output.connect(self.LogOutput)
+         self.reactor.setObjectName(self.ID)
+--- a/wifipumpkin3/core/wirelessmode/static.py
++++ b/wifipumpkin3/core/wirelessmode/static.py
+@@ -11,6 +11,7 @@
+ import configparser
+ from os import path, popen, mkdir, remove
+ from shutil import move
++from wifipumpkin3.core.common.scoped_network import ScopedNetwork, validate_services
+ 
+ # This file is part of the wifipumpkin3 Open Source Project.
+ # wifipumpkin3 is licensed under the Apache 2.0.
+@@ -49,6 +50,10 @@
+         return self.Settings
+ 
+     def Initialize(self):
++        if self.conf.get("accesspoint", "preserve_upstream", format=bool):
++            validate_services(self.conf)
++            if not self.Settings.checkNetworkAP():
++                raise RuntimeError("The selected interface cannot start an AP")
+         self.Settings.Configure()
+         if not (self.Settings.checkNetworkAP()):
+             sys.exit(1)
+@@ -71,7 +76,8 @@
+     def boot(self):
+         # create thread for hostapd and connect get_Hostapd_Response functio
+         self.reactor = ProcessHostapd(
+-            {self.getHostapdPath: [C.HOSTAPDCONF_PATH]}, "MDSNjD"
++            {self.getHostapdPath: [C.HOSTAPDCONF_PATH]}, "MDSNjD",
++            bounded=self.conf.get("accesspoint", "preserve_upstream", format=bool)
+         )
+         self.reactor.setObjectName("hostapd_{}".format(self.ID))
+         self.reactor.statusAP_connected.connect(self.get_Hostapd_Response)
+@@ -152,6 +158,7 @@
+ 
+         self.title = self.__class__.__name__
+         self.SettingsAP = {}
++        self.scoped_network = None
+ 
+         self.interfaces = Linux.get_interfaces()
+         self.DHCP = self.getDHCPConfig()
+@@ -211,6 +218,17 @@
+                 "}",
+             ],
+         }
++        if self.conf.get("accesspoint", "preserve_upstream", format=bool):
++            # Keep WFP3's hostapd and DHCP configuration; replace only its
++            # namespace-wide network setup and cleanup with owned resources.
++            self.SettingsAP["kill"] = []
++            self.SettingsAP["interface"] = []
++            self.scoped_network = ScopedNetwork(
++                self.ifaceHostapd, self.conf.get("accesspoint", "interface_net"),
++                self.DHCP["router"], self.DHCP["netmask"], self.getIptablesPath,
++                C.user_config_dir, self.conf.get("accesspoint", "bssid"))
++            self.scoped_network.start()
++            return
+         print(display_messages("enable forwarding in iptables...", sucess=True))
+         Linux.set_ip_forward(1)
+         # clean iptables settings
+--- a/wifipumpkin3/core/wirelessmode/wirelessmode.py
++++ b/wifipumpkin3/core/wirelessmode/wirelessmode.py
+@@ -119,6 +119,9 @@
+         self.conf.set("accesspoint", "status_ap", value)
+ 
+     def setIptables(self):
++        if self.conf.get("accesspoint", "preserve_upstream", format=bool):
++            # StaticSettings already installed its scoped forwarding/NAT rules.
++            return
+         # get hostapd interface 
+         ifaceHostapd = self.conf.get("accesspoint", "interface")
+         # get interface for shared internet 
+@@ -155,6 +158,13 @@
+     def get_error_hostapdServices(self, data):
+         """check error hostapd on mount AP"""
+         if self.conf.get("accesspoint", "status_ap", format=bool):
++            if self.conf.get("accesspoint", "preserve_upstream", format=bool):
++                # A raised exception in a Qt signal handler can abort Python
++                # before scoped cleanup. Let the bounded main loop stop us.
++                self.reactor.process_finished()
++                self.reactor.procHostapd.terminate()
++                print(display_messages(data, error=True))
++                return
+             self.Shutdown()
+             raise HostapdInitializeError(
+                 "[ERROR] Hostpad Failed",
+--- a/wifipumpkin3/modules/wifi/wifideauth.py
++++ b/wifipumpkin3/modules/wifi/wifideauth.py
+@@ -7,6 +7,9 @@
+ )
+ from random import randrange
+ import time, sys
++import json
++import re
++import subprocess
+ from multiprocessing import Process
+ from scapy.all import *
+ from wifipumpkin3.core.common.platforms import Linux
+@@ -47,6 +50,8 @@
+             "the device MAC Address from client to disconnect",
+         ],
+         "timeout": [0, "Time duration of scan network wireless (ex: 0 infinity)"],
++        "count": [0, "Maximum frames to send (0 repeats until stopped)"],
++        "direction": ["both", "both or ap-to-client"],
+     }
+     completions = list(options.keys())
+ 
+@@ -162,6 +167,9 @@
+ 
+     def do_scan(self, args):
+         """start scanner wireless networks AP"""
++        if getattr(self.parse_args, "preserve_upstream", False):
++            print(display_messages("Channel hopping is unavailable with upstream preservation", error=True))
++            return
+         print(
+             display_messages(
+                 "setting interface: {} monitor mode".format(
+@@ -199,8 +207,24 @@
+             )
+             return
+ 
+-        client_mac = self.options.get("client")[0]
++        client_mac = self.options.get("client")[0].replace("-", ":")
+         interface = self.options.get("interface")[0]
++        try:
++            frame_limit = int(self.options.get("count")[0])
++            direction = self.options.get("direction")[0]
++            if not 0 <= frame_limit <= 1000 or direction not in ("both", "ap-to-client"):
++                raise ValueError("count must be 0–1000 and direction must be both or ap-to-client")
++            if getattr(self.parse_args, "preserve_upstream", False):
++                if frame_limit == 0:
++                    raise ValueError("Upstream preservation requires a finite frame count")
++                if not Linux.check_is_mac(client_mac) or int(client_mac.split(":")[0], 16) & 1:
++                    raise ValueError("Upstream preservation requires a unicast client MAC")
++                for target in self._mac_blacklist:
++                    if not Linux.check_is_mac(target) or int(target.replace("-", ":").split(":")[0], 16) & 1:
++                        raise ValueError("Select a unicast AP BSSID")
++        except (TypeError, ValueError) as error:
++            print(display_messages(str(error), error=True))
++            return
+         if not self._mac_blacklist:
+             print(
+                 display_messages(
+@@ -251,16 +275,24 @@
+             )
+ 
+         self.set_monitor_mode("monitor")
+-        self.thread_deauth = ThreadDeauth(self._mac_blacklist, client_mac, interface)
++        self.thread_deauth = ThreadDeauth(self._mac_blacklist, client_mac, interface,
++                                         frame_limit=frame_limit, direction=direction)
+         self.thread_deauth.setObjectName("wifideauth")
+-        self.thread_deauth.start()
+         self.is_running = True
+         self.set_background_mode(True)
++        self.thread_deauth.finished.connect(self._deauth_finished)
++        self.thread_deauth.start()
++
++    def _deauth_finished(self):
++        self.is_running = False
++        self.set_background_mode(False)
+ 
+     def do_stop(self, args):
+         """stop attack deauth module"""
+         if self.is_running:
+             self.thread_deauth.stop()
++            if not self.thread_deauth.wait(3000):
++                raise RuntimeError("Deauth worker did not stop")
+             self.set_background_mode(False)
+             self.is_running = False
+ 
+@@ -450,9 +482,35 @@
+             print(display_messages("press CTRL+C to stop scanning", info=True))
+ 
+     def set_monitor_mode(self, mode="manager"):
++        if getattr(self.parse_args, "preserve_upstream", False):
++            self._verify_preserved_monitor()
++            return
+         if not self.options.get("interface")[0] in Linux.get_interfaces().get("all"):
+             print(display_messages("the interface was not found!", error=True))
+             sys.exit(1)
+         os.system("ifconfig {} down".format(self.options.get("interface")[0]))
+         os.system("iwconfig {} mode {}".format(self.options.get("interface")[0], mode))
+         os.system("ifconfig {} up".format(self.options.get("interface")[0]))
++
++    def _verify_preserved_monitor(self):
++        interfaces = (self.options.get("interface")[0], self.parse_args.interface,
++                      self.parse_args.interface_net)
++        if len(set(interfaces)) != 3 or any(not isinstance(name, str) or
++                not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", name) for name in interfaces):
++            raise ValueError("Select distinct existing monitor, AP and upstream interfaces")
++        views = []
++        for name, expected_type in zip(interfaces, ("monitor", "AP", "managed")):
++            output = subprocess.run(["iw", "dev", name, "info"], check=True,
++                                    capture_output=True, text=True, timeout=3).stdout
++            phy = re.search(r"(?m)^\s*wiphy (\d+)\s*$", output)
++            channel = re.search(r"(?m)^\s*(channel [^\n]+)$", output)
++            kind = re.search(r"(?m)^\s*type (\S+)\s*$", output)
++            if not phy or not channel or not kind or kind[1] != expected_type:
++                raise ValueError("Existing interface is not ready: " + name)
++            views.append((phy[1], channel[1].strip()))
++        if len(set(views)) != 1:
++            raise ValueError("Monitor, AP and upstream must use the same radio and full channel")
++        links = json.loads(subprocess.run(["ip", "-j", "link", "show", "dev", interfaces[0]],
++                                         check=True, capture_output=True, text=True, timeout=3).stdout)
++        if len(links) != 1 or links[0].get("ifname") != interfaces[0] or "UP" not in links[0].get("flags", []):
++            raise ValueError("Existing monitor must already be up")

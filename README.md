@@ -254,7 +254,7 @@ checks passed with a WPA2 client on channel 5 at 20 MHz. Load the matched module
 with
 `ap_monitor_coexist=1`; it is disabled by default and read-only after loading.
 The existing `sta_monitor_coexist=1` can also be supplied to enable the
-alternative STA workflow. These flags do not enable connected STA+AP+MON
+alternative STA workflow. Those two flags alone do not enable connected STA+AP+MON
 operation.
 
 This path uses Kali hostapd with an ordinary nl80211 AP interface. Fully stop
@@ -270,6 +270,52 @@ AP. Both share airtime and radio resources, so capture and injection can affect
 client throughput and latency. Android hotspot integration and seamless
 recovery across a Wi-Fi subsystem restart are outside this mode. See the
 [AP setup, device results and capture limits](port/wlan-test/README.md#run-a-kali-hostapd-ap-with-mon0).
+
+### Keep Android Wi-Fi connected with a Kali AP and monitor
+
+Patch 0253 adds experimental STA/AP/monitor coexistence behind the separate
+`sta_ap_monitor_coexist=1` module parameter. It is disabled by default and
+read-only after loading. The two existing coexistence parameters can remain
+enabled for their alternative workflows; a plain STA/monitor session retains
+its existing airmon station-preservation behavior. The triple path uses an
+ordinary Kali hostapd nl80211 AP alongside Android's connected station and a
+separate monitor. Module replacement still requires releasing the old driver
+before reconnecting Android.
+
+Admission requires exactly one stable, connected non-MLO station and one ready
+non-MLO AP on the same physical radio and complete channel definition. Driver
+admission limits are enabled non-DFS 2.4/5 GHz at 20/40/80 MHz, with matching
+primary and center frequencies, no second segment and no puncturing. These
+limits are broader than the device checks below. The AP remains the monitor's
+channel and transmit-power owner; the connected station is tracked separately.
+The monitor cannot hand off to an exclusive channel in this mode.
+
+The three visible interfaces also need capacity for a private native injection
+helper. Preflight checks firmware-granted vdev limits and free IDs, peer space,
+beacon capacity and the required firmware services before monitor creation,
+monitor open and helper creation. Allocated but down or deleting interfaces
+still consume capacity. These checks do not reserve resources; normal native
+allocation and generation checks remain authoritative.
+
+Both real owners retain on-channel management admission. Scanning, off-channel
+work, competing connections and user-requested retunes are blocked while the
+AP lease is held. Owner disconnect, power changes and mandatory channel changes
+revoke optional monitor injection; upstream station channel-switch processing
+can continue. Owner deletion retains resources until native helper and DMA
+teardown is proven. Host controller checks cover these admission and teardown
+rules.
+
+Bounded Onyx/WCN7750 device checks passed on non-MLO channel 5, 2432 MHz at
+20 MHz. The patched Wifipumpkin3 v6 application retained Android's connection
+while a separate AP client used SSH, authenticated HTTPS and forwarded DNS
+during monitor/injection. All 21 injected frames completed without errors, and
+normal application shutdown restored the firewall, ordered policy rules,
+routes and forwarding setting. A separate station disconnect/reconnect check
+verified monitor quiescence and reopening while the AP remained enabled; four
+new Android policy rules were preserved during that test. Other channels and
+widths, long-duration stability and SSR recovery remain unqualified. See the
+[triple-interface setup and device results](port/wlan-test/README.md#keep-android-wi-fi-connected-with-a-kali-ap-and-monitor)
+and [Wifipumpkin3 application bundle](port/wlan-test/wifipumpkin3/README.md).
 
 ### Migrate from 6.6 or a different KMI generation
 
