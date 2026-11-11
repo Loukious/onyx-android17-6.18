@@ -17717,8 +17717,20 @@ static int hdd_monitor_wext_giwfreq(struct net_device *dev,
 	return 0;
 }
 
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+static int hdd_monitor_wext_siwfreq(struct net_device *dev,
+				    struct iw_request_info *info,
+				    union iwreq_data *wrqu, char *extra)
+{
+	return wlan_hdd_monitor_wext_set_freq(dev, &wrqu->freq);
+}
+#endif
+
 static const iw_handler hdd_monitor_wext_handlers[] = {
 	[IW_IOCTL_IDX(SIOCGIWNAME)] = hdd_monitor_wext_giwname,
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+	[IW_IOCTL_IDX(SIOCSIWFREQ)] = hdd_monitor_wext_siwfreq,
+#endif
 	[IW_IOCTL_IDX(SIOCGIWFREQ)] = hdd_monitor_wext_giwfreq,
 	[IW_IOCTL_IDX(SIOCGIWMODE)] = hdd_monitor_wext_giwmode,
 };
