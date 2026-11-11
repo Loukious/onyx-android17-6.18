@@ -285,6 +285,23 @@ dp_mon_filter_h2t_setup_common(struct dp_soc *soc, struct dp_pdev *pdev,
 						mon_filter->tlv_filter);
 		DP_RX_MON_FILTER_SET_WMASK(tlv_filter,
 					   mon_filter->tlv_filter);
+		/* Keep the explicit layout with the merged offset_valid bit. */
+		if (mon_filter->tlv_filter.offset_valid) {
+			tlv_filter->rx_packet_offset =
+				mon_filter->tlv_filter.rx_packet_offset;
+			tlv_filter->rx_header_offset =
+				mon_filter->tlv_filter.rx_header_offset;
+			tlv_filter->rx_mpdu_end_offset =
+				mon_filter->tlv_filter.rx_mpdu_end_offset;
+			tlv_filter->rx_mpdu_start_offset =
+				mon_filter->tlv_filter.rx_mpdu_start_offset;
+			tlv_filter->rx_msdu_end_offset =
+				mon_filter->tlv_filter.rx_msdu_end_offset;
+			tlv_filter->rx_msdu_start_offset =
+				mon_filter->tlv_filter.rx_msdu_start_offset;
+			tlv_filter->rx_attn_offset =
+				mon_filter->tlv_filter.rx_attn_offset;
+		}
 	}
 
 	dp_mon_filter_show_filter(mon_pdev, 0, filter);

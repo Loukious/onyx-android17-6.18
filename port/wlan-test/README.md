@@ -87,6 +87,13 @@ the monitor; the driver preserves and reopens Android's station interface so
 Android can reconnect normally. The tool and Kali package need no modification.
 Use the separate-interface setup below to keep an existing Android connection.
 
+Reopening the station does not guarantee an immediate Android scan. With the
+screen off, Android can exhaust its background-scan retries while stock
+`airmon-ng` has the station down. If it remains disconnected after stopping the
+monitor, request a normal scan from an Android root shell with
+`cmd wifi start-scan`. This restored the saved connection during the longer
+standalone receive tests. Shared monitoring leaves the station connected.
+
 From a root shell with `iw` and `ip` available, after the matched opt-in driver
 is loaded and Android is connected:
 
@@ -129,6 +136,21 @@ the monitor session automatically after a subsystem restart (SSR). Frames
 already submitted to firmware or transmitted over RF cannot be recalled.
 
 ### Capture limits
+
+Patch 0255 preserves all seven explicit receive-layout offsets when combining
+monitor filters. Previously, the combined filter retained `offset_valid` but
+left the offsets at zero. Standalone monitoring then delivered zero-filled or
+misaligned frame bodies, producing bogus BSSIDs and other invalid rows in
+`airodump-ng`. The fix retains the selected offsets alongside their validity
+bit and works with stock Kali tools.
+
+On 2026-11-11, full-snaplen captures of 1,000 packets each passed frame-structure
+checks in standalone mode, shared mode, and standalone startup after verified
+radio idle shutdown. The standalone captures contained 365 and 332 beacons;
+neither had zero-filled bodies or invalid protocol versions. Unmodified
+`airodump-ng` displayed the owned AP's BSSID, channel, SSID and beacons correctly.
+Shared mode retained the Android connection with 20/20 ping replies. These are
+bounded receive tests, not a claim of complete capture or long-duration stability.
 
 | Receive source | Capture contract |
 | --- | --- |
