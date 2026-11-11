@@ -34,6 +34,9 @@ struct wlan_mlme_sta_mon_snapshot {
 	uint8_t mac_id;
 	bool exclusive;
 	bool ap_owner;
+	/* Triple mode retains the AP as channel/power owner. */
+	bool sta_ap_coexist;
+	uint8_t companion_sta_vdev_id;
 	struct wlan_channel channel;
 };
 
@@ -87,6 +90,9 @@ bool wlan_mlme_sta_mon_get_active_snapshot(
  */
 bool wlan_mlme_sta_mon_ap_is_owner(struct wlan_objmgr_psoc *psoc,
 				 uint8_t vdev_id);
+/* Includes quiescing resources, so STA stop can drain its optional helper. */
+bool wlan_mlme_sta_mon_sta_is_companion(struct wlan_objmgr_psoc *psoc,
+				       uint8_t vdev_id);
 
 /* Submission admission does not change ordinary STA shared-mode invalidation.
  * AP shared mode rejects competing radio work until its monitor is quiesced.
@@ -95,13 +101,16 @@ bool wlan_mlme_sta_mon_ap_is_owner(struct wlan_objmgr_psoc *psoc,
  */
 bool wlan_mlme_sta_mon_admission_begin(struct wlan_objmgr_psoc *psoc);
 void wlan_mlme_sta_mon_admission_end(struct wlan_objmgr_psoc *psoc);
-/* The owning AP may submit ordinary on-channel management traffic. */
+/* The AP and its connected STA companion may submit on-channel management. */
 bool wlan_mlme_sta_mon_mgmt_admission_begin(struct wlan_objmgr_psoc *psoc,
 					  uint8_t vdev_id, uint32_t frequency,
 					  bool offchannel);
 /* Mandatory AP CSA only: caller already holds an update reference. */
 bool wlan_mlme_sta_mon_ap_csa_admission_begin(struct wlan_objmgr_psoc *psoc,
 					    uint8_t vdev_id);
+/* Mandatory upstream CSA may continue after optional triple mode is revoked. */
+bool wlan_mlme_sta_mon_sta_csa_admission_begin(struct wlan_objmgr_psoc *psoc,
+					     uint8_t vdev_id);
 bool wlan_mlme_sta_mon_mgmt_tx_begin(struct wlan_objmgr_psoc *psoc,
 				    uint8_t vdev_id, bool teardown_frame);
 /* Reserve without invalidating the shared generation, so a failed preflight

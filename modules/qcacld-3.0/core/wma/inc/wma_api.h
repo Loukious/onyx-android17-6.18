@@ -62,6 +62,10 @@ bool wma_injection_dp_complete(void *wma_handle, qdf_nbuf_t nbuf,
 void wma_injection_dp_release(qdf_nbuf_t nbuf, uint8_t slot_index);
 void wma_injection_pre_stop_cleanup(void);
 bool wma_injection_coex_is_quiesced(void);
+/* Triple-mode preflight: monitor+helper before CREATE, helper before open.
+ * This checks capacity; native object allocation still owns reservation.
+ */
+QDF_STATUS wma_injection_coex_resource_check(uint8_t additional_vdevs);
 bool wma_injection_handoff_is_quiesced(void);
 QDF_STATUS wma_injection_helper_attach_vdev(struct wlan_objmgr_vdev *vdev);
 void wma_injection_helper_create_result(struct wlan_objmgr_vdev *vdev,
@@ -152,6 +156,12 @@ static inline void wma_injection_pre_stop_cleanup(void)
 static inline bool wma_injection_coex_is_quiesced(void)
 {
 	return true;
+}
+
+static inline QDF_STATUS
+wma_injection_coex_resource_check(uint8_t additional_vdevs)
+{
+	return QDF_STATUS_E_NOSUPPORT;
 }
 
 static inline bool wma_injection_handoff_is_quiesced(void)

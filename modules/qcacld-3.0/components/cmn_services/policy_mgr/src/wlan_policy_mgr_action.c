@@ -1750,6 +1750,9 @@ QDF_STATUS policy_mgr_next_actions(
 	if (reason == POLICY_MGR_UPDATE_REASON_CHANNEL_SWITCH_SAP) {
 		if (!wlan_mlme_sta_mon_ap_csa_admission_begin(psoc, session_id))
 			return QDF_STATUS_E_BUSY;
+	} else if (reason == POLICY_MGR_UPDATE_REASON_CHANNEL_SWITCH_STA) {
+		if (!wlan_mlme_sta_mon_sta_csa_admission_begin(psoc, session_id))
+			return QDF_STATUS_E_BUSY;
 	} else if (!wlan_mlme_sta_mon_admission_begin(psoc)) {
 		return QDF_STATUS_E_BUSY;
 	}

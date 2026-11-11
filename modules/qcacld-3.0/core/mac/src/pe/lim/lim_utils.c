@@ -4381,12 +4381,14 @@ lim_prepare_for11h_channel_switch(struct mac_context *mac, struct pe_session *pe
 	if (!LIM_IS_STA_ROLE(pe_session))
 		return QDF_STATUS_E_INVAL;
 
-	/* Flag to indicate 11h channel switch in progress */
-	wlan_mlme_sta_mon_invalidate(mac->psoc, WLAN_INVALID_VDEV_ID);
-	pe_session->gLimSpecMgmt.dot11hChanSwState = eLIM_11H_CHANSW_RUNNING;
+	/* Publish pending CSA before policy work can outlive this call. */
+	wlan_mlme_sta_mon_update_begin(mac->psoc);
+	WRITE_ONCE(pe_session->gLimSpecMgmt.dot11hChanSwState,
+		   eLIM_11H_CHANSW_RUNNING);
 
 	/** We are safe to switch channel at this point */
 	status = lim_stop_tx_and_switch_channel(mac, pe_session->peSessionId);
+	wlan_mlme_sta_mon_update_end(mac->psoc);
 
 	return status;
 }

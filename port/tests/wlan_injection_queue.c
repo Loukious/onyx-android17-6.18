@@ -480,6 +480,22 @@ static void ready_ap_fixture(uint64_t generation)
     CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, generation));
 }
 
+static struct wlan_mlme_sta_mon_snapshot quiesced_triple_fixture(uint64_t generation)
+{
+    struct wlan_mlme_sta_mon_snapshot snapshot = quiesced_ap_fixture(generation);
+    snapshot.sta_ap_coexist = true;
+    snapshot.companion_sta_vdev_id = 1;
+    return snapshot;
+}
+
+static void ready_triple_fixture(uint64_t generation)
+{
+    struct wlan_mlme_sta_mon_snapshot snapshot = quiesced_triple_fixture(generation - 1);
+    CHECK(wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    CHECK(wlan_mlme_sta_mon_set_ready(&psoc, generation));
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, generation));
+}
+
 static void resume_rejected(uint8_t vdev, uint64_t generation, QDF_STATUS status)
 {
     unsigned char before[sizeof(wma_injection_ctx)];
@@ -805,6 +821,7 @@ static void test_ap_admissions(void)
     CHECK(wlan_mlme_sta_mon_set_ready(&psoc, snapshot.generation));
     CHECK(wlan_mlme_sta_mon_get_snapshot(&psoc, 3, snapshot.generation, &active));
     CHECK(active.ap_owner && !active.exclusive && active.sta_vdev_id == 0);
+    CHECK(!active.sta_ap_coexist && active.companion_sta_vdev_id == WLAN_INVALID_VDEV_ID);
     check_ap_admissions();
     CHECK(!wlan_mlme_sta_mon_exclusive_reserve(&psoc, 3, snapshot.generation));
     CHECK(!control.exclusive_lease && !control.handoff_generation);
@@ -884,12 +901,242 @@ static void test_ap_handoff_guards(void)
     wma_injection_deinit(&fake_wma);
 }
 
-static void test_ap_invalidation_ownership(const struct cdp_tx_injection_params *params)
+static void test_triple_arm(void)
+{
+    struct wlan_mlme_sta_mon_snapshot snapshot, before;
+    struct wlan_mlme_sta_mon_control control_before;
+
+    /* Reject malformed ownership before publishing or changing a generation. */
+    for (unsigned int malformed = 0; malformed < 7; malformed++) {
+        init_coex_fixture();
+        snapshot = quiesced_triple_fixture(601);
+        switch (malformed) {
+        case 0: snapshot.ap_owner = false; break;
+        case 1: snapshot.exclusive = true; break;
+        case 2: snapshot.sta_vdev_id = WLAN_INVALID_VDEV_ID; break;
+        case 3: snapshot.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID; break;
+        case 4: snapshot.companion_sta_vdev_id = snapshot.sta_vdev_id; break;
+        case 5: snapshot.companion_sta_vdev_id = snapshot.mon_vdev_id; break;
+        case 6: snapshot.sta_vdev_id = snapshot.mon_vdev_id; break;
+        }
+        before = snapshot;
+        control_before = control;
+        CHECK(!wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+        CHECK(!memcmp(&snapshot, &before, sizeof(snapshot)));
+        CHECK(!memcmp(&control, &control_before, sizeof(control)));
+        CHECK(!stop_notifications && !control.admissions && !sta_mon_lock);
+        wma_injection_deinit(&fake_wma);
+    }
+
+    /* Monitor vdev creation follows arming; its missing ID is not an owner. */
+    init_coex_fixture();
+    snapshot = quiesced_triple_fixture(611);
+    snapshot.mon_vdev_id = WLAN_INVALID_VDEV_ID;
+    CHECK(wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    CHECK(!wlan_mlme_sta_mon_set_ready(&psoc, snapshot.generation));
+    wlan_mlme_sta_mon_vdev_created(&psoc, 3);
+    CHECK(wlan_mlme_sta_mon_set_ready(&psoc, snapshot.generation));
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, snapshot.generation));
+    wma_injection_deinit(&fake_wma);
+}
+
+static void check_triple_admissions(void)
+{
+    const uint8_t owners[] = { 0, 1 };
+    const uint8_t others[] = { 3, 4, WLAN_INVALID_VDEV_ID };
+
+    CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!wlan_mlme_sta_mon_ap_is_owner(&psoc, 1));
+    CHECK(!wlan_mlme_sta_mon_sta_is_companion(&psoc, 0));
+    CHECK(wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
+    CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
+    for (unsigned int i = 0; i < sizeof(owners) / sizeof(owners[0]); i++) {
+        CHECK(wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, owners[i], 5260, false));
+        CHECK(control.admissions == 1);
+        wlan_mlme_sta_mon_admission_end(&psoc);
+        CHECK(wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, owners[i], 0, false));
+        wlan_mlme_sta_mon_admission_end(&psoc);
+        CHECK(!wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, owners[i], 5180, false));
+        CHECK(!wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, owners[i], 5260, true));
+        CHECK(wlan_mlme_sta_mon_mgmt_tx_begin(&psoc, owners[i], false));
+        wlan_mlme_sta_mon_admission_end(&psoc);
+        CHECK(wlan_mlme_sta_mon_mgmt_tx_begin(&psoc, owners[i], true));
+        wlan_mlme_sta_mon_admission_end(&psoc);
+    }
+    for (unsigned int i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        CHECK(!wlan_mlme_sta_mon_sta_is_companion(&psoc, others[i]));
+        CHECK(!wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, others[i], 5260, false));
+        CHECK(!wlan_mlme_sta_mon_mgmt_tx_begin(&psoc, others[i], false));
+        CHECK(!wlan_mlme_sta_mon_mgmt_tx_begin(&psoc, others[i], true));
+    }
+    CHECK(!control.admissions && !sta_mon_lock);
+}
+
+static void test_triple_admissions_and_csa(void)
+{
+    struct wlan_mlme_sta_mon_snapshot snapshot, active;
+    init_coex_fixture();
+    snapshot = quiesced_triple_fixture(621);
+    CHECK(wlan_mlme_sta_mon_admission_begin(&psoc));
+    CHECK(!wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+    check_triple_admissions();
+    CHECK(!wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 1));
+    CHECK(wlan_mlme_sta_mon_set_ready(&psoc, snapshot.generation));
+    CHECK(wlan_mlme_sta_mon_get_snapshot(&psoc, 3, snapshot.generation, &active));
+    CHECK(active.ap_owner && active.sta_ap_coexist && !active.exclusive);
+    CHECK(active.sta_vdev_id == 0 && active.companion_sta_vdev_id == 1);
+    check_triple_admissions();
+    CHECK(!wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 1));
+    CHECK(!wlan_mlme_sta_mon_exclusive_reserve(&psoc, 3, snapshot.generation));
+    CHECK(!control.exclusive_lease && !control.handoff_generation);
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, snapshot.generation));
+
+    /* Revoke optional injection first, then allow only the upstream STA CSA. */
+    wlan_mlme_sta_mon_invalidate(&psoc, 1);
+    CHECK(control.state == WLAN_STA_MON_QUIESCING && stop_notifications == 1);
+    CHECK(!wlan_mlme_sta_mon_token_valid(&psoc, 3, snapshot.generation));
+    check_triple_admissions();
+    CHECK(!wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 0));
+    CHECK(!wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 3));
+    CHECK(!wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 4));
+    CHECK(wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 1));
+    CHECK(control.admissions == 1 && !control.updates);
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    wlan_mlme_sta_mon_update_begin(&psoc);
+    CHECK(wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 1));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(!wlan_mlme_sta_mon_ap_csa_admission_begin(&psoc, 1));
+    CHECK(wlan_mlme_sta_mon_ap_csa_admission_begin(&psoc, 0));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    wlan_mlme_sta_mon_update_end(&psoc);
+    /* Deferred policy work need not retain the synchronous update reference. */
+    CHECK(wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 1));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    control.admissions = U32_MAX;
+    CHECK(!wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 1));
+    control.admissions = 0;
+    CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
+
+    wma_injection_pre_stop_cleanup();
+    CHECK(wlan_mlme_sta_mon_quiesced(&psoc));
+    CHECK(!wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
+    CHECK(!control.snapshot.sta_ap_coexist &&
+          control.snapshot.companion_sta_vdev_id == WLAN_INVALID_VDEV_ID);
+    CHECK(wlan_mlme_sta_mon_admission_begin(&psoc));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(wlan_mlme_sta_mon_sta_csa_admission_begin(&psoc, 4));
+    wlan_mlme_sta_mon_admission_end(&psoc);
+    CHECK(!control.admissions && !control.updates);
+    wma_injection_deinit(&fake_wma);
+}
+
+static void trigger_triple_owner_event(unsigned int event, uint8_t vdev_id)
+{
+    const struct wlan_channel channel = {
+        .ch_freq = 5180, .ch_cfreq1 = 5210, .ch_width = CH_WIDTH_80MHZ,
+    };
+    switch (event) {
+    case 0: wlan_mlme_sta_mon_invalidate(&psoc, vdev_id); break;
+    case 1: wlan_mlme_sta_mon_power_changed(&psoc, vdev_id); break;
+    case 2: wlan_mlme_sta_mon_channel_changed(&psoc, vdev_id, &channel); break;
+    case 3: wlan_mlme_sta_mon_disconnect_ind(&psoc, vdev_id, false); break;
+    case 4: wlan_mlme_sta_mon_disconnect_ind(&psoc, vdev_id, true); break;
+    default: assert(false);
+    }
+}
+
+static void test_triple_owner_events(void)
+{
+    for (uint8_t owner = 0; owner < 2; owner++) {
+        for (unsigned int event = 0; event < 5; event++) {
+            init_coex_fixture();
+            ready_triple_fixture(641);
+            trigger_triple_owner_event(event, 4);
+            CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, 641));
+            CHECK(!stop_notifications && control.snapshot.generation == 641);
+            trigger_triple_owner_event(event, owner);
+            CHECK(!wlan_mlme_sta_mon_token_valid(&psoc, 3, 641));
+            CHECK(control.state == WLAN_STA_MON_QUIESCING);
+            CHECK(control.snapshot.generation == 642 && stop_notifications == 1);
+            trigger_triple_owner_event(event, owner);
+            CHECK(control.snapshot.generation == 643 && stop_notifications == 1);
+            check_triple_admissions();
+            wma_injection_pre_stop_cleanup();
+            CHECK(wma_injection_ctx.coex_resume_ready);
+            CHECK(wlan_mlme_sta_mon_quiesced(&psoc));
+            CHECK(!wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+            CHECK(!wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
+            CHECK(wlan_mlme_sta_mon_admission_begin(&psoc));
+            wlan_mlme_sta_mon_admission_end(&psoc);
+            wma_injection_deinit(&fake_wma);
+        }
+    }
+}
+
+static void test_triple_handoff_guards(void)
+{
+    struct wlan_mlme_sta_mon_snapshot next;
+    init_coex_fixture();
+    ready_triple_fixture(661);
+    CHECK(!wlan_mlme_sta_mon_exclusive_reserve(&psoc, 3, 661));
+    CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, 661));
+
+    /* The companion flag also rejects a malformed source without AP ownership. */
+    control.snapshot.ap_owner = false;
+    CHECK(!wlan_mlme_sta_mon_exclusive_reserve(&psoc, 3, 661));
+    CHECK(!control.exclusive_lease && !control.handoff_generation);
+    control.exclusive_lease = true;
+    control.handoff_generation = 661;
+    control.handoff_phase = WLAN_STA_MON_HANDOFF_DISCONNECTED;
+    control.handoff_disconnect_seen = true;
+    control.state = WLAN_STA_MON_HANDOFF;
+    next = control.snapshot;
+    next.exclusive = true;
+    next.sta_ap_coexist = false;
+    next.sta_vdev_id = next.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+    CHECK(!wlan_mlme_sta_mon_handoff_valid(&psoc, 661));
+    CHECK(!wlan_mlme_sta_mon_handoff_start(&psoc, &next));
+    CHECK(control.state == WLAN_STA_MON_HANDOFF && control.snapshot.sta_ap_coexist);
+    control.state = WLAN_STA_MON_ARMING;
+    control.handoff_phase = WLAN_STA_MON_HANDOFF_RESTART;
+    CHECK(!wlan_mlme_sta_mon_handoff_ready(&psoc, &next));
+    CHECK(control.state == WLAN_STA_MON_ARMING && control.snapshot.sta_ap_coexist);
+
+    /* A valid STA handoff cannot install a triple destination at either step. */
+    control.snapshot.sta_ap_coexist = false;
+    control.snapshot.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+    control.state = WLAN_STA_MON_HANDOFF;
+    control.handoff_phase = WLAN_STA_MON_HANDOFF_DISCONNECTED;
+    CHECK(wlan_mlme_sta_mon_handoff_valid(&psoc, 661));
+    next.sta_ap_coexist = true;
+    next.companion_sta_vdev_id = 1;
+    CHECK(!wlan_mlme_sta_mon_handoff_start(&psoc, &next));
+    next.sta_ap_coexist = false;
+    next.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+    CHECK(wlan_mlme_sta_mon_handoff_start(&psoc, &next));
+    next.sta_ap_coexist = true;
+    next.companion_sta_vdev_id = 1;
+    CHECK(!wlan_mlme_sta_mon_handoff_ready(&psoc, &next));
+    CHECK(control.state == WLAN_STA_MON_ARMING && !control.snapshot.sta_ap_coexist);
+    next.sta_ap_coexist = false;
+    next.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+    CHECK(wlan_mlme_sta_mon_handoff_ready(&psoc, &next));
+    CHECK(control.state == WLAN_STA_MON_READY && control.snapshot.exclusive);
+    wma_injection_deinit(&fake_wma);
+}
+
+static void test_ap_invalidation_ownership(const struct cdp_tx_injection_params *params,
+                                         bool triple)
 {
     struct sk_buff packets[3] = {0};
     struct wma_injection_helper *helper = &wma_injection_ctx.helper;
     init_coex_fixture();
-    ready_ap_fixture(441);
+    if (triple)
+        ready_triple_fixture(441);
+    else
+        ready_ap_fixture(441);
     CHECK(wma_injection_coex_resume(3, 441) == QDF_STATUS_SUCCESS);
     CHECK(wma_injection_tx(&packets[0], 3, params) == QDF_STATUS_SUCCESS);
     wma_injection_refill(true);
@@ -898,7 +1145,7 @@ static void test_ap_invalidation_ownership(const struct cdp_tx_injection_params 
         .vdev = &monitor_vdev, .monitor_vdev_id = 3, .generation = 441,
     };
     CHECK(wma_injection_tx(&packets[1], 3, params) == QDF_STATUS_SUCCESS);
-    wlan_mlme_sta_mon_invalidate(&psoc, 0);
+    wlan_mlme_sta_mon_invalidate(&psoc, triple ? 1 : 0);
     CHECK(control.state == WLAN_STA_MON_QUIESCING && stop_notifications == 1);
     CHECK(!wma_injection_ctx.paused); /* The stop mock only records notification. */
     CHECK(wma_injection_tx(&packets[2], 3, params) == QDF_STATUS_E_AGAIN);
@@ -909,6 +1156,7 @@ static void test_ap_invalidation_ownership(const struct cdp_tx_injection_params 
     CHECK(helper->native && !destroyed && !wma_injection_ctx.coex_resume_ready);
     CHECK(wma_injection_ctx.in_flight == 1 && wma_injection_ctx.slots[1].nbuf == &packets[0]);
     CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!triple || wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
     CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
     tx_rejected(params);
 
@@ -918,6 +1166,7 @@ static void test_ap_invalidation_ownership(const struct cdp_tx_injection_params 
     CHECK(wma_injection_ctx.in_flight == 1 && !injection_completed && !destroyed);
     CHECK(helper->native && !packets[0].freed);
     CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!triple || wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
     wma_injection_dp_release(&packets[0], 1);
     CHECK(!wma_injection_ctx.in_flight && !wma_injection_ctx.slots[1].nbuf);
     CHECK(injection_completed == 1 && helper->native && !packets[0].freed);
@@ -925,23 +1174,32 @@ static void test_ap_invalidation_ownership(const struct cdp_tx_injection_params 
     wma_injection_pre_stop_cleanup();
     CHECK(helper->native && !wma_injection_ctx.coex_resume_ready && destroyed == 1);
     CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!triple || wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
     CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
     retain_helper = false;
     wma_injection_pre_stop_cleanup();
     CHECK(!helper->native && wma_injection_ctx.coex_resume_ready && destroyed == 2);
     CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!triple || wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
     /* Only now does the fixture have the teardown proof expected from HDD. */
     CHECK(wlan_mlme_sta_mon_quiesced(&psoc));
     CHECK(!wlan_mlme_sta_mon_ap_is_owner(&psoc, WLAN_INVALID_VDEV_ID));
+    CHECK(!wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
+    CHECK(!control.snapshot.sta_ap_coexist &&
+          control.snapshot.companion_sta_vdev_id == WLAN_INVALID_VDEV_ID);
     CHECK(wlan_mlme_sta_mon_admission_begin(&psoc));
     wlan_mlme_sta_mon_admission_end(&psoc);
     wma_injection_deinit(&fake_wma);
 }
 
-static void test_ap_firmware_uncertainty(const struct cdp_tx_injection_params *params)
+static void test_ap_firmware_uncertainty(const struct cdp_tx_injection_params *params,
+                                       bool triple)
 {
     init_coex_fixture();
-    ready_ap_fixture(461);
+    if (triple)
+        ready_triple_fixture(461);
+    else
+        ready_ap_fixture(461);
     wlan_mlme_sta_mon_fw_timeout(&psoc, 4);
     CHECK(!control.fw_uncertain && wlan_mlme_sta_mon_token_valid(&psoc, 3, 461));
     wlan_mlme_sta_mon_fw_timeout(&psoc, 3);
@@ -951,9 +1209,11 @@ static void test_ap_firmware_uncertainty(const struct cdp_tx_injection_params *p
     CHECK(wma_injection_ctx.coex_resume_ready && !wma_injection_ctx.in_flight);
     CHECK(!wlan_mlme_sta_mon_quiesced(&psoc));
     CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, 0));
+    CHECK(!triple || wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
     wlan_mlme_sta_mon_detach(&psoc);
     CHECK(!control.attached && control.state == WLAN_STA_MON_OFF);
     CHECK(wlan_mlme_sta_mon_ap_is_owner(&psoc, WLAN_INVALID_VDEV_ID));
+    CHECK(!triple || wlan_mlme_sta_mon_sta_is_companion(&psoc, 1));
     CHECK(!wlan_mlme_sta_mon_admission_begin(&psoc));
     CHECK(!wlan_mlme_sta_mon_mgmt_admission_begin(&psoc, 4, 5260, false));
     CHECK(!control.admissions);
@@ -1472,8 +1732,14 @@ int main(void)
     test_deinit_dma_ownership(&p);
     test_ap_admissions();
     test_ap_handoff_guards();
-    test_ap_invalidation_ownership(&p);
-    test_ap_firmware_uncertainty(&p);
+    test_triple_arm();
+    test_triple_admissions_and_csa();
+    test_triple_owner_events();
+    test_triple_handoff_guards();
+    test_ap_invalidation_ownership(&p, false);
+    test_ap_invalidation_ownership(&p, true);
+    test_ap_firmware_uncertainty(&p, false);
+    test_ap_firmware_uncertainty(&p, true);
     test_ap_power_owner();
     test_power_limits();
     test_power_update_order();

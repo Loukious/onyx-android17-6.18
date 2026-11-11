@@ -1008,7 +1008,7 @@ struct wireless_dev *__wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
 		     !is_rx_mon) ||
 		    (ucfg_mlme_is_sta_mon_conc_supported(hdd_ctx->psoc) &&
 		     is_rx_mon) ||
-		    (hdd_ap_monitor_coexist_enabled() && is_rx_mon) ||
+		    (hdd_monitor_coexist_enabled() && is_rx_mon) ||
 		    ucfg_pkt_capture_get_mode(hdd_ctx->psoc) !=
 						PACKET_CAPTURE_MODE_DISABLE) {
 			ret = wlan_hdd_add_monitor_check(hdd_ctx,
@@ -1295,6 +1295,10 @@ static bool hdd_preserve_station_for_monitor(struct hdd_context *hdd_ctx,
 	monitor = hdd_get_adapter(hdd_ctx, QDF_MONITOR_MODE);
 	if (!monitor || monitor->delete_in_progress)
 		return false;
+	/* An AP lease requires explicit admission; STA-only keeps airmon restore. */
+	if (hdd_sta_ap_monitor_coexist_enabled() && monitor->sta_mon_coexist &&
+	    wlan_mlme_sta_mon_ap_is_owner(hdd_ctx->psoc, WLAN_INVALID_VDEV_ID))
+		return false;
 
 	if (hdd_ctx->monitor_restore_pending &&
 	    qdf_str_cmp(hdd_ctx->monitor_restore_iface, adapter->dev->name))
@@ -1410,14 +1414,17 @@ int wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	bool restore_station;
 	bool coex = adapter->sta_mon_coexist;
 	bool ap_delete = adapter->device_mode == QDF_SAP_MODE &&
-		hdd_ap_monitor_coexist_enabled();
+		(hdd_ap_monitor_coexist_enabled() || hdd_sta_ap_monitor_coexist_enabled());
+	bool sta_delete = adapter->device_mode == QDF_STA_MODE &&
+		hdd_sta_ap_monitor_coexist_enabled();
+	bool owner_delete = ap_delete || sta_delete;
 
 	if (hdd_preserve_station_for_monitor(hdd_ctx, adapter))
 		return 0;
-	/* Keep the real AP registered while its optional monitor owns resources.
-	 * Holding admission also excludes a new arm throughout AP destruction.
+	/* Keep real owners registered while the optional monitor owns resources.
+	 * Holding admission also excludes a new arm throughout their destruction.
 	 */
-	if (ap_delete && !wlan_mlme_sta_mon_admission_begin(hdd_ctx->psoc))
+	if (owner_delete && !wlan_mlme_sta_mon_admission_begin(hdd_ctx->psoc))
 		return -EBUSY;
 
 	restore_station =
@@ -1426,9 +1433,9 @@ int wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	adapter->delete_in_progress = true;
 	errno = osif_vdev_sync_trans_start_wait(wdev->netdev, &vdev_sync);
 	if (errno) {
-		if (coex || ap_delete)
+		if (coex || owner_delete)
 			adapter->delete_in_progress = false;
-		if (ap_delete)
+		if (owner_delete)
 			wlan_mlme_sta_mon_admission_end(hdd_ctx->psoc);
 		return errno;
 	}
@@ -1438,19 +1445,19 @@ int wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 
 	adapter->is_virtual_iface = true;
 	errno = __wlan_hdd_del_virtual_intf(wiphy, wdev);
-	if (errno && (coex || ap_delete)) {
+	if (errno && (coex || owner_delete)) {
 		/* Failed drains retain the registered owner for a later retry. */
 		osif_vdev_sync_register(wdev->netdev, vdev_sync);
 		adapter->delete_in_progress = false;
 		osif_vdev_sync_trans_stop(vdev_sync);
-		if (ap_delete)
+		if (owner_delete)
 			wlan_mlme_sta_mon_admission_end(hdd_ctx->psoc);
 		return errno;
 	}
 
 	osif_vdev_sync_trans_stop(vdev_sync);
 	osif_vdev_sync_destroy(vdev_sync);
-	if (ap_delete)
+	if (owner_delete)
 		wlan_mlme_sta_mon_admission_end(hdd_ctx->psoc);
 
 	if (!errno && restore_station && !coex) {

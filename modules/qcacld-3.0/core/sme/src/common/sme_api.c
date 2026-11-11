@@ -10794,6 +10794,22 @@ bool sme_is_ap_channel_update_pending(mac_handle_t mac_handle,
 		READ_ONCE(session->dfsIncludeChanSwIe);
 }
 
+bool sme_is_sta_channel_update_pending(mac_handle_t mac_handle,
+				       struct wlan_objmgr_vdev *vdev)
+{
+	struct mac_context *mac = MAC_CONTEXT(mac_handle);
+	struct pe_session *session;
+
+	if (!mac || !vdev)
+		return true;
+	/* As for AP admission, the caller holds the vdev and checks its epoch. */
+	session = pe_find_session_by_vdev_id(mac, wlan_vdev_get_id(vdev));
+	return !session || READ_ONCE(session->vdev) != vdev ||
+		READ_ONCE(session->opmode) != QDF_STA_MODE ||
+		READ_ONCE(session->gLimSpecMgmt.dot11hChanSwState) !=
+			eLIM_11H_CHANSW_INIT;
+}
+
 bool sme_is_any_session_in_middle_of_roaming(mac_handle_t mac_handle)
 {
 	struct mac_context *mac_ctx = MAC_CONTEXT(mac_handle);

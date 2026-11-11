@@ -4139,7 +4139,8 @@ int hdd_softap_set_channel_change(struct wlan_hdd_link_info *link_info,
 
 	if (!link_info)
 		return -EINVAL;
-	if (!hdd_ap_monitor_coexist_enabled() ||
+	if ((!hdd_ap_monitor_coexist_enabled() &&
+	     !hdd_sta_ap_monitor_coexist_enabled()) ||
 	    link_info->adapter->device_mode != QDF_SAP_MODE)
 		return hdd_softap_set_channel_change_admitted(link_info,
 			target_chan_freq, ccfs1, target_bw, punct_bitmap,
@@ -8060,7 +8061,8 @@ static int __wlan_hdd_cfg80211_stop_ap(struct wiphy *wiphy,
 
 	ap_ctx = WLAN_HDD_GET_AP_CTX_PTR(link_info);
 	if (adapter->device_mode == QDF_SAP_MODE &&
-	    hdd_ap_monitor_coexist_enabled()) {
+	    (hdd_ap_monitor_coexist_enabled() ||
+	     hdd_sta_ap_monitor_coexist_enabled())) {
 		ret = hdd_ap_mon_stop_begin(link_info);
 		if (ret)
 			return ret;

@@ -946,6 +946,12 @@ static const struct ieee80211_iface_limit wlan_hdd_ap_mon_iface_limit[] = {
 	{ .max = 1, .types = BIT(NL80211_IFTYPE_MONITOR) },
 };
 
+static const struct ieee80211_iface_limit wlan_hdd_sta_ap_mon_iface_limit[] = {
+	{ .max = 1, .types = BIT(NL80211_IFTYPE_STATION) },
+	{ .max = 1, .types = BIT(NL80211_IFTYPE_AP) },
+	{ .max = 1, .types = BIT(NL80211_IFTYPE_MONITOR) },
+};
+
 static struct ieee80211_iface_combination
 	wlan_hdd_iface_combination[] = {
 	/* STA */
@@ -1056,6 +1062,14 @@ static struct ieee80211_iface_combination
 		.max_interfaces = 2,
 		.num_different_channels = 1,
 		.n_limits = ARRAY_SIZE(wlan_hdd_ap_mon_iface_limit),
+	},
+	/* Opt-in SCC only; actual channel/radio/resources are checked at admission. */
+	{
+		.limits = wlan_hdd_sta_ap_mon_iface_limit,
+		.max_interfaces = 3,
+		.num_different_channels = 1,
+		.n_limits = ARRAY_SIZE(wlan_hdd_sta_ap_mon_iface_limit),
+		.beacon_int_infra_match = true,
 	},
 #if defined(WLAN_FEATURE_NAN) && \
 	   (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0))
@@ -25547,6 +25561,16 @@ static void wlan_hdd_update_iface_combination(struct hdd_context *hdd_ctx,
 		wlan_hdd_set_nan_if_mode(wiphy);
 
 	for (i = 0; i < num; i++) {
+		/* This fixed-channel monitor consumes no additional operating radio.
+		 * Keep the generic DBS filters unchanged for ordinary combinations.
+		 */
+		if (wlan_hdd_iface_combination[i].limits ==
+		    wlan_hdd_sta_ap_mon_iface_limit) {
+			if (hdd_sta_ap_monitor_coexist_enabled() &&
+			    ucfg_dp_sta_mon_coex_supported(psoc))
+				hdd_ctx->combination[j++] = wlan_hdd_iface_combination[i];
+			continue;
+		}
 		if (wlan_hdd_iface_combination[i].limits ==
 		    wlan_hdd_sta_mon_iface_limit &&
 		    (!hdd_sta_monitor_coexist_enabled() ||

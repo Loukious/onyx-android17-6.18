@@ -99,6 +99,7 @@
 #include <linux/unaligned.h>
 #include <cdp_txrx_injection.h>
 #include <wlan_cmn.h>
+#include "wlan_cm_ucfg_api.h"
 #include "wlan_reg_services_api.h"
 #include "wlan_vdev_mlme_api.h"
 #include "wlan_vdev_mgr_tgt_if_tx_api.h"
@@ -787,6 +788,68 @@ bool wma_injection_coex_is_quiesced(void)
 		!READ_ONCE(wma_injection_ctx.in_flight);
 }
 
+QDF_STATUS wma_injection_coex_resource_check(uint8_t additional_vdevs)
+{
+	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
+	struct wlan_objmgr_psoc_objmgr *objmgr;
+	struct wlan_objmgr_vdev *vdev;
+	target_resource_config *cfg;
+	uint32_t limit, peer_limit, count, peers, beacons = 0, free_ids = 0;
+	uint16_t id;
+	bool available;
+
+	if (!additional_vdevs || additional_vdevs > 2)
+		return QDF_STATUS_E_INVAL;
+	if (!wma || !wma->psoc || !wma->wmi_handle ||
+	    cds_is_fw_down() || cds_is_driver_recovering())
+		return QDF_STATUS_E_AGAIN;
+	cfg = lmac_get_tgt_res_cfg(wma->psoc);
+	if (!cfg || !cfg->num_vdevs || !cfg->num_peers ||
+	    !cfg->beacon_tx_offload_max_vdev ||
+	    !wmi_service_enabled(wma->wmi_handle, wmi_service_sync_delete_cmds) ||
+	    (!wmi_service_enabled(wma->wmi_handle,
+		wmi_service_dual_beacon_on_single_mac_scc_support) &&
+	     !wmi_service_enabled(wma->wmi_handle,
+		wmi_service_dual_beacon_on_single_mac_mcc_support)))
+		return QDF_STATUS_E_NOSUPPORT;
+
+	/* num_vdevs already reflects any firmware-owned NAN reservation.
+	 * Count allocated objects, including down and deleting interfaces, not
+	 * just connected roles. No firmware command is sent by this preflight.
+	 */
+	wlan_psoc_obj_lock(wma->psoc);
+	objmgr = &wma->psoc->soc_objmgr;
+	limit = qdf_min(cfg->num_vdevs,
+			(uint32_t)qdf_min(objmgr->max_vdev_count, wma->max_bssid));
+	limit = qdf_min(limit, (uint32_t)WLAN_UMAC_PSOC_MAX_VDEVS);
+	peer_limit = qdf_min(cfg->num_peers, (uint32_t)objmgr->max_peer_count);
+	count = objmgr->wlan_vdev_count;
+	peers = objmgr->wlan_peer_count;
+	for (id = 0; id < WLAN_UMAC_PSOC_MAX_VDEVS; id++) {
+		if (id < limit && !qdf_test_bit(id, objmgr->wlan_vdev_id_map))
+			free_ids++;
+		vdev = objmgr->wlan_vdev_list[id];
+		if (vdev && (wlan_vdev_mlme_get_opmode(vdev) == QDF_SAP_MODE ||
+			     wlan_vdev_mlme_get_opmode(vdev) == QDF_P2P_GO_MODE))
+			beacons++;
+	}
+	/* A monitor may need a native self peer on some target layouts.
+	 * Account for one per new vdev, including the private SAP helper.
+	 */
+	available = free_ids >= additional_vdevs &&
+		count + additional_vdevs <= limit &&
+		peers + additional_vdevs <= peer_limit &&
+		beacons < cfg->beacon_tx_offload_max_vdev;
+	wlan_psoc_obj_unlock(wma->psoc);
+	if (!available) {
+		wma_err_rl("STA/AP monitor capacity: vdevs %u+%u/%u peers %u+%u/%u beacon vdevs %u+1/%u",
+			   count, additional_vdevs, limit, peers, additional_vdevs,
+			   peer_limit, beacons, cfg->beacon_tx_offload_max_vdev);
+		return QDF_STATUS_E_BUSY;
+	}
+	return QDF_STATUS_SUCCESS;
+}
+
 bool wma_injection_handoff_is_quiesced(void)
 {
 	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
@@ -1212,6 +1275,50 @@ cleared:
 	return true;
 }
 
+static bool
+wma_injection_native_companion_valid(tp_wma_handle wma,
+			 const struct wlan_mlme_sta_mon_snapshot *snapshot,
+			 const uint8_t *helper_mac)
+{
+	struct wlan_objmgr_vdev *sta;
+	struct wlan_channel *channel;
+	bool valid;
+
+	if (!snapshot->sta_ap_coexist)
+		return true;
+	if (!snapshot->ap_owner || snapshot->exclusive ||
+	    snapshot->companion_sta_vdev_id == WLAN_INVALID_VDEV_ID ||
+	    snapshot->companion_sta_vdev_id == snapshot->sta_vdev_id ||
+	    snapshot->companion_sta_vdev_id == snapshot->mon_vdev_id)
+		return false;
+	sta = wlan_objmgr_get_vdev_by_id_from_psoc(wma->psoc,
+			snapshot->companion_sta_vdev_id, WLAN_LEGACY_WMA_ID);
+	if (!sta)
+		return false;
+	channel = wlan_vdev_get_active_channel(sta);
+	valid = wlan_vdev_mlme_get_opmode(sta) == QDF_STA_MODE &&
+		!wlan_vdev_mlme_is_mlo_vdev(sta) &&
+		!wlan_vdev_is_injection_helper(sta) &&
+		ucfg_cm_is_vdev_connected(sta) &&
+		QDF_IS_STATUS_SUCCESS(wlan_vdev_is_up_active_state(sta)) &&
+		wlan_vdev_get_pdev(sta) == wma->pdev &&
+		wlan_mlme_get_vdev_mac_id(wma->pdev,
+			snapshot->companion_sta_vdev_id) == snapshot->mac_id &&
+		qdf_mem_cmp(wlan_vdev_mlme_get_macaddr(sta), helper_mac,
+			    QDF_MAC_ADDR_SIZE) &&
+		qdf_mem_cmp(wlan_vdev_mlme_get_mldaddr(sta), helper_mac,
+			    QDF_MAC_ADDR_SIZE) &&
+		channel && channel->ch_freq == snapshot->channel.ch_freq &&
+		channel->ch_width == snapshot->channel.ch_width &&
+		channel->ch_cfreq1 == snapshot->channel.ch_cfreq1 &&
+		channel->ch_cfreq2 == snapshot->channel.ch_cfreq2;
+#ifdef WLAN_FEATURE_11BE
+	valid = valid && channel->puncture_bitmap == snapshot->channel.puncture_bitmap;
+#endif
+	wlan_objmgr_vdev_release_ref(sta, WLAN_LEGACY_WMA_ID);
+	return valid;
+}
+
 static QDF_STATUS
 wma_injection_native_channel(tp_wma_handle wma,
 			     struct wma_injection_helper *helper,
@@ -1227,6 +1334,8 @@ wma_injection_native_channel(tp_wma_handle wma,
 	int8_t power_limit, min_power;
 	QDF_STATUS status = QDF_STATUS_E_AGAIN;
 
+	if (!wma_injection_native_companion_valid(wma, snapshot, helper->mac_addr))
+		return status;
 	owner = wlan_objmgr_get_vdev_by_id_from_psoc(wma->psoc,
 				snapshot->exclusive ? snapshot->mon_vdev_id :
 				snapshot->sta_vdev_id, WLAN_LEGACY_WMA_ID);
@@ -1304,6 +1413,8 @@ wma_injection_native_mac_available(tp_wma_handle wma,
 	struct wlan_objmgr_vdev *vdev;
 	bool available;
 
+	if (!wma_injection_native_companion_valid(wma, snapshot, mac))
+		return false;
 	/* Reject every native link address before firmware CREATE can touch it. */
 	vdev = wlan_objmgr_get_vdev_by_macaddr_from_pdev_no_state(
 			wma->pdev, (uint8_t *)mac, WLAN_LEGACY_WMA_ID);
@@ -1359,6 +1470,11 @@ __wma_injection_ensure_native(tp_wma_handle wma, uint8_t monitor_vdev_id,
 		__wma_injection_destroy_helper(wma);
 		if (helper->native || helper->created)
 			return QDF_STATUS_E_BUSY;
+	}
+	if (snapshot.sta_ap_coexist) {
+		status = wma_injection_coex_resource_check(1);
+		if (QDF_IS_STATUS_ERROR(status))
+			return status;
 	}
 	if (qdf_is_macaddr_zero((struct qdf_mac_addr *)interface_mac) ||
 	    qdf_is_macaddr_group((struct qdf_mac_addr *)interface_mac) ||
