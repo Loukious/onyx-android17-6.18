@@ -74,6 +74,19 @@ shared-channel WPS results below qualify the STA workflow.
 
 ### Setup and teardown
 
+Patch 0254 also supports stock `airmon-ng` with the coexistence options enabled.
+Monitor interface names are no longer restricted to `mon0`; for example,
+`wlan0mon` can be used with the separate-interface setup below. `mon0` remains
+a convenient name outside the WLAN-style names enumerated by some Android HALs.
+
+Stock `airmon-ng start wlan0` brings the station down, creates `wlan0mon`, and
+selects channel 10 when no channel argument is supplied. This enters standalone
+monitoring and disconnects Android Wi-Fi. Supply a supported channel explicitly
+when needed, such as `airmon-ng start wlan0 6`. `airmon-ng stop wlan0mon` removes
+the monitor; the driver preserves and reopens Android's station interface so
+Android can reconnect normally. The tool and Kali package need no modification.
+Use the separate-interface setup below to keep an existing Android connection.
+
 From a root shell with `iw` and `ip` available, after the matched opt-in driver
 is loaded and Android is connected:
 

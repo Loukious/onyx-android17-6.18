@@ -1119,6 +1119,20 @@ _wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
 	if (errno)
 		return ERR_PTR(errno);
 
+	/* Airmon-ng can let the psoc idle after downing its station.  Restore
+	 * component state before monitor admission queries, and before taking
+	 * the controller admission reference across possible reinitialization.
+	 */
+	if (type == NL80211_IFTYPE_MONITOR && hdd_monitor_coexist_enabled()) {
+		errno = wlan_hdd_validate_context(hdd_ctx);
+		if (!errno)
+			errno = hdd_trigger_psoc_idle_restart(hdd_ctx);
+		if (errno) {
+			wdev = ERR_PTR(errno);
+			goto destroy_sync;
+		}
+	}
+
 	if (!wlan_mlme_sta_mon_admission_begin(hdd_ctx->psoc)) {
 		wdev = ERR_PTR(-EBUSY);
 		goto destroy_sync;
