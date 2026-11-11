@@ -31241,10 +31241,19 @@ static int hdd_sta_mon_check_chandef(struct hdd_adapter *adapter,
 	ret = hdd_sta_mon_get_channel(adapter, &channel);
 	if (ret)
 		return ret;
+	bound.chan = ieee80211_get_channel(adapter->hdd_ctx->wiphy,
+					 channel.ch_freq);
+	if (!bound.chan)
+		return -EINVAL;
 	bound.center_freq1 = channel.ch_cfreq1 ?: channel.ch_freq;
 	wlan_hdd_update_chandef(&bound, channel.ch_width,
 				channel.ch_cfreq2, false);
 	wlan_hdd_set_chandef_for_11be(&bound, &channel);
+#if defined(WLAN_FEATURE_11BE) && defined(CFG80211_RU_PUNC_CHANDEF)
+	bound.punctured = channel.puncture_bitmap;
+#endif
+	if (!cfg80211_chandef_valid(&bound))
+		return -EINVAL;
 	same = requested->chan->center_freq == channel.ch_freq &&
 		hdd_map_nl_chan_width(requested->width) == channel.ch_width &&
 		requested->center_freq1 == bound.center_freq1 &&
@@ -31255,7 +31264,8 @@ static int hdd_sta_mon_check_chandef(struct hdd_adapter *adapter,
 	if (channel.puncture_bitmap)
 		return -EOPNOTSUPP;
 #endif
-	if (same)
+	/* A narrower monitor can share the live channel without a retune. */
+	if (same || cfg80211_chandef_compatible(requested, &bound) == &bound)
 		return 0;
 	if (requested->chan->flags & (IEEE80211_CHAN_DISABLED |
 				     IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR))
