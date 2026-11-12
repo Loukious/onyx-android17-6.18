@@ -1,0 +1,36 @@
+diff --git a/qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c b/qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c
+index 28d0a3aee..9db9a5e7a 100644
+--- a/qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c
++++ b/qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c
+@@ -42,6 +42,7 @@
+ #include "wlan_reg_services_api.h"
+ #include "wlan_policy_mgr_api.h"
+ #include "cds_api.h"
++#include "cdp_txrx_mon.h"
+ #include <linux/spinlock.h>
+ 
+ /* All callbacks are nonblocking; no firmware response is waited for here. */
+@@ -195,6 +196,10 @@ bool wlan_mlme_sta_mon_arm(struct wlan_objmgr_psoc *psoc,
+ 	    !ctrl->fw_uncertain && !(snapshot->ap_owner && snapshot->exclusive) &&
+ 	    ctrl->state == WLAN_STA_MON_QUIESCED &&
+ 	    ctrl->snapshot.generation == snapshot->generation) {
++		/* Teardown can pause RX again while flushing the old vdev's rings.
++		 * Clear it only for a new arm under the invalidation guard.
++		 */
++		dp_mon_sta_coex_unpause(wlan_psoc_get_dp_handle(psoc));
+ 		snapshot->generation++;
+ 		ctrl->snapshot = *snapshot;
+ 		ctrl->state = WLAN_STA_MON_ARMING;
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c b/qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c
+index 056d09f6c..c7643df34 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c
+@@ -39,7 +39,7 @@ int hdd_enable_monitor_mode(struct net_device *dev)
+ 	if (vdev_id == (uint8_t)-EINVAL)
+ 		return -EINVAL;
+ 
+-	return cdp_set_monitor_mode(soc, vdev_id, false);
++	return qdf_status_to_os_return(cdp_set_monitor_mode(soc, vdev_id, false));
+ }
+ 
+ int hdd_disable_monitor_mode(void)

@@ -1,0 +1,15 @@
+{
+  "status": "PASS",
+  "cases": 63,
+  "sanitizers": "ASan+UBSan",
+  "source_sha256": {
+    "qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c": "d8265776ce8ad6de2c7ae63c8605f435dd947ef120dcb9bf9be393b14ceb6ea3",
+    "qcacld-3.0/core/hdd/src/wlan_hdd_main.c": "f778aba06fc4bd36c2234f18e72ad634514aa22bf00d543058f9f8e63bc4f432",
+    "qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.h": "91e4a4b83b946e005811d887e681d60e5b70c1870134009995874cc91fc7339c"
+  },
+  "limits": [
+    "The production frequency parser, current-channel helper, WEXT callback and bridge execute in this harness.",
+    "Channel programming, driver recovery, lock primitives and firmware completion are mocked.",
+    "Module compilation and live WEXT/channel-readback tests are required for hardware qualification."
+  ]
+}

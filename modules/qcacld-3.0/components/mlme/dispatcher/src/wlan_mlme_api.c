@@ -42,6 +42,7 @@
 #include "wlan_reg_services_api.h"
 #include "wlan_policy_mgr_api.h"
 #include "cds_api.h"
+#include "cdp_txrx_mon.h"
 #include <linux/spinlock.h>
 
 /* All callbacks are nonblocking; no firmware response is waited for here. */
@@ -195,6 +196,10 @@ bool wlan_mlme_sta_mon_arm(struct wlan_objmgr_psoc *psoc,
 	    !ctrl->fw_uncertain && !(snapshot->ap_owner && snapshot->exclusive) &&
 	    ctrl->state == WLAN_STA_MON_QUIESCED &&
 	    ctrl->snapshot.generation == snapshot->generation) {
+		/* Teardown can pause RX again while flushing the old vdev's rings.
+		 * Clear it only for a new arm under the invalidation guard.
+		 */
+		dp_mon_sta_coex_unpause(wlan_psoc_get_dp_handle(psoc));
 		snapshot->generation++;
 		ctrl->snapshot = *snapshot;
 		ctrl->state = WLAN_STA_MON_ARMING;

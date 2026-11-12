@@ -35,6 +35,13 @@
 struct hdd_context;
 struct wlan_hdd_link_info;
 
+#if defined(FEATURE_MONITOR_MODE_SUPPORT) && defined(CONFIG_WIRELESS_EXT) && \
+	defined(FEATURE_FRAME_INJECTION_SUPPORT)
+struct iw_freq;
+int wlan_hdd_monitor_wext_set_freq(struct net_device *dev,
+				 const struct iw_freq *freq);
+#endif
+
 #define CONFIG_MAX QCA_WLAN_VENDOR_ATTR_ADJUST_TX_POWER_CONFIG_MAX
 #define RATE_TYPE QCA_WLAN_VENDOR_ATTR_ADJUST_TX_POWER_RATE_TYPE
 #define RATE_VALUE QCA_WLAN_VENDOR_ATTR_ADJUST_TX_POWER_RATE_VALUE

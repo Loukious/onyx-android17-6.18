@@ -203,6 +203,10 @@ inventory, validation results and output hashes for the ROM being packaged.
 
 The WLAN ZIP contains the same injection-enabled driver as the complete build
 archive. A ROM already shipping that driver does not need a second copy.
+The source-build Onyx profile supplies the three coexistence options through
+`vendor_dlkm/lib/modules/modules.options`, so native WLAN loading needs no
+KernelSU WLAN manager. A matched driver-only `vendor_dlkm` fastbootd update
+passed reboot and Wi-Fi checks; see the [native installation results](validation/wlan-native-fastboot-20261112.md).
 Installer checks and automated build verification do not establish that a new
 kernel release has passed device testing.
 
@@ -219,9 +223,11 @@ requires Android's Wi-Fi framework to shut down and release the old driver.
 Once connected, Android keeps its normal STA/HAL active while a separate `mon0`
 shares the same radio. This requires exactly one connected STA with one active
 link and the same full channel definition, including bandwidth and center
-frequencies. A request for the identical definition leaves that sharing intact.
-A same-primary request with a different width, center or puncturing is rejected
-without disconnecting Android.
+frequencies. An identical definition or a compatible narrower same-primary
+request leaves the full live channel unchanged. Incompatible width, center or
+puncturing requests are rejected without disconnecting Android. Reopening a
+shared monitor clears the old receive pause when arming the new generation;
+failed monitor opens return a Linux error instead of false success.
 
 A request for a different supported primary channel hands the radio to the
 monitor: Android disconnects, while `mon0`, its ifindex and open capture remain

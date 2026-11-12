@@ -39,7 +39,7 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 	if (vdev_id == (uint8_t)-EINVAL)
 		return -EINVAL;
 
-	return cdp_set_monitor_mode(soc, vdev_id, false);
+	return qdf_status_to_os_return(cdp_set_monitor_mode(soc, vdev_id, false));
 }
 
 int hdd_disable_monitor_mode(void)
