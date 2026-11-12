@@ -50,7 +50,7 @@ The built module SHA-256 is
 It targets `6.18.38-android17-6-maybe-dirty-4k`; module artifacts and private
 runtime evidence are retained outside this repository.
 
-The qualified module is installed and saved in the existing KernelSU WLAN
+The qualified module is installed and saved in the existing KernelSU Next WLAN
 payload. The module and checksum manifest were replaced through a guarded
 file transaction; the prior `6fec2ff9...` module is retained for rollback.
 The loader script, module metadata, ABI table, and ABI verifier retained

@@ -21,7 +21,7 @@ def expected(common):
     pin = json.loads((source / "source.json").read_text())
     data = (source / "source.tar").read_bytes()
     if hashlib.sha256(data).hexdigest() != pin["sha256"]:
-        raise ValueError("KernelSU source archive hash mismatch")
+        raise ValueError("KernelSU Next source archive hash mismatch")
     files = {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
         for entry in archive:
@@ -29,7 +29,7 @@ def expected(common):
                 continue
             path = Path(entry.name)
             if path.is_absolute() or ".." in path.parts:
-                raise ValueError("unsafe KernelSU archive path")
+                raise ValueError("unsafe KernelSU Next archive path")
             if path.parts[0] == "uapi":
                 # Upstream kernel/include/uapi is a symlink to ../../uapi.
                 # Materialize its target so Kleaf's source glob sees the headers.
@@ -61,7 +61,7 @@ def expected(common):
 
 def verify(common):
     if (common / "drivers/kernelsu").is_symlink():
-        raise ValueError("unexpected KernelSU source symlink")
+        raise ValueError("unexpected KernelSU Next source symlink")
     files, additions = expected(common)
     changed = subprocess.check_output([
         "git", "-C", str(common), "diff", "HEAD", "--name-only"], text=True).splitlines()
@@ -71,11 +71,11 @@ def verify(common):
               (common / "drivers/kernelsu").rglob("*") if p.is_file()}
     wanted = {p for p in files if p.startswith("drivers/kernelsu/")}
     if actual != wanted:
-        raise ValueError("KernelSU source file set mismatch")
+        raise ValueError("KernelSU Next source file set mismatch")
     for name, contents in files.items():
         path = common / name
         if path.is_symlink() or path.read_bytes() != contents:
-            raise ValueError(f"KernelSU integration differs: {name}")
+            raise ValueError(f"KernelSU Next integration differs: {name}")
     return files
 
 
@@ -85,7 +85,7 @@ def integrate(common):
         previous = verify(common)
     elif subprocess.check_output([
             "git", "-C", str(common), "status", "--porcelain", "-uno"]):
-        raise ValueError("preserve tracked common changes before integrating KernelSU")
+        raise ValueError("preserve tracked common changes before integrating KernelSU Next")
     source = common.parent / ".kernelsu-next"
     repo = source / "repo"
     source.mkdir(exist_ok=True)

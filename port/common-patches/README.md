@@ -1,9 +1,9 @@
 # Required common-kernel fixes
 
-`build.py` applies these fixes on every build after KernelSU integration. The
+`build.py` applies these fixes on every build after KernelSU Next integration. The
 patch and manifest hashes must match the reviewed input and output sources.
 The build archives the patched files in `common-fixes/source/` and restores
-the pinned checkout afterward, preserving the KernelSU verification contract.
+the pinned checkout afterward, preserving the KernelSU Next verification contract.
 This is the persistent production fix path; `--qdss-diagnostic` independently
 controls the temporary AMBA/clock logging.
 

@@ -73,7 +73,7 @@ cameras, and eight kernel camera startup messages covered by the changes above.
 Its two vendor_modprobe sys_nice denials occur at the CCI scheduler calls.
 
 Other inherited denials concern vendor_nicmd netlink requests, init relabeling of
-KernelSU/module files, RIL property access, system_suspend access to generic sysfs,
+KernelSU Next/module files, RIL property access, system_suspend access to generic sysfs,
 filesystem checks on the rescue block device, kernel block-path traversal and
 Bluetooth RFCOMM's privileged L2CAP service bind. These require ROM labeling,
 service configuration or policy review. Counts include duplicate audit entries
@@ -84,7 +84,7 @@ These are ROM-side follow-ups, recorded here without implementing policy changes
 | Finding | ROM-side action | Kernel disposition |
 | --- | --- | --- |
 | vendor_nicmd netlink `nlmsg` | Check the service's requested netlink family and its domain permissions against the vendor implementation. | Retain netlink permission checks. |
-| init relabeling module/KernelSU files | Correct the file contexts and ownership of the packaged files and the service that relabels them. | Do not bypass relabel checks. |
+| init relabeling module/KernelSU Next files | Correct the file contexts and ownership of the packaged files and the service that relabels them. | Do not bypass relabel checks. |
 | RIL property access | Match vendor property contexts and property access rules to the RIL service. | Retain property restrictions. |
 | system_suspend generic sysfs access | Label the actual power/wakeup endpoints and grant the intended domain only the required access. | Keep the existing sysfs interfaces and enforcing checks. |
 | rescue block fsck / kernel block-path traversal | Audit block-device labels, parent-directory labels and init fsck service configuration. | Do not make block paths generally accessible. |

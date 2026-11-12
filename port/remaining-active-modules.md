@@ -2,7 +2,7 @@
 
 The accepted Linux 6.18.38 port contains **391 platform modules**; the matched
 package on the development phone contains **471 total modules**. Android startup,
-KernelSU root, audio, enforcing SELinux, native WALT/LPM and partition identity
+KernelSU Next root, audio, enforcing SELinux, native WALT/LPM and partition identity
 checks passed. Hardware validation covers this Onyx / SM8735 phone. Both Tuna
 variants pass offline device-tree checks; other phones or motherboard revisions
 are not established as compatible.

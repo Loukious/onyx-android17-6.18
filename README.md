@@ -11,7 +11,7 @@ ATH source. The module snapshot reproduces **5,193 files** from pinned imports
 and reviewed patches. See [NetHunter and CAN support](https://github.com/Loukious/onyx-android17-6.18/blob/android17-6.18-lts/port/nethunter-can.md).
 
 The last device-validated checkpoint, source `c683c79`, used **391 platform
-modules** and **471 matched modules**. That image set passed Android, KernelSU
+modules** and **471 matched modules**. That image set passed Android, KernelSU Next
 root, audio, enforcing SELinux and partition-identity checks on the global POCO
 F7 used for development. It includes native WALT and Qualcomm low-power idle,
 Gunyah transport and HVC lifetime fixes, battery/IOMMU diagnostics, and
@@ -27,7 +27,7 @@ support and other unconfirmed hardware remain outside the target scope.
 Battery aggregation and firmware console availability remain unresolved optional
 diagnostics. Automatic block2mtd attachment requires the saved ROM policy change;
 Wi-Fi concurrent-channel ROM work is also pending. Broad peripheral, suspend,
-power and endurance validation remains. See [current device validation summary](https://github.com/Loukious/onyx-android17-6.18/blob/android17-6.18-lts/validation/onyx-runtime-summary-20261104.md) and [remaining module inventory](https://github.com/Loukious/onyx-android17-6.18/blob/android17-6.18-lts/validation/remaining_391_modules/priorities.md). A new upstream or KernelSU build
+power and endurance validation remains. See [current device validation summary](https://github.com/Loukious/onyx-android17-6.18/blob/android17-6.18-lts/validation/onyx-runtime-summary-20261104.md) and [remaining module inventory](https://github.com/Loukious/onyx-android17-6.18/blob/android17-6.18-lts/validation/remaining_391_modules/priorities.md). A new upstream or KernelSU Next build
 requires device validation even when its automated build checks pass.
 
 ## Branch layout
@@ -79,7 +79,7 @@ The tracker opens a pull request and explicitly dispatches its complete build
 Successful updates automatically fast-forward `android17-6.18-lts` to the exact
 tested source commit, merging the update PR. A concurrent change to the source
 branch stops promotion until a new candidate has been rebuilt. The source
-branch remains pinned and reproducible. A KernelSU-only update rebuilds the
+branch remains pinned and reproducible. An update to KernelSU Next rebuilds the
 accepted kernel without changing its GKI source. Successful accepted-source
 builds publish their verified artifacts before recording their exact revisions,
 so unchanged released inputs do not cause daily rebuilds. The daily tracker also
@@ -87,7 +87,7 @@ rebuilds manual source-branch changes, checking out the exact detected commit.
 Active and successful builds for the same detected inputs are deduplicated.
 Failed or cancelled builds can retry up to three times; further automatic attempts
 require changed inputs. Manual workflow runs remain available for source repairs.
-KernelSU is fetched from dev at build time; the release records the revision
+KernelSU Next is fetched from dev at build time; the release records the revision
 actually built if dev advances between detection and compilation.
 
 Builds use standard `ubuntu-24.04` GitHub-hosted runners with build dependencies,
@@ -99,7 +99,7 @@ swap allocation fails visibly if space is unavailable. No persistent secrets
 are needed. Repository Actions must be allowed to create pull requests.
 
 Every build includes GKI, all 400 platform modules, the native GKI archive,
-KernelSU dev's exact source archive, both device-tree variants, wireless firmware
+KernelSU Next dev's exact source archive, both device-tree variants, wireless firmware
 with licenses/source, import CRC verification, input hashes and logs. Download
 the complete GKI/module archive and `SHA256SUMS` from the build artifacts or release.
 Actions stores separate ABI files under `kernel-abi/`; releases expose those files
@@ -111,8 +111,8 @@ Successful ordinary builds of accepted source automatically create a GitHub
 release. A successful upstream candidate is first fast-forwarded to the exact
 tested commit, then released; promotion does not wait for a manual PR merge.
 The release job independently rechecks the downloaded archive, complete named
-module inventory, hashes, matching ABI/vermagic, KernelSU configuration/source,
-  both device trees and exact source/GKI/KernelSU revisions. Failed builds, changed
+module inventory, hashes, matching ABI/vermagic, KernelSU Next configuration/source,
+  both device trees and exact source/GKI/KernelSU Next revisions. Failed builds, changed
 source heads and diagnostic or other manual candidate refs are excluded.
 
 Tags have the form `gki-6.18.N-s<SOURCE12>-k<KSU12>` and point to the built
@@ -171,7 +171,7 @@ For standalone builds, pass `--cache-dir /path/to/persistent/kleaf-cache` to
 `port/build.py`. ROM builds enable it automatically. Resource defaults are 12 jobs
 and 20000 MB for Kleaf; override `TARGET_KERNEL_PORT_JOBS` and
 `TARGET_KERNEL_PORT_MEMORY_MB` in the device configuration when needed.
-`KERNEL_OBJ/onyx-source-build.json` records source revisions, KernelSU, module
+`KERNEL_OBJ/onyx-source-build.json` records source revisions, KernelSU Next, module
 inventory, validation results and output hashes for the ROM being packaged.
 
 ## Install a release
@@ -179,7 +179,7 @@ inventory, validation results and output hashes for the ROM being packaged.
 [GitHub releases](https://github.com/Loukious/onyx-android17-6.18/releases) include:
 
 - **AnyKernel3 installer ZIP**: recovery installer for the kernel.
-- `nethunter-wlan-injection-<kernel-release>.zip`: optional KernelSU/Magisk module
+- `nethunter-wlan-injection-<kernel-release>.zip`: optional KernelSU Next/Magisk module
   containing the matching internal WCN7750 monitor-mode/frame-injection driver.
 - **GKI and modules archive** (`.tar.gz`): complete outputs for ROM integration;
   this archive is not directly flashable.
@@ -196,7 +196,7 @@ inventory, validation results and output hashes for the ROM being packaged.
    module's imported symbol CRCs before updating the active `boot` partition.
    An incompatible or unavailable module set aborts installation before flashing.
 3. Boot Android. To install the optional WLAN package, select its ZIP inside
-   KernelSU or Magisk, then reboot. It requires the exact running kernel release,
+   KernelSU Next or Magisk, then reboot. It requires the exact running kernel release,
    checks the driver payload, waits for dependencies and preserves Wi-Fi's on/off
    state. Failed replacement attempts reload the original driver where possible;
    removing the module and rebooting restores the ROM's normal driver loading.
@@ -205,7 +205,7 @@ The WLAN ZIP contains the same injection-enabled driver as the complete build
 archive. A ROM already shipping that driver does not need a second copy.
 The source-build Onyx profile supplies the three coexistence options through
 `vendor_dlkm/lib/modules/modules.options`, so native WLAN loading needs no
-KernelSU WLAN manager. A matched driver-only `vendor_dlkm` fastbootd update
+KernelSU Next WLAN manager. A matched driver-only `vendor_dlkm` fastbootd update
 passed reboot and Wi-Fi checks; see the [native installation results](validation/wlan-native-fastboot-20261112.md).
 Installer checks and automated build verification do not establish that a new
 kernel release has passed device testing.

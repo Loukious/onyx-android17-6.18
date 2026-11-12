@@ -177,7 +177,7 @@ def main():
         raise ValueError("KernelSU Next must be built into the GKI")
     for option in ["KSU_DEBUG", "KSU_DISABLE_MANAGER", "KSU_DISABLE_POLICY"]:
         if f"\nCONFIG_{option}=y\n" in config:
-            raise ValueError(f"unexpected KernelSU option: {option}")
+            raise ValueError(f"unexpected KernelSU Next option: {option}")
     modules = [p for p in outputs if p.suffix == ".ko"]
     catalog = json.loads((HERE / "modules.json").read_text())
     if {p.name for p in modules} != {entry["output"] for entry in catalog}:

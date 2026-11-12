@@ -3,7 +3,7 @@
 The accepted local source/image set uses Linux 6.18.38, 391 platform modules and
 471 packaged modules on a global POCO F7 (Onyx, SM8735). Its kernel GNU build ID is
 b8587a51d2a866026061adfba1f937f3b30cde6f. The latest restoration verified all nine
-partition hashes against the accepted image set, Android boot completion, KernelSU
+partition hashes against the accepted image set, Android boot completion, KernelSU Next
 root, audio policy, enforcing SELinux and native CPU-frequency/idle governors.
 WALT is selected on four policies; all 48 idle tunables and eight frequency limits
 match the original 6.6 baseline. Normal Android interaction boosts remain active.
