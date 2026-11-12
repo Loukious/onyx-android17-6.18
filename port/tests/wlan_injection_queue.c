@@ -27,9 +27,15 @@ struct wlan_channel {
     uint16_t puncture_bitmap;
 };
 struct wlan_mlme_sta_mon_control;
+struct cdp_soc_t {
+    struct wlan_mlme_sta_mon_control *control;
+    bool enabled, paused;
+    unsigned int unpause_calls;
+};
 struct wlan_objmgr_psoc {
     struct wlan_mlme_sta_mon_control *control;
     bool ext_tpc;
+    void *dp_handle;
 };
 struct wlan_objmgr_pdev {
     struct wlan_objmgr_psoc *psoc;
@@ -195,9 +201,24 @@ static struct wlan_mlme_sta_mon_control *sta_mon_control(struct wlan_objmgr_psoc
 {
     return psoc ? psoc->control : NULL;
 }
+static void *wlan_psoc_get_dp_handle(struct wlan_objmgr_psoc *psoc)
+{
+    return psoc->dp_handle;
+}
+static void dp_mon_sta_coex_unpause(struct cdp_soc_t *soc)
+{
+    assert(sta_mon_lock);
+    if (!soc) return;
+    assert(soc->control && soc->control->state == WLAN_STA_MON_QUIESCED);
+    soc->unpause_calls++;
+    if (soc->enabled) soc->paused = false;
+}
 /* INSERT_STA_MON_FUNCTIONS */
 static struct wlan_mlme_sta_mon_control control;
-static struct wlan_objmgr_psoc psoc = { .control = &control, .ext_tpc = true };
+static struct cdp_soc_t monitor_dp = { .control = &control, .enabled = true };
+static struct wlan_objmgr_psoc psoc = {
+    .control = &control, .ext_tpc = true, .dp_handle = &monitor_dp,
+};
 static struct wlan_objmgr_pdev pdev = { .psoc = &psoc, .reg_power = 23,
     .state = CHANNEL_STATE_ENABLE, .bonded_state = CHANNEL_STATE_ENABLE };
 static struct wlan_objmgr_vdev monitor_vdev;
@@ -426,6 +447,10 @@ static void init_coex_fixture(void)
     assert(!wma_injection_ctx.helper.native);
     memset(&control, 0, sizeof(control));
     psoc.control = &control;
+    monitor_dp = (struct cdp_soc_t){
+        .control = &control, .enabled = true, .paused = true,
+    };
+    psoc.dp_handle = &monitor_dp;
     fake_wma = (struct wma_handle){
         .psoc = &psoc, .pdev = &pdev, .wmi_handle = &psoc, .max_bssid = 16,
         .interfaces[3] = { .vdev = &monitor_vdev, .ch_freq = 5260 },
@@ -922,6 +947,7 @@ static void test_triple_arm(void)
         before = snapshot;
         control_before = control;
         CHECK(!wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+        CHECK(monitor_dp.paused && !monitor_dp.unpause_calls);
         CHECK(!memcmp(&snapshot, &before, sizeof(snapshot)));
         CHECK(!memcmp(&control, &control_before, sizeof(control)));
         CHECK(!stop_notifications && !control.admissions && !sta_mon_lock);
@@ -938,6 +964,46 @@ static void test_triple_arm(void)
     CHECK(wlan_mlme_sta_mon_set_ready(&psoc, snapshot.generation));
     CHECK(wlan_mlme_sta_mon_token_valid(&psoc, 3, snapshot.generation));
     wma_injection_deinit(&fake_wma);
+}
+
+static void test_arm_pause_reset(void)
+{
+    /* Teardown may leave RX paused; rejected arms must not reactivate it. */
+    for (unsigned int owner = 0; owner < 3; owner++) {
+        struct wlan_mlme_sta_mon_snapshot snapshot;
+        struct wlan_mlme_sta_mon_control before;
+        init_coex_fixture();
+        snapshot = owner == 2 ? quiesced_triple_fixture(701) :
+                               quiesced_ap_fixture(701);
+        if (!owner) snapshot.ap_owner = false;
+        before = control;
+        for (unsigned int blocked = 0; blocked < 8; blocked++) {
+            control = before;
+            snapshot.generation = 701;
+            switch (blocked) {
+            case 0: control.admissions = 1; break;
+            case 1: control.updates = 1; break;
+            case 2: control.fw_uncertain = true; break;
+            case 3: snapshot.generation++; break;
+            case 4: control.state = WLAN_STA_MON_ARMING; break;
+            case 5: control.state = WLAN_STA_MON_QUIESCING; break;
+            case 6: control.attached = false; break;
+            case 7: control.stop = NULL; break;
+            }
+            CHECK(!wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+            CHECK(monitor_dp.paused && !monitor_dp.unpause_calls);
+            CHECK(!sta_mon_lock);
+        }
+        control = before;
+        snapshot.generation = 701;
+        CHECK(wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+        CHECK(!monitor_dp.paused && monitor_dp.unpause_calls == 1);
+        CHECK(snapshot.generation == 702 && control.state == WLAN_STA_MON_ARMING);
+        monitor_dp.paused = true;
+        CHECK(!wlan_mlme_sta_mon_arm(&psoc, &snapshot));
+        CHECK(monitor_dp.paused && monitor_dp.unpause_calls == 1);
+        wma_injection_deinit(&fake_wma);
+    }
 }
 
 static void check_triple_admissions(void)
@@ -1733,6 +1799,7 @@ int main(void)
     test_ap_admissions();
     test_ap_handoff_guards();
     test_triple_arm();
+    test_arm_pause_reset();
     test_triple_admissions_and_csa();
     test_triple_owner_events();
     test_triple_handoff_guards();
