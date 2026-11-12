@@ -79,7 +79,7 @@ jobs:
         run: |
           python3 ci/publish_release.py artifacts "$SOURCE_REVISION" "$KERNEL_REVISION" "$KERNELSU_REVISION" \
             --build-run-id "$BUILD_RUN_ID" --build-run-attempt "$BUILD_RUN_ATTEMPT"
-      - name: Record released source and KernelSU revisions
+      - name: Record released source and KernelSU Next revisions
         env:
           SOURCE_REVISION: ${{ steps.inputs.outputs.source_revision }}
           KERNEL_REVISION: ${{ steps.inputs.outputs.kernel_revision }}

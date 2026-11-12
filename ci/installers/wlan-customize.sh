@@ -1,5 +1,5 @@
 SKIPUNZIP=0
-[ "$BOOTMODE" = true ] || abort 'Install this module from KernelSU or Magisk in Android'
+[ "$BOOTMODE" = true ] || abort 'Install this module from KernelSU Next or Magisk in Android'
 [ "$(getprop ro.product.device)" = onyx ] || abort 'This module is for Onyx'
 [ "$(uname -r)" = '@RELEASE@' ] || abort 'Boot the matching Konoha kernel before installing this module'
 set_perm_recursive "$MODPATH" 0 0 0755 0644

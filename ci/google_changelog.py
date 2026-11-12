@@ -104,7 +104,7 @@ def summary(releases, current_tag, tip):
     _, tag, base = previous
     if base == tip:
         return heading + (f'No new Google GKI commits since `{tag}`; the Google revision remains '
-                          f'[`{tip[:12]}`]({GOOGLE}/+/{tip}). Konoha and KernelSU revisions are recorded above.\n')
+                          f'[`{tip[:12]}`]({GOOGLE}/+/{tip}). Konoha and KernelSU Next revisions are recorded above.\n')
     commits = commits_between(base, tip)
     counts = Counter(area(subject) for _, subject in commits)
     result = heading + (f'**{len(commits)} Google commits** since `{tag}`, '

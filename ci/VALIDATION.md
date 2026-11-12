@@ -29,7 +29,7 @@ See [the machine-readable saved-image results](recovery-validation.json) and
 These checks establish offline packaging and transaction behavior. The complete
 ZIP has not been flashed on a device. The user's independent ROM rebuild was
 not changed or interrupted. Published kernel assets remain bound to their own
-successful Actions build, exact source/GKI/KernelSU inputs and release checksums.
+successful Actions build, exact source/GKI/KernelSU Next inputs and release checksums.
 
 ## Initial automation — 2026-11-02
 
@@ -50,10 +50,10 @@ Before publication on 2026-11-02:
   under ASan/UBSan. Original callbacks and five regressions were rejected;
   required source patches restore the checkout after a simulated build failure.
 - Twenty-eight automation tests cover exact branch/revision checks, pin/blob refresh,
-  unchanged-input detection, KernelSU-only updates, source omissions/edits,
+  unchanged-input detection, updates to KernelSU Next, source omissions/edits,
   patch integration/conflicts, partial publisher recovery, duplicate/closed PRs,
   stale CI/source build-state writes, executable/symlink preservation, source
-  branch selection, and new KernelSU builds while an LTS candidate remains open.
+  branch selection, and new KernelSU Next builds while an LTS candidate remains open.
 - Automatic promotion additionally requires the complete build job and its
   source status to succeed, validates the built kernel pin and candidate head,
   and uses an atomic base lease for an exact fast-forward. Failed builds,
@@ -70,7 +70,7 @@ Hosted execution and each newer LTS build are validated separately in Actions.
 
 The updated automation passes 68 host tests, actionlint 1.7.12, Python compilation,
 Bash syntax and Git whitespace checks. Actual temporary Git repositories exercise
-GKI updates, KernelSU dev updates, accepted-source edits, unchanged refs, missing
+GKI updates, KernelSU Next dev updates, accepted-source edits, unchanged refs, missing
 release state and failed remote lookup; detection never changes accepted state.
 Candidate and accepted-source dispatch tests cover duplicate suppression and a
 three-attempt limit for failed or cancelled builds.
@@ -143,7 +143,7 @@ unpublished draft. Authenticated release inventory and immutable release ID
 `434429464` exposed the existing draft and all eight server SHA256 digests.
 
 The publisher keeps normal published-tag lookup and falls back to paginated
-authenticated inventory for drafts. Exact tag, target and source/GKI/KernelSU
+authenticated inventory for drafts. Exact tag, target and source/GKI/KernelSU Next
 identities are checked before upload; the same immutable draft ID is checked
 again after upload, followed by complete inventory, size, digest and accepted
 source-head checks. Existing complete published releases remain untouched.

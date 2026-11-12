@@ -58,17 +58,17 @@ def verify(artifact, source_root):
             raise ValueError('Module import verification is missing')
     ksu = report['kernelsu_next']
     if not all(re.fullmatch('[0-9a-f]{40}', value) for value in (pins['common']['revision'], ksu['revision'])):
-        raise ValueError('Build must record exact GKI and KernelSU revisions')
+        raise ValueError('Build must record exact GKI and KernelSU Next revisions')
     archived_ksu = json.loads((artifact / 'inputs/kernelsu-next/source.json').read_text())
     if any(ksu.get(key) != value for key, value in archived_ksu.items()):
-        raise ValueError('KernelSU identity differs from the archived source')
+        raise ValueError('KernelSU Next identity differs from the archived source')
     if digest(artifact / 'inputs/kernelsu-next/source.tar') != ksu['sha256']:
-        raise ValueError('KernelSU source archive changed')
+        raise ValueError('KernelSU Next source archive changed')
     config = (artifact / 'gki/kernel_aarch64_dot_config').read_text().splitlines()
     if 'CONFIG_KSU=y' not in config or 'CONFIG_MODVERSIONS=y' not in config:
-        raise ValueError('Built kernel lacks KernelSU or module versioning')
+        raise ValueError('Built kernel lacks KernelSU Next or module versioning')
     if any('CONFIG_' + option + '=y' in config for option in ('KSU_DEBUG', 'KSU_DISABLE_MANAGER', 'KSU_DISABLE_POLICY')):
-        raise ValueError('Unexpected KernelSU configuration')
+        raise ValueError('Unexpected KernelSU Next configuration')
     if (artifact / 'gki/kernel.release').read_text().strip() != release:
         raise ValueError('Kernel release file differs from build report')
     for name in ('gki/Image', 'gki/kernel_aarch64_Module.symvers', 'devicetrees/dtb.img', 'devicetrees/dtbo.img'):

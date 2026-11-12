@@ -222,7 +222,7 @@ jobs:
         id: release
         if: "!startsWith(inputs.source_ref, 'upstream/') || steps.promote.outputs.promoted == 'true'"
         run: python3 ci/publish_release.py artifacts "$SOURCE_REVISION" "$KERNEL_REVISION" "$KERNELSU_REVISION"
-      - name: Record released source and KernelSU revisions
+      - name: Record released source and KernelSU Next revisions
         if: "!startsWith(inputs.source_ref, 'upstream/') || steps.promote.outputs.promoted == 'true'"
         env:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}

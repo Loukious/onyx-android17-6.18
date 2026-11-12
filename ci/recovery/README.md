@@ -82,7 +82,7 @@ The shell transaction tests cover all six writes, complete rollback and
 preflight failures with zero partition writes. These are offline checks; this
 complete installer has not been flashed on a device.
 
-`kernel.json` binds the payload to exact source, Google GKI and KernelSU commits.
+`kernel.json` binds the payload to exact source, Google GKI and KernelSU Next commits.
 `full-recovery.json` binds the release ZIP to its payload and tool provenance.
 `SHA256SUMS` inside the ZIP covers its complete inventory. CI recreates the ZIP
 from the verified build during release validation, rejecting modified installers

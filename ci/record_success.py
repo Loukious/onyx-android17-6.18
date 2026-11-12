@@ -46,7 +46,7 @@ def record(repository, kernel, kernelsu, source=None, release_tag=None):
     state = json.dumps(values, indent=2) + '\n'
     if metadata and base64.b64decode(metadata['content']).decode() == state:
         return
-    payload = {'message': 'Record successful kernel and KernelSU dev build [skip ci]',
+    payload = {'message': 'Record successful kernel and KernelSU Next dev build [skip ci]',
                'content': base64.b64encode(state.encode()).decode(), 'branch': TRACK['ci_branch']}
     if metadata:
         payload['sha'] = metadata['sha']

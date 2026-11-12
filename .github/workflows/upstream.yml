@@ -32,7 +32,7 @@ jobs:
         with:
           ref: android17-6.18-lts
           path: source
-      - name: Detect upstream, source and KernelSU changes
+      - name: Detect upstream, source and KernelSU Next changes
         id: detect
         run: python3 ci/track_upstream.py
       - name: Prepare runner for a kernel update
@@ -63,7 +63,7 @@ jobs:
           REVISION: ${{ steps.detect.outputs.latest }}
           KERNELSU_REVISION: ${{ steps.detect.outputs.kernelsu }}
         run: python3 ci/publish_update.py "$REVISION" --kernelsu "$KERNELSU_REVISION"
-      - name: Rebuild accepted source when its source or KernelSU dev changes
+      - name: Rebuild accepted source when its source or KernelSU Next dev changes
         if: steps.detect.outputs.kernel_changed != 'true' && (steps.detect.outputs.kernelsu_changed == 'true' || steps.detect.outputs.source_changed == 'true' || steps.detect.outputs.release_needed == 'true')
         env:
           SOURCE_REVISION: ${{ steps.detect.outputs.source_revision }}

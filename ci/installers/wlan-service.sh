@@ -133,7 +133,7 @@ if [ -d "/sys/module/$NAME" ]; then
     logmsg 'WLAN test/capture process active; keeping loaded driver'
     exit 1
   fi
-  # KernelSU starts services before Settings is ready.
+  # KernelSU Next starts services before Settings is ready.
   wifi_on=
   scan_always=
   for attempt in $(seq 1 90); do

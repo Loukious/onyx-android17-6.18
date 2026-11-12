@@ -182,7 +182,7 @@ def release_notes(repository, identity):
             '\nInstallable ZIPs:\n\n'
             f'- `{ak}` — AnyKernel3 kernel update for Onyx with matching Android 17 / 6.18 modules. '
             'Checks installed DLKM and vendor-ramdisk module CRCs before writing boot.\n'
-            f'- `{wlan}` — KernelSU/Magisk internal WCN7750 monitor-mode and frame-injection module. '
+            f'- `{wlan}` — KernelSU Next/Magisk internal WCN7750 monitor-mode and frame-injection module. '
             'Install after booting the matching kernel, then reboot.\n\n'
             'A kernel-only ZIP cannot migrate a 6.6 ROM or a different KMI generation to 6.18. '
             + ('Use the complete recovery ZIP for compatible layouts. ' if identity.get('full_recovery') else

@@ -23,7 +23,7 @@ def publish(revision, kernelsu=None):
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('Invalid upstream revision')
     if kernelsu is not None and not re.fullmatch('[0-9a-f]{40}', kernelsu):
-        raise ValueError('Invalid detected KernelSU revision')
+        raise ValueError('Invalid detected KernelSU Next revision')
     pins = json.loads((ROOT / 'port/sources.json').read_text())
     if pins['common']['revision'] != revision:
         raise ValueError('Candidate does not match detected upstream')

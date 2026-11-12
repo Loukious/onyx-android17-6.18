@@ -28,7 +28,7 @@ def promote(repository, branch, source, kernel, kernelsu, run_url, record_state=
     if not re.fullmatch(r'upstream/android17-6\.18-lts-[0-9a-f]{12}-[0-9a-f]{12}', branch):
         raise ValueError('Only tracker-created source candidates can be promoted')
     if not all(re.fullmatch('[0-9a-f]{40}', value) for value in (source, kernel, kernelsu)):
-        raise ValueError('Promotion requires exact source, kernel and KernelSU revisions')
+        raise ValueError('Promotion requires exact source, kernel and KernelSU Next revisions')
     match = re.fullmatch(r'https://github\.com/' + re.escape(repository) + r'/actions/runs/(\d+)', run_url)
     if not match:
         raise ValueError('Build URL must identify this repository')

@@ -1,11 +1,11 @@
 #!/sbin/sh
-# Magisk module installer entry point. KernelSU uses its own module installer.
+# Magisk module installer entry point. KernelSU Next uses its own module installer.
 # SPDX-License-Identifier: GPL-2.0-only
 umask 022
 OUTFD=$2
 ZIPFILE=$3
 if [ ! -f /data/adb/magisk/util_functions.sh ]; then
-  echo 'Install this ZIP from the KernelSU or Magisk app in Android'
+  echo 'Install this ZIP from the KernelSU Next or Magisk app in Android'
   exit 1
 fi
 . /data/adb/magisk/util_functions.sh

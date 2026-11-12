@@ -34,7 +34,7 @@ def fixture(root):
     pins = {'common': {'revision': KERNEL, 'kernel': '6.18.38'}}
     catalog = [{'output': 'one.ko'}, {'output': 'two.ko'}]
     dt = {key: True for key in ('overlay_engines_agree', 'bootloader_ids_preserved', 'dtbo_table_verified')}
-    ksu_data = b'archived KernelSU source'
+    ksu_data = b'archived KernelSU Next source'
     ksu = {'revision': KSU, 'sha256': hashlib.sha256(ksu_data).hexdigest()}
     write_json(source / 'port/sources.json', pins)
     write_json(source / 'port/modules.json', catalog)
@@ -608,7 +608,7 @@ class RealGitDetectionTests(unittest.TestCase):
             last = {'common_revision': current, 'kernelsu_revision': self.git(ksu, 'rev-parse', 'HEAD'),
                     'source_revision': accepted, 'release_tag': 'previous-release'}
             if scenario == 'kernel': self.commit(kernel, 'upstream GKI bump')
-            if scenario == 'ksu': self.commit(ksu, 'KernelSU dev bump')
+            if scenario == 'ksu': self.commit(ksu, 'KernelSU Next dev bump')
             if scenario == 'source': self.commit(source, 'module source change')
             if scenario == 'missing-release': last.pop('release_tag')
             if scenario == 'failure': self.git(ksu, 'branch', '-m', 'renamed')

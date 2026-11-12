@@ -70,7 +70,7 @@ def inputs(bundle, run_id, attempt):
         ('source_revision', 'source_revision'), ('kernel_revision', 'common_revision'),
         ('kernelsu_revision', 'kernelsu_revision'))}
     if any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{40}', value) for value in result.values()):
-        raise ValueError('Recovery bundle requires exact source, GKI and KernelSU revisions')
+        raise ValueError('Recovery bundle requires exact source, GKI and KernelSU Next revisions')
     # These values select the source checkout; publish() subsequently replays
     # the complete bundle/hash/ABI validation and checks the accepted head.
     return result
