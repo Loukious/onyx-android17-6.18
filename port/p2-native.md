@@ -5,7 +5,7 @@ The original provider-deployment checkpoint is described below. The [current 391
 `mem-hooks.ko`, `gh_rm_booster.ko`, `tmecom-intf.ko` and
 `gh_panic_notifier.ko` are integrated in the native DDK recipe and installed.
 Onyx's existing ROM load list requests all four. The existing Android module
-loader loads them automatically; no KernelSU module or boot-time workaround
+loader loads them automatically; no KernelSU Next module or boot-time workaround
 was added. The catalogue now has 378 platform modules, with 458 packaged modules
 and 93 retained stock names unavailable.
 

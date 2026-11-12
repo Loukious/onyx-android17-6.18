@@ -14,7 +14,7 @@ image supplies that driver and generated dependency metadata; its existing
 vendor.modprobe service loads WALT first and LPM at boot. Cpuidle selects
 `qcom-cpu-lpm` through the driver's rating of 50 (menu is 20). The existing ROM
 post-boot script writes N to the native sleep_disabled attribute. There is no
-additional governor-selection service or KernelSU module.
+additional governor-selection service or KernelSU Next module.
 
 The adaptation registers the actual Android PM-domain trace hook using the
 existing exported tracepoint APIs. It fails if the hook is absent. It needs no

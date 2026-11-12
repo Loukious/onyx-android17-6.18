@@ -51,7 +51,7 @@ modules, module lists and AVB profiles match the preceding working images.
   Their 336 imported-symbol CRCs match the installed kernel/providers, and all
   25 WALT export signatures are unchanged.
 - Two original-loader Android boots pass all nine partition readbacks, loaded-module
-  identities, native per-task controls, KernelSU root, SELinux enforcing, audio
+  identities, native per-task controls, KernelSU Next root, SELinux enforcing, audio
   policy, sound card and both AW amplifiers.
 - Original-loader fastbootd appears in 15.33 seconds. The normal recovery menu also
   boots; after the user enables ADB, its live module set contains exactly all

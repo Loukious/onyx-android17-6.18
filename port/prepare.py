@@ -90,7 +90,7 @@ def main():
             from integrate_kernelsu import verify
             verify(root)
             if git(root, "rev-parse", "HEAD") != revision:
-                parser.error("common revision changed under KernelSU integration")
+                parser.error("common revision changed under KernelSU Next integration")
         elif git(root, "status", "--porcelain", "-uno"):
             parser.error(f"tracked changes in {path}; preserve them before preparing sources")
         elif git(root, "rev-parse", "HEAD") != revision:

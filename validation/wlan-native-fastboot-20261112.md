@@ -2,7 +2,7 @@
 
 The development Onyx/WCN7750 loaded the qualified WLAN driver directly from
 `vendor_dlkm` after a fastbootd installation and reboot on 2026-11-12. The
-optional KernelSU WLAN manager was removed. Android Wi-Fi reconnected, with
+optional KernelSU Next WLAN manager was removed. Android Wi-Fi reconnected, with
 Wi-Fi and background scanning enabled.
 
 The installed driver comes from source commit
@@ -41,7 +41,7 @@ modes, timestamps, SELinux labels and filesystem UUID were preserved.
 The AVB hashtree/footer was regenerated for the existing disabled-verification
 configuration. After reboot, the full partition readback and loaded build
 note matched, all three coexistence parameters were `Y`, vendor module
-loading completed and the KernelSU WLAN module directory was absent.
+loading completed and the KernelSU Next WLAN module directory was absent.
 
 The phone shares physical `vendor_dlkm` extents between its two slots, so
 the driver-only flash also changed the bytes visible to the inactive slot.

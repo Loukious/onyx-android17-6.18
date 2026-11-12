@@ -110,15 +110,15 @@ after the build context exited.
 The [validation receipt](validation/timerfd-resume-20261106.json) records the
 reproducible VM results, complete 91,829-file source replay and a successful
 production ARM64 Kleaf build with strict KMI and symbol-list checks. That build
-uses the current recipe's KernelSU revision `b2c1ad00b755`.
+uses the current recipe's KernelSU Next revision `b2c1ad00b755`.
 The running phone's saved Image hash instead matches the earlier accepted
-baseline with KernelSU `a6c81fa4a8b7`. A device comparison must use that saved
+baseline with KernelSU Next `a6c81fa4a8b7`. A device comparison must use that saved
 baseline's configuration and source inputs to isolate the timerfd change.
 
 ## Phone validation on 2026-11-06
 
 The matched temporary kernel booted on slot B with build ID
-`a95103924cbfa65100a16e293beacdac2d63e21b`. Its configuration, KernelSU revision,
+`a95103924cbfa65100a16e293beacdac2d63e21b`. Its configuration, KernelSU Next revision,
 all 10,091 exported-symbol/CRC records and boot ramdisk/header fields match
 the saved phone baseline. No partition was written.
 

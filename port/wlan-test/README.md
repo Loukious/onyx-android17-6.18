@@ -41,7 +41,7 @@ by default when no options are supplied, and are read-only after loading.
 
 A driver-only native installation was verified on the development Onyx on
 2026-11-12: fastbootd flashed a reconstructed `vendor_dlkm` image, the optional
-KernelSU WLAN module was removed, and Android loaded the qualified driver and
+KernelSU Next WLAN module was removed, and Android loaded the qualified driver and
 all three options after reboot. Wi-Fi reconnected with background scanning
 enabled. This validates that image and kernel combination; it does not qualify
 a complete recovery installer or a different kernel build. See the

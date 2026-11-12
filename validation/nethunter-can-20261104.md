@@ -8,7 +8,7 @@ strict; no unresolved symbols or invented providers were permitted.
 The tested inputs were Google GKI
 `ee9c8fd574f1b2c93cfc74b74b6f3a0d78a5e3a0` and KernelSU Next dev
 `b2c1ad00b755afe0db74d889b67a137f56e71fcc`. The resulting kernel release was
-`6.18.38-android17-5-maybe-dirty-4k` with built-in KernelSU and module versioning.
+`6.18.38-android17-5-maybe-dirty-4k` with built-in KernelSU Next and module versioning.
 
 - Exact recipe replay verified all 5,193 module source/build files and 91,829
   common-source entries, including executable bits and symlink targets.
@@ -21,7 +21,7 @@ The tested inputs were Google GKI
 - Both Tuna/Tuna7 device trees passed compilation, overlay-engine agreement,
   preserved bootloader identities and DTBO table verification.
 - The independent CI artifact verifier accepted all 2,524 hashed artifact files,
-  the exact catalog, configuration, source pins, ABI and KernelSU source archive.
+  the exact catalog, configuration, source pins, ABI and KernelSU Next source archive.
 - Nine native packaging regressions passed, including missing modules/config,
   wrong kernel release, altered firmware, missing notices/source and the
   conflicting phone-side RNDIS gadget configuration.
