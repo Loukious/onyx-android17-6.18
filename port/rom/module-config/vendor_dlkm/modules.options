@@ -1,0 +1,1 @@
+options qca_cld3_wcn7750 sta_monitor_coexist=1 ap_monitor_coexist=1 sta_ap_monitor_coexist=1

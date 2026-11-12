@@ -25,10 +25,42 @@ capture contains M1 through M7 with zero AP EAP retries, and the returned
 credential matches the router configuration. The original module and Android
 Wi-Fi connection were restored after testing.
 
+## Native boot loading
+
+The source-build Onyx ROM profile places these options in
+`vendor_dlkm/lib/modules/modules.options`:
+
+```text
+options qca_cld3_wcn7750 sta_monitor_coexist=1 ap_monitor_coexist=1 sta_ap_monitor_coexist=1
+```
+
+The profile records the same line in `port/rom/module-layout.json` and
+`port/rom/module-config/vendor_dlkm/modules.options`. Android's native modprobe
+reads it alongside the matched driver. The driver parameters remain disabled
+by default when no options are supplied, and are read-only after loading.
+
+A driver-only native installation was verified on the development Onyx on
+2026-11-12: fastbootd flashed a reconstructed `vendor_dlkm` image, the optional
+KernelSU WLAN module was removed, and Android loaded the qualified driver and
+all three options after reboot. Wi-Fi reconnected with background scanning
+enabled. This validates that image and kernel combination; it does not qualify
+a complete recovery installer or a different kernel build. See the
+[native installation and compatibility results](../../validation/wlan-native-fastboot-20261112.md).
+
+For a manual image update, rebuild the installed ROM's filesystem with the
+matched driver and options, preserve its remaining files and metadata, and
+regenerate its AVB footer within the existing partition capacity. Keep and
+verify an original image for rollback. Check actual slot extents before
+flashing: the tested phone shared `vendor_dlkm` storage between slots, so that
+driver-only flash changed the bytes visible to both. The complete recovery
+installer's rejection of shared slot extents remains applicable to its broader
+image migration.
+
 ## Keep Android Wi-Fi connected
 
-Patch 0251 adds experimental STA/monitor coexistence for WCN7750. It is
-**disabled by default**. Enable it by loading the matched WLAN module with
+Patch 0251 adds experimental STA/monitor coexistence for WCN7750. The driver
+parameter is **disabled by default**; the native Onyx profile above opts in.
+Enable it on another installation by loading the matched WLAN module with
 `sta_monitor_coexist=1`; the parameter is read-only after loading, so it cannot
 be enabled through sysfs on an already loaded module. Module replacement still
 requires the normal framework shutdown and drain of users of the old driver.
@@ -47,7 +79,8 @@ Channel requests now have these effects:
 | Current mode and request | Result |
 | --- | --- |
 | Shared; identical full channel definition | Success with Android still connected and no radio retune. |
-| Shared; same primary but different width, center or puncturing | Rejected without disconnecting Android. Tools must preserve the full existing definition. |
+| Shared; compatible narrower same-primary channel definition | Success without retuning; the full live owner channel is retained. |
+| Shared; incompatible width, center or puncturing | Rejected without disconnecting Android. |
 | Shared; different supported primary | Android disconnects and the monitor takes exclusive use of the radio. The same `mon0`, ifindex and open capture are retained. |
 | Exclusive; another supported channel definition | The monitor retunes on the same interface. Android remains disconnected. |
 | Unsupported exclusive target | Rejected before a shared Android connection is disconnected. |
