@@ -75570,7 +75570,7 @@
     "executable": false
   },
   "arch/arm64/include/asm/kvm_hyp.h": {
-    "sha256": "845137a275200ab00308aa9d307db16af76d728aed5cd158043fffe4d4ffdafc",
+    "sha256": "758ea794568094c68c3a4e6346c9e49b53819177483b6ce32b4b901cba43adc8",
     "executable": false
   },
   "arch/arm64/include/asm/kvm_hypevents.h": {
@@ -76646,7 +76646,7 @@
     "executable": false
   },
   "arch/arm64/kvm/arm.c": {
-    "sha256": "aefdbdef2c0a6fcf5244e79e30536b13365b0a2489cbab58ba4b82c973b0956a",
+    "sha256": "4f23396b1009d35e0bca3d2d5917faba4d5e2719089f83c4a58cc7481bbd9e2f",
     "executable": false
   },
   "arch/arm64/kvm/at.c": {
@@ -76882,7 +76882,7 @@
     "executable": false
   },
   "arch/arm64/kvm/hyp/nvhe/hyp-main.c": {
-    "sha256": "f0dd78bdc90c53f52c492bd3be65d3713eb09c3cc6e6fc3357ecfd72d9d9272a",
+    "sha256": "460d2a6de1b0e716401bd0b06d87d74dfe7c43697bae6ea3be8797a2193e5874",
     "executable": false
   },
   "arch/arm64/kvm/hyp/nvhe/hyp-smp.c": {
