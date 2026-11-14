@@ -184,6 +184,21 @@ def payload(files, members):
     return ''.join(f'{sha(files[n][0])}  {n}\n' for n in sorted(members)).encode()
 
 
+def installed_payload(files):
+    """Hash files retained through manager extraction and post-install cleanup.
+
+    KernelSU/Magisk omit META-INF during extraction and delete customize.sh,
+    the root README, .git* and system/placeholder after customization. The same
+    manifest is checked during installation and by service.sh after reboot.
+    Nested notices and helper sources remain installed and must stay covered.
+    """
+    members = [name for name in files
+               if name not in ('payload.sha256', 'customize.sh', 'README.md',
+                               'system/placeholder')
+               and not name.startswith(('META-INF/', '.git', 'system/placeholder/'))]
+    return payload(files, members)
+
+
 def build(artifact, identity):
     report = json.loads((artifact / 'report.json').read_text())
     release = identity['kernel_release']
@@ -276,7 +291,8 @@ def build(artifact, identity):
             'author=Loukious\ndescription=Matched WCN7750 monitor mode and frame injection. Reboot to activate.\n').encode(), False),
         'META-INF/com/google/android/update-binary': ((HERE/'wlan-update-binary.sh').read_bytes(), True),
         'META-INF/com/google/android/updater-script': (b'#MAGISK\n', False)}
-    module['payload.sha256'] = (payload(module, ['wlan/'+WLAN, 'module-abi', 'kernel-abi.tsv']), False)
+    module['payload.sha256'] = (installed_payload(module) if version == 2 else
+                               payload(module, ['wlan/'+WLAN, 'module-abi', 'kernel-abi.tsv']), False)
     products = {ak_name: zip_bytes(ak), wlan_name: zip_bytes(module)}
     if version == 2:
         extra.update({'service.sh': (template('extra-service.sh'), True),
@@ -293,7 +309,7 @@ def build(artifact, identity):
                 'author=Loukious\ndescription=Matched Realtek, Ralink and Atheros USB Wi-Fi drivers and firmware. Reboot to activate.\n').encode(), False),
             'META-INF/com/google/android/update-binary': ((HERE/'wlan-update-binary.sh').read_bytes(), True),
             'META-INF/com/google/android/updater-script': (b'#MAGISK\n', False)})
-        extra['payload.sha256'] = (payload(extra, list(extra)), False)
+        extra['payload.sha256'] = (installed_payload(extra), False)
         products[filenames[2]] = zip_bytes(extra)
     metadata['sha256'] = {name: sha(data) for name, data in products.items()}
     products['installers.json'] = (json.dumps(metadata, indent=2)+'\n').encode()
