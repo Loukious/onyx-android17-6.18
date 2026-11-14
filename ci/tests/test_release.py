@@ -366,6 +366,7 @@ class ReleaseTests(unittest.TestCase):
     def test_release_stays_draft_until_complete_upload_verified(self):
         result, commands = self.exercise()
         self.assertEqual(result['status'], 'verified build released')
+        self.assertIs(result['release_ready'], True)
         self.assertEqual(commands[0]['path'], 'repos/owner/repo/releases')
         self.assertIs(commands[0]['data']['draft'], True)
         self.assertEqual(len([c for c in commands if c['filename']]), len(publish_release.FILES) + 2)
@@ -380,21 +381,34 @@ class ReleaseTests(unittest.TestCase):
 
     def test_stale_source_cannot_create_release(self):
         result, commands = self.exercise(stale_source=True)
-        self.assertIn('not promoted', result['error'])
+        self.assertEqual(result, {'status': 'superseded build', 'release_ready': False,
+                                  'built_source': SOURCE, 'accepted_source': 'd' * 40})
+        self.assertEqual(commands, [])
+
+    def test_stale_already_released_inputs_do_not_become_current_ready_state(self):
+        result, commands = self.exercise(stale_source=True, existing=True)
+        self.assertEqual(result, {'status': 'superseded build', 'release_ready': False,
+                                  'built_source': SOURCE, 'accepted_source': 'd' * 40})
+        self.assertNotIn('tag', result)
         self.assertEqual(commands, [])
 
     def test_head_advance_during_upload_cannot_publish_an_older_latest_release(self):
         result, commands = self.exercise(advance_during_upload=True)
-        self.assertIn('advanced during upload', result['error'])
+        self.assertEqual(result, {'status': 'superseded build', 'release_ready': False,
+                                  'built_source': SOURCE, 'accepted_source': 'd' * 40})
+        self.assertTrue(any(c['path'] == 'repos/owner/repo/releases' and c['data']['draft'] is True
+                            for c in commands))
         self.assertTrue(any(c['filename'] for c in commands))
+        self.assertEqual(len([c for c in commands if c['filename']]), len(publish_release.FILES) + 2)
         self.assertFalse(any(c['method'] == 'PATCH' for c in commands))
+        self.assertNotIn('tag', result)
 
     def test_release_only_rerun_uses_original_verified_build_attempt(self):
         environment = {'GITHUB_REPOSITORY': 'owner/repo', 'KONOHA_SOURCE_ROOT': '/fixture/source',
                        'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2', 'BUILD_RUN_ATTEMPT': '1'}
         with patch.dict(os.environ, environment, clear=True), \
                 patch.object(sys, 'argv', ['publish_release.py', 'bundle', SOURCE, KERNEL, KSU]), \
-                patch.object(publish_release, 'publish', return_value={'tag': 'verified-tag'}) as publish, \
+                patch.object(publish_release, 'publish', return_value={'tag': 'verified-tag', 'release_ready': True}) as publish, \
                 patch('builtins.print'):
             publish_release.main()
         self.assertEqual(publish.call_args.args[-2:], ('123', '1'))
@@ -420,6 +434,7 @@ class ReleaseTests(unittest.TestCase):
     def test_existing_complete_release_is_not_overwritten(self):
         result, commands = self.exercise(existing=True)
         self.assertEqual(result['status'], 'verified inputs already released')
+        self.assertIs(result['release_ready'], True)
         self.assertEqual(commands, [])
 
     def test_creation_response_id_works_when_tag_and_listing_never_expose_new_draft(self):
@@ -483,12 +498,50 @@ class ReleaseTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True), \
                 patch.object(sys, 'argv', ['publish_release.py', 'bundle', SOURCE, KERNEL, KSU,
                                           '--build-run-id', '123', '--build-run-attempt', '1']), \
-                patch.object(publish_release, 'publish', return_value={'tag': 'verified-tag'}) as publish, \
+                patch.object(publish_release, 'publish', return_value={'tag': 'verified-tag', 'release_ready': True}) as publish, \
                 patch('builtins.print'):
             publish_release.main()
             self.assertEqual(os.environ['GITHUB_SHA'], 'd' * 40)
             self.assertEqual(os.environ['GITHUB_RUN_ID'], '999')
         self.assertEqual(publish.call_args.args[-2:], ('123', '1'))
+
+    def test_superseded_cli_emits_not_ready_without_accessing_missing_tag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'outputs'
+            environment = {'GITHUB_REPOSITORY': 'owner/repo', 'KONOHA_SOURCE_ROOT': '/fixture/source',
+                           'GITHUB_RUN_ID': '123', 'BUILD_RUN_ATTEMPT': '1', 'GITHUB_OUTPUT': str(output)}
+            skipped = {'status': 'superseded build', 'release_ready': False,
+                       'built_source': SOURCE, 'accepted_source': 'd' * 40}
+            with patch.dict(os.environ, environment, clear=True), \
+                    patch.object(sys, 'argv', ['publish_release.py', 'bundle', SOURCE, KERNEL, KSU]), \
+                    patch.object(publish_release, 'publish', return_value=skipped), patch('builtins.print'):
+                publish_release.main()
+            self.assertEqual(output.read_text().splitlines(), ['release_ready=false'])
+
+    def test_ready_cli_emits_release_tag_and_readiness_together(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'outputs'
+            environment = {'GITHUB_REPOSITORY': 'owner/repo', 'KONOHA_SOURCE_ROOT': '/fixture/source',
+                           'GITHUB_RUN_ID': '123', 'BUILD_RUN_ATTEMPT': '1', 'GITHUB_OUTPUT': str(output)}
+            ready = {'status': 'verified build released', 'release_ready': True, 'tag': 'verified-tag'}
+            with patch.dict(os.environ, environment, clear=True), \
+                    patch.object(sys, 'argv', ['publish_release.py', 'bundle', SOURCE, KERNEL, KSU]), \
+                    patch.object(publish_release, 'publish', return_value=ready), patch('builtins.print'):
+                publish_release.main()
+            self.assertEqual(set(output.read_text().splitlines()),
+                             {'release_ready=true', 'release_tag=verified-tag'})
+
+    def test_invalid_bundle_cli_still_fails_without_readiness_or_tag_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'outputs'
+            environment = {'GITHUB_REPOSITORY': 'owner/repo', 'KONOHA_SOURCE_ROOT': '/fixture/source',
+                           'GITHUB_RUN_ID': '123', 'BUILD_RUN_ATTEMPT': '1', 'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, environment, clear=True), \
+                    patch.object(sys, 'argv', ['publish_release.py', 'bundle', SOURCE, KERNEL, KSU]), \
+                    patch.object(publish_release, 'publish', side_effect=ValueError('Invalid bundle')):
+                with self.assertRaisesRegex(ValueError, 'Invalid bundle'):
+                    publish_release.main()
+            self.assertFalse(output.exists())
 
 
 class ReleaseApiTests(unittest.TestCase):
@@ -637,6 +690,16 @@ class DispatchTests(unittest.TestCase):
 
 
 class WorkflowWiringTests(unittest.TestCase):
+    def test_build_and_recovery_record_state_only_when_release_is_ready(self):
+        root = Path(__file__).resolve().parents[2]
+        for filename in ('build.yml', 'recover-release.yml'):
+            with self.subTest(workflow=filename):
+                workflow = (root / '.github/workflows' / filename).read_text()
+                record_step = workflow.split('- name: Record released source and KernelSU Next revisions', 1)[1]
+                condition = next(line.strip()[4:].strip() for line in record_step.splitlines()
+                                 if line.strip().startswith('if: '))
+                self.assertEqual(condition.strip('"'), "steps.release.outputs.release_ready == 'true'")
+
     def test_release_and_promotion_share_one_serial_job_and_bound_artifact_outputs(self):
         workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/build.yml').read_text()
         release_job = workflow.split('\n  release:\n', 1)[1]

@@ -231,7 +231,10 @@ def publish(repository, bundle, source_root, source, kernel, kernelsu, run_id, a
     identity = validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attempt)
     accepted = api(prefix + '/git/ref/heads/' + TRACK['source_branch'])['object']['sha']
     if accepted != source:
-        raise ValueError('Source branch advanced or candidate was not promoted; refusing release')
+        # Accepted source can advance while the full build is running.
+        # Keep the verified artifact, but neither publish nor record old inputs.
+        return {'status': 'superseded build', 'release_ready': False,
+                'built_source': source, 'accepted_source': accepted}
     version = identity['kernel_release'].split('-')[0]
     tag = f'gki-{version}-s{source[:12]}-k{kernelsu[:12]}'
     assets = sorted(bundle / name for name in bundle_files(identity) | {'release.json', 'SHA256SUMS'})
@@ -242,7 +245,8 @@ def publish(repository, bundle, source_root, source, kernel, kernelsu, run_id, a
         if not existing['draft']:
             if {asset['name'] for asset in existing['assets']} != asset_names or any(asset['size'] < 1 for asset in existing['assets']):
                 raise ValueError('Published release has incomplete assets; refusing to overwrite it')
-            return {'status': 'verified inputs already released', 'tag': tag, 'url': existing['html_url']}
+            return {'status': 'verified inputs already released', 'release_ready': True,
+                    'tag': tag, 'url': existing['html_url']}
     notes = release_notes(repository, identity)
     notes += google_changelog.summary(list(listed(prefix + '/releases')), tag, kernel)
     if not existing:
@@ -292,13 +296,14 @@ def publish(repository, bundle, source_root, source, kernel, kernelsu, run_id, a
     # draft as Latest must not supersede a newer accepted-source release.
     accepted = api(prefix + '/git/ref/heads/' + TRACK['source_branch'])['object']['sha']
     if accepted != source:
-        raise ValueError('Source branch advanced during upload; leaving the release unpublished')
+        return {'status': 'superseded build', 'release_ready': False,
+                'built_source': source, 'accepted_source': accepted}
     published = api(release_path, method='PATCH', data={
         'draft': False, 'make_latest': 'true', 'name': release_title(identity), 'body': notes})
     release_inputs(published, tag, source, kernel, kernelsu)
     if published['id'] != release_id or published.get('draft') is not False:
         raise ValueError('Release publication did not return the expected published release')
-    return {'status': 'verified build released', 'tag': tag,
+    return {'status': 'verified build released', 'release_ready': True, 'tag': tag,
             'url': f'https://github.com/{repository}/releases/tag/{tag}'}
 
 
@@ -316,7 +321,9 @@ def main():
                      args.build_run_id, args.build_run_attempt)
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
-            stream.write('release_tag=' + result['tag'] + '\n')
+            stream.write('release_ready=' + str(result['release_ready']).lower() + '\n')
+            if result['release_ready']:
+                stream.write('release_tag=' + result['tag'] + '\n')
     print(json.dumps(result, indent=2))
 
 

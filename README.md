@@ -142,6 +142,9 @@ attempt, so a complete rerun can upload fresh outputs and a release-only rerun
 reuses the original successful build's artifact and verification. Promotion and
 release share one serial job group; the accepted head is checked again immediately
 before publication, preventing an older upload from becoming Latest afterward.
+If the accepted source advances while a build or upload is running, publication
+finishes with a superseded-build skip. It leaves any uploaded draft unpublished
+and does not record those older inputs as the current release.
 These automatic releases establish
 build verification; hardware validation remains a separate step.
 
