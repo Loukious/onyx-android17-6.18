@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import export_artifacts
 import publish_release
 import recovery_assets
+import release_naming
 import test_release
 
 
@@ -58,7 +59,7 @@ class CompleteRecoveryAssets(unittest.TestCase):
                 patch.object(recovery_assets, 'modinfo', side_effect=self.module_info):
             source, artifact, bundle, identity = self.fixture(Path(temporary))
             products = recovery_assets.build(artifact, identity)
-            zip_name, meta_name = recovery_assets.names(identity['kernel_release'])
+            zip_name, meta_name = recovery_assets.names(identity['kernel_release'], release_naming.asset_format(identity))
             self.assertEqual(set(products), {zip_name, meta_name})
             with zipfile.ZipFile(io.BytesIO(products[zip_name])) as archive:
                 self.assertEqual(archive.read('payload/Image'), (artifact / 'gki/Image').read_bytes())
@@ -85,15 +86,13 @@ class CompleteRecoveryAssets(unittest.TestCase):
                 patch.object(recovery_assets, 'modinfo', side_effect=self.module_info):
             source, artifact, bundle, identity = self.fixture(Path(temporary))
             result = recovery_assets.add_to_bundle(bundle, source)
-            self.assertEqual(set(result['full_recovery']), set(recovery_assets.names(identity['kernel_release'])))
+            self.assertEqual(set(result['full_recovery']), set(recovery_assets.names(identity['kernel_release'], release_naming.asset_format(identity))))
             self.assertEqual(recovery_assets.add_to_bundle(bundle, source), result)
-            filename = recovery_assets.names(identity['kernel_release'])[0]
+            filename = recovery_assets.names(identity['kernel_release'], release_naming.asset_format(identity))[0]
             (bundle / filename).write_bytes(b'changed installer')
             result['sha256'][filename] = recovery_assets.digest(b'changed installer')
             test_release.write_json(bundle / 'release.json', result)
-            (bundle / 'SHA256SUMS').write_text(''.join(
-                recovery_assets.digest(path.read_bytes()) + '  ' + path.relative_to(bundle).as_posix() + '\n'
-                for path in sorted(bundle.rglob('*')) if path.is_file() and path.name != 'SHA256SUMS'))
+            release_naming.write_checksums(bundle)
             with self.assertRaisesRegex(ValueError, 'Complete recovery installer differs'):
                 publish_release.validate_bundle(bundle, source, test_release.SOURCE, test_release.KERNEL, test_release.KSU, '123', '1')
 

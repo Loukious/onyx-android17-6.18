@@ -232,18 +232,18 @@ class EnrichedBundleTests(unittest.TestCase):
             # Include the nested device-tree report, excluding only the top-level report.
             report['sha256']['devicetrees/report.json'] = installers.sha((artifact/'devicetrees/report.json').read_bytes())
             release_tests.write_json(artifact/'report.json', report)
+            import test_extra_installers
+            test_extra_installers.enrich_fixture(artifact, report, source)
             bundle = root/'bundle'
             export_artifacts.export(workspace, bundle, source, release_tests.SOURCE, '123', '1')
             identity = installers.add_to_bundle(bundle, source)
-            self.assertEqual(len(identity['installers']), 3)
+            self.assertEqual(len(identity['installers']), 4)
             self.assertEqual(installers.add_to_bundle(bundle, source), identity)
-            filename = installers.names(identity['kernel_release'])[1]
+            filename = installers.names(identity['kernel_release'], identity.get('asset_format', 1))[1]
             (bundle/filename).write_bytes(b'altered installer')
             identity['sha256'][filename] = installers.sha((bundle/filename).read_bytes())
             release_tests.write_json(bundle/'release.json', identity)
-            (bundle/'SHA256SUMS').write_text(''.join(
-                installers.sha(p.read_bytes())+'  '+p.relative_to(bundle).as_posix()+'\n'
-                for p in sorted(bundle.rglob('*')) if p.is_file() and p.name != 'SHA256SUMS'))
+            installers.write_checksums(bundle)
             with self.assertRaisesRegex(ValueError, 'Installer differs'):
                 publish_release.validate_bundle(bundle, source, release_tests.SOURCE,
                     release_tests.KERNEL, release_tests.KSU, '123', '1')

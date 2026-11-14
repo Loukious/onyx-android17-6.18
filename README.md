@@ -196,15 +196,16 @@ inventory, validation results and output hashes for the ROM being packaged.
 
 | Asset | Purpose |
 | --- | --- |
-| **`Onyx-Complete-<kernel-release>.zip`** | Recovery installer for the kernel, WLAN/all matching modules, device trees and recovery modules |
-| **AnyKernel3 ZIP** | Kernel-only update for an existing installation whose modules already match |
-| `nethunter-wlan-injection-<kernel-release>.zip` | Optional KernelSU Next/Magisk module for the matching internal WCN7750 driver |
-| `konoha-gki-and-modules.tar.gz` | Build outputs, inputs, ABI and logs for ROM integration; not directly flashable |
+| **`Onyx-GKI-6.18-Full-Recovery-Installer.zip`** | Recovery installer for the kernel, all matching drivers/module partitions, device trees and recovery modules; repacks the installed ROM's ramdisks |
+| **`Onyx-GKI-6.18-AnyKernel3.zip`** | Kernel-only update for an existing installation whose modules already match |
+| `Onyx-NetHunter-Internal-WiFi-KSU-Module.zip` | Optional KernelSU Next/Magisk module for the phone's internal WCN7750 monitor/injection driver |
+| `Onyx-NetHunter-External-WiFi-KSU-Module.zip` | KernelSU Next/Magisk module for supported external USB Wi-Fi adapters and their firmware |
+| `Onyx-GKI-6.18-ROM-Integration.tar.gz` | Developer download: complete matching build outputs, inputs, ABI and logs for ROM integration; not directly flashable |
 | `SHA256SUMS`, `release.json`, `installers.json`, `full-recovery.json` | Checksums, exact build inputs and installer provenance |
 
 ### Install the complete kernel and drivers
 
-Use **`Onyx-Complete-<kernel-release>.zip`** to update the full kernel/module set
+Use **`Onyx-GKI-6.18-Full-Recovery-Installer.zip`** to update the full kernel/module set
 or migrate a compatible Onyx 6.6 ROM. It repacks the installed ROM's own images,
 so compatible Onyx ROMs can share the same release ZIP. The ROM's recovery
 application, files, labels, configuration and parallel module loading are
@@ -217,7 +218,7 @@ according to the ROM's layout. WLAN does not require a separate fastboot flash.
    unlocked Onyx whose ROM already has AVB verification and verity disabled.
    Mount `/metadata` and writable backup storage, such as decrypted `/data`.
 3. Install the ZIP from storage or select **Install update / ADB sideload** and
-   run `adb sideload Onyx-Complete-<kernel-release>.zip` on the PC.
+   run `adb.exe sideload Onyx-GKI-6.18-Full-Recovery-Installer.zip` on the PC.
 4. Wait for successful installation, then reboot. The installer prints the
    persistent backup path and verifies every written partition.
 
@@ -255,10 +256,21 @@ replacement fails. Remove the module and reboot to return to the ROM's normal
 WLAN loading. A ROM or complete ZIP already shipping that driver needs no
 additional module.
 
+The external Wi-Fi ZIP adds the matching Realtek `rtl8xxxu`, Ralink `rt2800usb`
+and Atheros `ath9k_htc` drivers, their dependencies and the required firmware.
+Install it through KernelSU Next or Magisk on the exact matching release kernel,
+then reboot. It keeps providers that Android already loaded and does not replace
+the phone's active Wi-Fi stack. Adapter support depends on the chipset; monitor
+mode and injection still need testing with the actual adapter.
+
 Older releases may contain only the two smaller installers. Use a release that
 actually lists the complete ZIP for the full recovery installation above. The
-`.tar.gz` archive is for maintainers building or integrating matching images;
-flashing that archive directly is not an installation method.
+`Onyx-GKI-6.18-ROM-Integration.tar.gz` archive is for maintainers building or
+integrating matching images and developers inspecting an exact build. Normal
+ROM and installer users do not need to download it. It contains the kernel,
+matching modules, device trees, firmware, configuration, ABI, source inputs and
+verification logs; keeping these outputs together prevents mixing drivers from
+different builds. Flashing that archive directly is not an installation method.
 
 ## Manual workflow
 
