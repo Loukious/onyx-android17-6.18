@@ -157,6 +157,12 @@ images and DLKM partitions from that single build. Userspace headers are generat
 from the same synced GKI/module source. No release Image or module binaries are
 downloaded for this route. KernelSU Next dev is resolved on every build.
 
+The device product also inherits `port/rom/firmware.mk`, which installs all 16
+USB Wi-Fi firmware files under `/vendor/firmware` with their original request
+names. Onyx's existing sysfs firmware fallback and ueventd search paths load them.
+Their licenses, manifest and matching ATH firmware source are included under
+`/vendor/etc/firmware-notices/onyx-usb-wifi`. The ROM's ODM firmware remains intact.
+
 Local kernel objects persist under
 `out/target/product/onyx/obj/KERNEL_BAZEL_OUT/kleaf-cache`. Kleaf's supported
 `--config=local --cache_dir=...` mode reuses unchanged compilation outputs; source,
