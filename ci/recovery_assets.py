@@ -13,14 +13,17 @@ import tarfile
 import tempfile
 
 import installer_assets
+import release_naming
 
 HERE = Path(__file__).resolve().parent / 'recovery'
 ROOT = HERE.parents[1]
 SOFT_OMISSIONS = {'subsys_pil_tz', 'qcom_arm_smmu_mod', 'phy_msm_snps_hs'}
 
 
-def names(release):
-    installer_assets.names(release)
+def names(release, asset_format=1):
+    installer_assets.names(release, asset_format)
+    if asset_format == 2:
+        return ['Onyx-GKI-6.18-Full-Recovery-Installer.zip', 'full-recovery.json']
     return [f'Onyx-Complete-{release}.zip', 'full-recovery.json']
 
 
@@ -238,9 +241,13 @@ def build(artifact, identity):
                   'META-INF/com/google/android/update-binary': ((HERE / 'update-binary.sh').read_bytes(), True),
                   'META-INF/com/google/android/updater-script': (b'# Onyx complete kernel installer\n', False),
                   'README.md': ((HERE / 'README.md').read_bytes(), False)})
+    if release_naming.asset_format(identity) == 2:
+        readme = files['README.md'][0].replace(
+            b'Onyx-Complete-<kernel-release>.zip', b'Onyx-GKI-6.18-Full-Recovery-Installer.zip')
+        files['README.md'] = (readme.replace(b'adb sideload ', b'adb.exe sideload '), False)
     files['SHA256SUMS'] = (installer_assets.payload(files, files), False)
     archive = installer_assets.zip_bytes(files)
-    zip_name, meta_name = names(identity['kernel_release'])
+    zip_name, meta_name = names(identity['kernel_release'], release_naming.asset_format(identity))
     metadata = {'format': 1, 'source_revision': identity['source_revision'], 'common_revision': identity['common_revision'],
                 'kernelsu_revision': identity['kernelsu_revision'], 'kernel_release': identity['kernel_release'],
                 'sha256': {zip_name: digest(archive)}, 'modules': len(json.loads(files['kernel.json'][0])['modules']),
@@ -264,7 +271,7 @@ def add_to_bundle(bundle, source):
     if identity.get('full_recovery'):
         return identity
     with tempfile.TemporaryDirectory(prefix='onyx-complete-installer-') as temp:
-        with tarfile.open(bundle / 'konoha-gki-and-modules.tar.gz') as archive:
+        with tarfile.open(bundle / release_naming.archive_name(release_naming.asset_format(identity))) as archive:
             archive.extractall(temp, filter='data')  # Complete archive checked above.
         products = build(Path(temp) / identity['artifact_root'], identity)
     for name, data in products.items():
@@ -272,9 +279,7 @@ def add_to_bundle(bundle, source):
     identity['full_recovery'] = sorted(products)
     identity['sha256'].update({name: digest(data) for name, data in products.items()})
     (bundle / 'release.json').write_text(json.dumps(identity, indent=2) + '\n')
-    hashes = {p.relative_to(bundle).as_posix(): installer_assets.sha(p.read_bytes())
-              for p in sorted(bundle.rglob('*')) if p.is_file() and p.name != 'SHA256SUMS'}
-    (bundle / 'SHA256SUMS').write_text(''.join(f'{value}  {name}\n' for name, value in hashes.items()))
+    release_naming.write_checksums(bundle)
     return identity
 
 

@@ -14,26 +14,28 @@ from verify_artifacts import digest, relative, verify
 import installer_assets
 import recovery_assets
 import google_changelog
+from release_naming import archive_name, artifact_name, asset_format, checksum_paths, release_title
 
 TRACK = json.loads((Path(__file__).resolve().parent / 'upstream.json').read_text())
 FILES = {
-    'report.json', 'build.log', 'konoha-gki-and-modules.tar.gz',
+    'report.json', 'build.log', archive_name(),
     'kernel-abi/Module.symvers', 'kernel-abi/kernel.release', 'kernel-abi/kernel_aarch64_dot_config',
 }
 
 
 def bundle_files(identity):
+    version = asset_format(identity)
     extra = identity.get('installers', [])
-    if extra and set(extra) != set(installer_assets.names(identity['kernel_release'])) | {'installers.json'}:
+    if extra and set(extra) != set(installer_assets.names(identity['kernel_release'], version)) | {'installers.json'}:
         raise ValueError('Invalid installer asset inventory')
     if len(extra) != len(set(extra)):
         raise ValueError('Duplicated installer assets')
     complete = identity.get('full_recovery', [])
-    if complete and set(complete) != set(recovery_assets.names(identity['kernel_release'])):
+    if complete and set(complete) != set(recovery_assets.names(identity['kernel_release'], version)):
         raise ValueError('Invalid complete recovery asset inventory')
     if len(complete) != len(set(complete)):
         raise ValueError('Duplicated complete recovery assets')
-    return FILES | set(extra) | set(complete)
+    return (FILES - {archive_name()}) | {archive_name(version)} | set(extra) | set(complete)
 
 
 def api(path, optional=False, *, method='GET', data=None, input_file=None):
@@ -88,9 +90,10 @@ def release_inputs(release, tag, source, kernel, kernelsu):
 
 def validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attempt):
     identity = json.loads((bundle / 'release.json').read_text())
+    version = asset_format(identity)
     expected = {'source_revision': source, 'common_revision': kernel, 'kernelsu_revision': kernelsu,
                 'run_id': str(run_id), 'run_attempt': str(attempt),
-                'artifact_name': f'Konoha-Android17-6.18-{run_id}-{attempt}'}
+                'artifact_name': artifact_name(run_id, attempt, version)}
     if any(identity.get(key) != value for key, value in expected.items()):
         raise ValueError('Release bundle belongs to different build inputs or run')
     actual = {p.relative_to(bundle).as_posix() for p in bundle.rglob('*') if p.is_file()}
@@ -104,8 +107,10 @@ def validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attem
             raise ValueError('Invalid or duplicated release checksum')
         relative(match[2])
         hashes[match[2]] = match[1]
-    if set(hashes) != actual - {'SHA256SUMS'} or set(identity['sha256']) != files:
+    labels = checksum_paths(actual - {'SHA256SUMS'}, version)
+    if set(hashes) != set(labels) or set(identity['sha256']) != files:
         raise ValueError('Release checksums do not cover every asset')
+    hashes = {labels[name]: checksum for name, checksum in hashes.items()}
     for name, checksum in hashes.items():
         if digest(bundle / name) != checksum:
             raise ValueError('Release asset changed: ' + name)
@@ -114,9 +119,9 @@ def validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attem
     root_name = str(relative(identity['artifact_root']))
     if '/' in root_name:
         raise ValueError('Invalid archive root')
-    with tempfile.TemporaryDirectory(prefix='konoha-release-verify-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='onyx-release-verify-') as temporary:
         root = Path(temporary)
-        with tarfile.open(bundle / 'konoha-gki-and-modules.tar.gz', 'r:gz') as archive:
+        with tarfile.open(bundle / archive_name(version), 'r:gz') as archive:
             seen = set()
             for member in archive.getmembers():
                 name = str(relative(member.name.rstrip('/')))
@@ -149,21 +154,16 @@ def release_notes(repository, identity):
     source, kernel, kernelsu = (identity[k] for k in ('source_revision', 'common_revision', 'kernelsu_revision'))
     run_id, attempt = identity['run_id'], identity['run_attempt']
     url = f'https://github.com/{repository}/actions/runs/{run_id}'
+    version = asset_format(identity)
     notes = (
-        f'Automatically built Android 17 GKI **{identity["kernel_release"]}**, '
+        'Automatically built **Onyx GKI 6.18 for Android 17**, '
         f'KernelSU Next dev, and all **{identity["modules"]} Onyx platform modules**.\n\n'
-        f'- Source commit: `{source}`\n- Google GKI revision: `{kernel}`\n'
-        f'- KernelSU Next revision: `{kernelsu}`\n- Verified build: {url} (attempt {attempt})\n\n'
-        'Complete source replay, module import CRCs, artifact hashes and both device-tree variants passed. '
-        'The archive includes matching kernel, modules, device trees, ABI, configuration, source inputs and logs; '
-        'release.json and SHA256SUMS identify the exact assets.\n\n'
-        'Build and installer checks do not establish device boot or hardware validation. '
-        f'[Installation and recovery ZIP instructions](https://github.com/{repository}/blob/ci/README.md#install-a-release).\n'
     )
+    if identity.get('full_recovery') or identity.get('installers'):
+        notes += '### Installers\n\n'
     if identity.get('full_recovery'):
-        complete, _ = recovery_assets.names(identity['kernel_release'])
+        complete, _ = recovery_assets.names(identity['kernel_release'], version)
         notes += (
-            '\nComplete recovery installer:\n\n'
             f'- **`{complete}`** updates the active slot\'s kernel, WLAN and matching modules, '
             'device trees, and recovery modules. It repacks the installed ROM\'s own boot and recovery '
             'ramdisks, retaining its files, labels, boot configuration and module options.\n'
@@ -177,18 +177,40 @@ def release_notes(repository, identity):
             'and transaction validation; it has not been flashed on a device.\n'
         )
     if identity.get('installers'):
-        ak, wlan = installer_assets.names(identity['kernel_release'])
+        ak, wlan, *external = installer_assets.names(identity['kernel_release'], version)
         notes += (
-            '\nInstallable ZIPs:\n\n'
             f'- `{ak}` — AnyKernel3 kernel update for Onyx with matching Android 17 / 6.18 modules. '
             'Checks installed DLKM and vendor-ramdisk module CRCs before writing boot.\n'
             f'- `{wlan}` — KernelSU Next/Magisk internal WCN7750 monitor-mode and frame-injection module. '
-            'Install after booting the matching kernel, then reboot.\n\n'
+            'Install after booting the matching kernel, then reboot.\n'
+        )
+        if external:
+            notes += (
+                f'- `{external[0]}` — KernelSU Next/Magisk external USB Wi-Fi driver and firmware module '
+                'for the included Realtek, Ralink/MediaTek and Atheros adapters. '
+                'Install on the matching kernel, then reboot.\n'
+            )
+        notes += (
+            '\n'
             'A kernel-only ZIP cannot migrate a 6.6 ROM or a different KMI generation to 6.18. '
             + ('Use the complete recovery ZIP for compatible layouts. ' if identity.get('full_recovery') else
                'Use the matched ROM/module migration procedure for that transition. ') +
-            '`installers.json` binds both ZIPs to the verified kernel and WLAN binaries.\n'
+            '`installers.json` binds the manager and kernel installers to the verified build inputs.\n'
         )
+    notes += (
+        '\n### For ROM maintainers and developers\n\n'
+        f'`{archive_name(version)}` is the complete build-output archive for ROM integration and '
+        'installer generation. It contains the matching kernel, modules, device trees, firmware, ABI, '
+        'configuration, source inputs and logs. It is not directly flashable; users installing a ROM '
+        'or an installer ZIP do not normally need it.\n\n'
+        'Complete source replay, module import CRCs, artifact hashes and both device-tree variants passed. '
+        '`release.json` and `SHA256SUMS` identify the exact assets. Build and installer checks do not '
+        'establish device boot or adapter injection validation. '
+        f'[Installation instructions](https://github.com/{repository}/blob/ci/README.md#install-a-release).\n\n'
+        f'- Exact kernel release: `{identity["kernel_release"]}`\n'
+        f'- Source commit: `{source}`\n- Google GKI revision: `{kernel}`\n'
+        f'- KernelSU Next revision: `{kernelsu}`\n- Verified build: {url} (attempt {attempt})\n'
+    )
     return notes
 
 
@@ -229,7 +251,7 @@ def publish(repository, bundle, source_root, source, kernel, kernelsu, run_id, a
         # later read, upload and publication instead of resolving the tag again.
         existing = api(prefix + '/releases', method='POST', data={
             'tag_name': tag, 'target_commitish': source, 'draft': True,
-            'name': f'Android 17 GKI {version} / KernelSU Next', 'body': notes,
+            'name': release_title(identity), 'body': notes,
         })
         release_inputs(existing, tag, source, kernel, kernelsu)
         if existing.get('draft') is not True:
@@ -271,7 +293,8 @@ def publish(repository, bundle, source_root, source, kernel, kernelsu, run_id, a
     accepted = api(prefix + '/git/ref/heads/' + TRACK['source_branch'])['object']['sha']
     if accepted != source:
         raise ValueError('Source branch advanced during upload; leaving the release unpublished')
-    published = api(release_path, method='PATCH', data={'draft': False, 'make_latest': 'true', 'body': notes})
+    published = api(release_path, method='PATCH', data={
+        'draft': False, 'make_latest': 'true', 'name': release_title(identity), 'body': notes})
     release_inputs(published, tag, source, kernel, kernelsu)
     if published['id'] != release_id or published.get('draft') is not False:
         raise ValueError('Release publication did not return the expected published release')

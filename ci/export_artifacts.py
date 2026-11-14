@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 
 from verify_artifacts import digest, verify
+from release_naming import ASSET_FORMAT, archive_name, artifact_name, write_checksums
 
 
 def export(workspace, output, source_root, source_revision, run_id, run_attempt):
@@ -23,7 +24,7 @@ def export(workspace, output, source_root, source_revision, run_id, run_attempt)
     output.mkdir(parents=True, exist_ok=False)
     for name in ('report.json', 'build.log'):
         shutil.copyfile(artifact / name, output / name)
-    with tarfile.open(output / 'konoha-gki-and-modules.tar.gz', 'w:gz') as tar:
+    with tarfile.open(output / archive_name(ASSET_FORMAT), 'w:gz') as tar:
         tar.add(artifact, arcname=artifact.name)
     abi = output / 'kernel-abi'
     abi.mkdir()
@@ -33,13 +34,13 @@ def export(workspace, output, source_root, source_revision, run_id, run_attempt)
         'source_revision': source_revision, 'common_revision': pins['common']['revision'],
         'kernelsu_revision': report['kernelsu_next']['revision'], 'kernel_release': report['kernel_release'],
         'modules': count, 'run_id': str(run_id), 'run_attempt': str(run_attempt),
-        'artifact_name': f'Konoha-Android17-6.18-{run_id}-{run_attempt}',
+        'asset_format': ASSET_FORMAT,
+        'artifact_name': artifact_name(run_id, run_attempt, ASSET_FORMAT),
         'artifact_root': artifact.name,
         'sha256': {p.relative_to(output).as_posix(): digest(p) for p in sorted(output.rglob('*')) if p.is_file()},
     }
     (output / 'release.json').write_text(json.dumps(identity, indent=2) + '\n')
-    manifest = {p.relative_to(output).as_posix(): digest(p) for p in sorted(output.rglob('*')) if p.is_file()}
-    (output / 'SHA256SUMS').write_text(''.join(f'{checksum}  {name}\n' for name, checksum in manifest.items()))
+    write_checksums(output)
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
             for key in ('kernel_revision', 'kernelsu_revision'):

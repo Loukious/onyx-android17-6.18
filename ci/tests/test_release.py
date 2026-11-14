@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -17,6 +18,7 @@ import publish_release
 import recover_release
 import track_upstream
 import verify_artifacts
+import release_naming
 
 SOURCE, KERNEL, KSU = 'a' * 40, 'b' * 40, 'c' * 40
 RELEASE = '6.18.38-android17-5-maybe-dirty-4k'
@@ -97,8 +99,9 @@ class ArtifactTests(unittest.TestCase):
                 first = export_artifacts.export(workspace, root / 'bundle1', source, SOURCE, '123', '1')
                 second = export_artifacts.export(workspace, root / 'bundle2', source, SOURCE, '123', '2')
             self.assertNotEqual(first['artifact_name'], second['artifact_name'])
-            self.assertIn('artifact_name=Konoha-Android17-6.18-123-1', outputs.read_text())
-            self.assertIn('artifact_name=Konoha-Android17-6.18-123-2', outputs.read_text())
+            self.assertEqual(first['asset_format'], 2)
+            self.assertIn('artifact_name=Onyx-GKI-123-1', outputs.read_text())
+            self.assertIn('artifact_name=Onyx-GKI-123-2', outputs.read_text())
             self.assertIn('build_attempt=1', outputs.read_text())
             self.assertIn('build_attempt=2', outputs.read_text())
 
@@ -164,18 +167,86 @@ class ArtifactTests(unittest.TestCase):
             source, workspace, artifact, report = fixture(root)
             bundle = root / 'bundle'
             identity = export_artifacts.export(workspace, bundle, source, SOURCE, '123', '1')
-            archive_path = bundle / 'konoha-gki-and-modules.tar.gz'
+            archive_path = bundle / release_naming.archive_name()
             with tarfile.open(archive_path, 'w:gz') as archive:
                 entry = tarfile.TarInfo('../escaped')
                 entry.size = 3
                 archive.addfile(entry, io.BytesIO(b'bad'))
-            identity['sha256']['konoha-gki-and-modules.tar.gz'] = verify_artifacts.digest(archive_path)
+            identity['sha256'][release_naming.archive_name()] = verify_artifacts.digest(archive_path)
             write_json(bundle / 'release.json', identity)
-            hashes = {p.relative_to(bundle).as_posix(): verify_artifacts.digest(p)
-                      for p in bundle.rglob('*') if p.is_file() and p.name != 'SHA256SUMS'}
-            (bundle / 'SHA256SUMS').write_text(''.join(f'{checksum}  {name}\n' for name, checksum in hashes.items()))
+            release_naming.write_checksums(bundle)
             with self.assertRaisesRegex(ValueError, 'Unsafe artifact path'):
                 publish_release.validate_bundle(bundle, source, SOURCE, KERNEL, KSU, '123', '1')
+
+    def test_legacy_bundle_keeps_exact_run_and_archive_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, workspace, artifact, report = fixture(root)
+            bundle = root / 'bundle'
+            identity = export_artifacts.export(workspace, bundle, source, SOURCE, '123', '1')
+            (bundle / release_naming.archive_name()).rename(bundle / release_naming.archive_name(1))
+            identity.pop('asset_format')
+            identity['artifact_name'] = release_naming.artifact_name('123', '1', 1)
+            identity['sha256'][release_naming.archive_name(1)] = identity['sha256'].pop(release_naming.archive_name())
+            write_json(bundle / 'release.json', identity)
+            release_naming.write_checksums(bundle)
+            self.assertEqual(publish_release.validate_bundle(bundle, source, SOURCE, KERNEL, KSU, '123', '1'), identity)
+            identity['artifact_name'] = release_naming.artifact_name('123', '1', 2)
+            write_json(bundle / 'release.json', identity)
+            with self.assertRaisesRegex(ValueError, 'different build inputs'):
+                publish_release.validate_bundle(bundle, source, SOURCE, KERNEL, KSU, '123', '1')
+
+    def test_unknown_or_coerced_asset_format_is_rejected(self):
+        for version in (0, 3, True, '2', None):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'asset format'):
+                release_naming.asset_format({'asset_format': version})
+
+    def test_downloaded_assets_pass_public_checksum_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, workspace, artifact, report = fixture(root)
+            bundle, downloaded = root / 'bundle', root / 'downloaded'
+            export_artifacts.export(workspace, bundle, source, SOURCE, '123', '1')
+            downloaded.mkdir()
+            for path in bundle.rglob('*'):
+                if path.is_file():
+                    shutil.copyfile(path, downloaded / path.name)
+            result = subprocess.run(['sha256sum', '-c', 'SHA256SUMS'], cwd=downloaded,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn('kernel-abi/', (downloaded / 'SHA256SUMS').read_text())
+
+
+class NamingTests(unittest.TestCase):
+    def test_release_title_uses_build_date_without_patch_or_uname(self):
+        title = release_naming.release_title({'artifact_root': '20261113T123456123456Z'})
+        self.assertEqual(title, 'Onyx GKI 6.18 / KernelSU Next — 2026-11-13')
+        self.assertNotIn('Konoha', title)
+        self.assertNotIn('6.18.39', title)
+        self.assertNotIn('android17', title)
+
+    def test_rom_archive_is_named_for_its_developer_purpose(self):
+        self.assertEqual(release_naming.archive_name(), 'Onyx-GKI-6.18-ROM-Integration.tar.gz')
+        self.assertEqual(release_naming.archive_name(1), 'konoha-gki-and-modules.tar.gz')
+
+    def test_duplicate_download_filenames_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'colliding download filenames'):
+            release_naming.checksum_paths({'one/report.json', 'two/report.json'}, 2)
+
+    def test_release_notes_separate_installers_from_rom_integration_download(self):
+        identity = {'asset_format': 2, 'kernel_release': RELEASE, 'source_revision': SOURCE,
+                    'common_revision': KERNEL, 'kernelsu_revision': KSU, 'run_id': '123',
+                    'run_attempt': '1', 'modules': 400, 'installers': ['present'],
+                    'full_recovery': ['present']}
+        notes = publish_release.release_notes('owner/repo', identity)
+        installers, developer = notes.split('### For ROM maintainers and developers', 1)
+        for name in ('Onyx-GKI-6.18-AnyKernel3.zip', 'Onyx-GKI-6.18-Full-Recovery-Installer.zip',
+                     'Onyx-NetHunter-Internal-WiFi-KSU-Module.zip', 'Onyx-NetHunter-External-WiFi-KSU-Module.zip'):
+            self.assertIn(name, installers)
+        self.assertNotIn(release_naming.archive_name(), installers)
+        self.assertIn(release_naming.archive_name(), developer)
+        self.assertIn('not directly flashable', developer)
+        self.assertIn(RELEASE, developer)
 
 
 class ReleaseTests(unittest.TestCase):
@@ -227,6 +298,7 @@ class ReleaseTests(unittest.TestCase):
                     self.assertEqual(data['tag_name'], tag)
                     self.assertEqual(data['target_commitish'], SOURCE)
                     self.assertIs(data['draft'], True)
+                    self.assertEqual(data['name'], 'Onyx GKI 6.18 / KernelSU Next — build 123.1')
                     self.assertTrue(all(value in data['body'] for value in (SOURCE, KERNEL, KSU)))
                     created = True
                     result = release()
@@ -254,6 +326,7 @@ class ReleaseTests(unittest.TestCase):
                     self.assertEqual(stored, assets)
                     self.assertIs(data['draft'], False)
                     self.assertEqual(data['make_latest'], 'true')
+                    self.assertEqual(data['name'], 'Onyx GKI 6.18 / KernelSU Next — build 123.1')
                     self.assertTrue(all(value in data['body'] for value in (SOURCE, KERNEL, KSU)))
                     published = True
                     return release()
@@ -375,7 +448,7 @@ class ReleaseTests(unittest.TestCase):
                          ['repos/owner/repo/releases/assets/101'])
         uploads = [c['filename'] for c in commands if c['filename']]
         self.assertEqual(len(uploads), len(publish_release.FILES) + 1)
-        self.assertNotIn('SHA256SUMS', uploads)
+        self.assertNotIn(release_naming.archive_name(), uploads)
         self.assertFalse(any(c['path'] == 'repos/owner/repo/releases' for c in commands))
 
     def test_wrong_hidden_draft_is_rejected_before_upload(self):
@@ -485,6 +558,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result, {'build_run_id': '123', 'build_attempt': '1', 'artifact_id': '456',
                                   'artifact_name': 'Konoha-Android17-6.18-123-1', 'ci_revision': 'd' * 40})
 
+    def test_current_named_artifact_can_be_recovered(self):
+        artifact = {**self.fixture()[2], 'name': 'Onyx-GKI-123-1'}
+        self.assertEqual(self.select(artifacts=[artifact])['artifact_name'], 'Onyx-GKI-123-1')
+
+    def test_both_legacy_and_current_names_for_same_attempt_are_ambiguous(self):
+        artifact = self.fixture()[2]
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            self.select(artifacts=[artifact, {**artifact, 'id': 457, 'name': 'Onyx-GKI-123-1'}])
+
     def test_wrong_run_attempt_workflow_branch_or_fork_is_rejected(self):
         for changed in [{'id': 999}, {'run_attempt': 2}, {'head_branch': 'android17-6.18-lts'},
                         {'path': '.github/workflows/other.yml'},
@@ -522,7 +604,7 @@ class RecoveryTests(unittest.TestCase):
             identity = export_artifacts.export(workspace, bundle, source, SOURCE, '123', '1')
             self.assertEqual(recover_release.inputs(bundle, '123', '1'),
                              {'source_revision': SOURCE, 'kernel_revision': KERNEL, 'kernelsu_revision': KSU})
-            for changed in [{'run_id': '999'}, {'run_attempt': '2'}, {'artifact_name': 'other'},
+            for changed in [{'run_id': '999'}, {'run_attempt': '2'}, {'artifact_name': 'other'}, {'asset_format': 3},
                             {'source_revision': 'main'}, {'common_revision': 'bad'}, {'kernelsu_revision': None}]:
                 with self.subTest(changed=changed), self.assertRaises(ValueError):
                     write_json(bundle / 'release.json', {**identity, **changed})

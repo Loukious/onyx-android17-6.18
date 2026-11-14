@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 import publish_release as release
+from release_naming import ASSET_FORMAT, artifact_name, asset_format
 
 
 def numbers(run_id, attempt):
@@ -37,12 +38,13 @@ def select(repository, run_id, attempt):
         raise ValueError('Recovery requires a completed successful full build job')
     # A failed release job makes the overall run fail; only the full build
     # job and its immutable attempt-specific upload are required here.
-    name = f'Konoha-Android17-6.18-{run_id}-{attempt}'
+    names = {artifact_name(run_id, attempt, version) for version in (1, ASSET_FORMAT)}
     matches = [artifact for artifact in release.listed(prefix + f'/actions/runs/{run_id}/artifacts', 'artifacts')
-               if artifact.get('name') == name]
+               if artifact.get('name') in names]
     if len(matches) != 1:
         raise ValueError('Recovery requires exactly one attempt-specific build artifact')
     artifact = matches[0]
+    name = artifact['name']
     owner = artifact.get('workflow_run', {})
     if (type(artifact.get('id')) is not int or artifact['id'] < 1 or
             artifact.get('expired') is not False or type(artifact.get('size_in_bytes')) is not int or
@@ -63,7 +65,7 @@ def inputs(bundle, run_id, attempt):
         raise ValueError('Recovery bundle identity is missing or unsafe')
     identity = json.loads(path.read_text())
     expected = {'run_id': str(run_id), 'run_attempt': str(attempt),
-                'artifact_name': f'Konoha-Android17-6.18-{run_id}-{attempt}'}
+                'artifact_name': artifact_name(run_id, attempt, asset_format(identity))}
     if any(identity.get(key) != value for key, value in expected.items()):
         raise ValueError('Recovery bundle belongs to a different run or attempt')
     result = {output: identity.get(key, '') for output, key in (
