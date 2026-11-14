@@ -98,6 +98,10 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(z.read(name)[18:20], b'\xb7\x00')
             with zipfile.ZipFile(io.BytesIO(products[wlan])) as z:
                 self.assertEqual(z.read('wlan/'+installers.WLAN),elf_module())
+                self.assertEqual(z.read('payload.sha256'), installers.payload({
+                    name: (z.read(name), False)
+                    for name in ('wlan/' + installers.WLAN, 'module-abi', 'kernel-abi.tsv')},
+                    ('wlan/' + installers.WLAN, 'module-abi', 'kernel-abi.tsv')))
                 self.assertIn(b'rmmod "$NAME" ||',z.read('service.sh'))
                 self.assertIn(b'cfg80211 icnss2',z.read('service.sh'))
                 self.assertIn(b'skip_mount', '\n'.join(z.namelist()).encode())

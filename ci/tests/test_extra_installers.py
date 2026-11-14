@@ -147,6 +147,56 @@ class ExtraPackageTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected):
                     installers.build(root, identity)
 
+    def test_manager_payload_checks_survive_extraction_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / 'artifact'
+            artifact.mkdir()
+            identity = self.fixture(artifact)
+            products = installers.build(artifact, identity)
+            filenames = installers.names(identity['kernel_release'], 2)
+            targets = {
+                filenames[1]: ('wlan/' + installers.WLAN, 'module-abi', 'service.sh'),
+                filenames[2]: ('drivers/rtl8xxxu.ko', 'firmware/rt2870.bin',
+                               'firmware-overlay.sh', 'service.sh'),
+            }
+            for index, (filename, protected) in enumerate(targets.items()):
+                with self.subTest(module=filename):
+                    installed = root / str(index)
+                    with zipfile.ZipFile(io.BytesIO(products[filename])) as archive:
+                        # KernelSU extracts with: unzip -x 'META-INF/*'.
+                        for member in archive.infolist():
+                            if not member.filename.startswith('META-INF/'):
+                                archive.extract(member, installed)
+                    def verify():
+                        return subprocess.run(['sha256sum', '-c', 'payload.sha256'],
+                            cwd=installed, capture_output=True, timeout=5)
+                    result = verify()
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
+                    self.assertFalse((installed / 'META-INF').exists())
+                    # Managers remove customize.sh before service.sh runs.
+                    (installed / 'customize.sh').unlink()
+                    result = verify()
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
+                    for name in protected:
+                        with self.subTest(tampered=name):
+                            path = installed / name
+                            original = path.read_bytes()
+                            path.write_bytes(original + b'corruption')
+                            self.assertNotEqual(verify().returncode, 0)
+                            path.write_bytes(original)
+
+    def test_installed_manifest_excludes_only_manager_removed_files(self):
+        retained = ('service.sh', 'drivers/test.ko', 'firmware/test.bin',
+                    'firmware-notices/README.md', 'installer-source/.git-notice')
+        removed = ('META-INF/com/google/android/update-binary', 'customize.sh',
+                   'README.md', '.gitignore', '.git/config', '.github/workflow.yml',
+                   'system/placeholder', 'system/placeholder/nested', 'payload.sha256')
+        files = {name: (name.encode(), False) for name in retained + removed}
+        manifest = installers.installed_payload(files).decode().splitlines()
+        self.assertEqual(manifest, [installers.sha(files[name][0]) + '  ' + name
+                                   for name in sorted(retained)])
+
     def test_new_shell_scripts_parse(self):
         for name in ('extra-service.sh', 'extra-customize.sh', 'extra-firmware.sh', 'extra-uninstall.sh'):
             subprocess.run(['sh', '-n', str(installers.HERE / name)], check=True)

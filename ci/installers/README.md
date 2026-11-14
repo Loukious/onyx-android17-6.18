@@ -22,6 +22,12 @@ loaded drivers, including shared cfg80211/mac80211 providers, are kept. Only mis
 modules are inserted in dependency order, and a failed insertion stops loading.
 The internal WCN7750 replacement stays in its separate installer.
 
+Current manager ZIPs checksum the retained installed payload, including drivers,
+firmware, loader scripts and notices. The manifest excludes `META-INF/*`, which
+managers do not extract, and install-only files such as `customize.sh`, which
+managers remove before reboot. The same checks therefore work during customization
+and in the boot service; legacy format-1 checksum lists remain unchanged.
+
 Firmware is exposed by a read-only bind at an existing kernel firmware search
 directory, such as `/odm/firmware/o10u`. The helper copies the complete ROM tree,
 including nested/hidden files and symlinks, restores each original SELinux context,
@@ -58,8 +64,10 @@ tampering, and WLAN dependency, refcount, unload failure, reload failure and
 Wi-Fi state behavior. External-module tests execute the real shell loaders with
 mocked Android tools, covering dependency/load failures, retaining loaded modules,
 payload/ABI failures, full firmware tree preservation, symlink/conflict rejection,
-SELinux and bind/remount failures, re-execution and mount ownership. The ARM64
-tools and ABI helper also passed read-only
+SELinux and bind/remount failures, re-execution and mount ownership.
+Manager lifecycle tests check both module manifests after extraction and cleanup,
+and reject corruption of retained drivers, firmware, helpers and loader scripts.
+The ARM64 tools and ABI helper also passed read-only
 execution on Onyx: the matching release WLAN module was accepted, the installed
 older KMI module was rejected, and vendor-boot v4 modules were extracted from a
 copied partition image. This does not claim a recovery flash or device boot test
