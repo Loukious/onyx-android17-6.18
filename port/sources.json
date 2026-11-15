@@ -5,7 +5,7 @@
     "branch": "common-android17-6.18"
   },
   "common": {
-    "revision": "09d8b50647ff62eeab43016de5451d6eaa5b2b8a",
+    "revision": "468a9355f57944c6dedcea4b71392bbfdc7f6f37",
     "kernel": "6.18.39",
     "clang": "r584948c",
     "rust": "1.91.1.p3",
