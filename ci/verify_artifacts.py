@@ -32,6 +32,56 @@ def inventory_summary(report):
             'native_modules': len(native)}
 
 
+def verify_native_abi(artifact, source_root, catalog, entries, prefix, report):
+    providers = {row['output'].removesuffix('.ko'): row.get('required_exports', [])
+                 for row in catalog['components'] if row['kind'] == 'native_common'}
+    required = {symbol for symbols in providers.values() for symbol in symbols}
+    if (any(not isinstance(symbol, str) or not re.fullmatch('[A-Za-z0-9_]+', symbol)
+            for symbol in required)
+            or sum(len(symbols) for symbols in providers.values()) != len(required)):
+        raise ValueError('Invalid or duplicate catalog native ABI exports')
+    records = report.get('native_abi_validation')
+    if not isinstance(records, list):
+        raise ValueError('Complete native ABI validation is missing')
+    names = [row.get('provider') for row in records]
+    if (any(not isinstance(name, str) for name in names)
+            or len(names) != len(set(names)) or set(names) != set(providers)):
+        raise ValueError('Incomplete or duplicate native ABI providers')
+    symvers = {}
+    for line in (artifact / 'gki/kernel_aarch64_Module.symvers').read_text().splitlines():
+        fields = line.split()
+        if len(fields) < 2 or fields[1] not in required:
+            continue
+        if (len(fields) < 4 or fields[1] in symvers
+                or not re.fullmatch('0x[0-9a-fA-F]{8}', fields[0])):
+            raise ValueError('Invalid or duplicate native ABI symbol provider')
+        symvers[fields[1]] = (fields[2], int(fields[0], 16))
+    if set(symvers) != required:
+        raise ValueError('Required native ABI exports are missing from Common symvers')
+    for row in records:
+        provider = row['provider']
+        exports = row.get('required_exports')
+        if not isinstance(exports, list):
+            raise ValueError('Native ABI export validation is missing: ' + provider)
+        if [entry.get('symbol') for entry in exports] != sorted(providers[provider]):
+            raise ValueError('Native ABI exports differ from the component catalog: ' + provider)
+        if not exports:
+            continue
+        if row.get('sha256') != entries[prefix + provider + '.ko']:
+            raise ValueError('Native ABI validation differs from the module hash: ' + provider)
+        for entry in exports:
+            flags, crc = entry.get('flags'), entry.get('crc')
+            if (type(flags) is not int or flags not in (0, 1)
+                    or not isinstance(crc, str) or not re.fullmatch('0x[0-9a-f]{8}', crc)
+                    or symvers[entry['symbol']] != (provider, int(crc, 16))):
+                raise ValueError('Native ABI export flags, CRC or Common provider differ: ' + entry['symbol'])
+    verifier = artifact / 'inputs/verify_native_abi.py'
+    committed = source_root / 'port/verify_native_abi.py'
+    if required and (not verifier.is_file() or not committed.is_file()
+                     or digest(verifier) != digest(committed)):
+        raise ValueError('Native ABI source verifier differs from the selected source')
+
+
 def verify_native(artifact, source_root, report, expected):
     catalog_path = source_root / 'port/components.json'
     if not catalog_path.is_file():
@@ -82,6 +132,7 @@ def verify_native(artifact, source_root, report, expected):
             raise ValueError('Native module hash or vermagic differs: ' + row['module'])
         if type(row.get('imports_checked')) is not int or row['imports_checked'] <= 0:
             raise ValueError('Native module import verification is missing')
+    verify_native_abi(artifact, source_root, catalog, entries, prefix, report)
     overrides = {module_identity(row['output']): row['replaces_gki']
                  for row in expected if 'replaces_gki' in row}
     external = {module_identity(row['module']) for row in report['module_verification']}
