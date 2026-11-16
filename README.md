@@ -4,6 +4,10 @@ This repository contains the complete POCO F7 (Onyx/SM8735) module port and a
 reproducible GKI build recipe. It tracks Google's `android17-6.18-lts` branch
 and fetches the official **KernelSU Next `dev` branch on every build**.
 
+The [6.18.63 runtime regression](port/kernel-runtime-regression.md) documents
+the IPA/modem crashes, the IOMMU and FunctionFS corrections, and the Fixed4
+boot, USB and network validation.
+
 The current Onyx recipe uses Linux **6.18.38** with **400 platform modules**,
 **37 additional native GKI modules** for CAN, USB adapters and network facilities,
 and **16 wireless firmware files** with their redistribution notices and matching

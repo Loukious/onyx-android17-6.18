@@ -60,7 +60,18 @@ class Tests(unittest.TestCase):
                 paths[name].write_bytes(name.encode())
             kinds = {n: 'platform' if n in platform + new_platform else 'gki' for n in paths}
             (artifact / 'inputs/nethunter-native-modules.json').write_text(json.dumps({'modules': new_native, 'required_existing_modules': [generic[0]]}))
-            (artifact / 'report.json').write_text(json.dumps({'sha256': {'inputs/nethunter-native-modules.json': 'bound-by-outer-archive-test'}}))
+            policy = {'schema_version': 1, 'new_modules_default': 'manual', 'groups': [
+                {'name': 'native-additions', 'modules': [n + '.ko' for n in new_native],
+                 'ship': ['vendor_dlkm'], 'load': {'vendor_dlkm': ['modules.load']},
+                 'reason': 'Test explicit native feature loading.'},
+                {'name': 'platform-additions', 'modules': [n + '.ko' for n in new_platform],
+                 'ship': ['vendor_ramdisk', 'vendor_dlkm'],
+                 'load': {'vendor_dlkm': ['modules.load']},
+                 'reason': 'Test explicit platform driver loading.'}]}
+            (artifact / 'inputs/module-loading.json').write_text(json.dumps(policy))
+            (artifact / 'report.json').write_text(json.dumps({'sha256': {
+                'inputs/nethunter-native-modules.json': g.sha(artifact / 'inputs/nethunter-native-modules.json'),
+                'inputs/module-loading.json': g.sha(artifact / 'inputs/module-loading.json')}}))
             trees = {}
             selections = {'vendor_ramdisk': platform + generic[:4], 'vendor_dlkm': platform + generic[:4], 'system_dlkm': generic[2:]}
             for part, selection in selections.items():

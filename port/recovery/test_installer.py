@@ -23,6 +23,22 @@ from pathlib import Path
 r=Path(os.environ['TEST_ROOT']);case=os.environ['TEST_CASE'];slot=os.environ['TEST_SLOT'];name=Path(sys.argv[0]).name;args=sys.argv[1:]
 if name=='getprop':
  v={'ro.product.device':'other' if case=='wrong_device' else 'onyx','ro.vendor.product.device':'other' if case=='wrong_device' else 'onyx','ro.boot.flash.locked':'1' if case=='locked' else '0','ro.boot.slot_suffix':'' if case=='bad_slot' else slot}
+ states={
+  'unlocked_orange':('', '', 'orange'),
+  'unlocked_vbmeta':('', 'unlocked', ''),
+  'unlocked_consistent':('0', 'unlocked', 'orange'),
+  'no_unlock_evidence':('', '', ''),
+  'locked_flash_orange':('1', 'unlocked', 'orange'),
+  'locked_vbmeta_orange':('0', 'locked', 'orange'),
+  'verified_green':('0', 'unlocked', 'green'),
+  'verified_yellow':('0', 'unlocked', 'yellow'),
+  'verified_red':('0', 'unlocked', 'red'),
+  'unknown_flash':('unknown', 'unlocked', 'orange'),
+  'unknown_vbmeta':('0', 'unknown', 'orange'),
+  'unknown_verified':('0', 'unlocked', 'unknown'),
+ }
+ if case in states:
+  v.update(zip(['ro.boot.flash.locked','ro.boot.vbmeta.device_state','ro.boot.verifiedbootstate'],states[case]))
  if args[0]=='ro.boot.slot_suffix' and case=='slot_changed':
   p=r/'slot-calls';n=int(p.read_text())+1 if p.exists() else 1;p.write_text(str(n));v[args[0]]=slot if n==1 else '_b'
  print(v.get(args[0],''));sys.exit(0)
@@ -145,7 +161,8 @@ def execute(case, temporary):
                          KONOHA_BUSYBOX=str(bindir / 'busybox'), OUTFD='1',
                          KONOHA_GUARD_ACTIVE='0' if case=='missing_guard_lock' else '1'))
     writes = (root / 'writes.log').read_text().splitlines() if (root / 'writes.log').exists() else []
-    positive = case in ['active_a', 'active_b', 'bootstrap']
+    positive = case in ['active_a', 'active_b', 'bootstrap',
+                        'unlocked_orange', 'unlocked_vbmeta', 'unlocked_consistent']
     if positive:
         assert run.returncode == 0, (case, run.stdout, run.stderr)
         assert writes == [n + slot for n in PARTS], (case, writes)
@@ -172,6 +189,10 @@ if __name__ == '__main__':
              'slot_changed', 'label_failure', 'write_failure', 'readback_corrupt']
     cases += ['missing_guard_lock', 'missing_super', 'guard_unmounted_alias',
               'mapping_changed', 'mapping_drift_after_write', 'snapshot_changed_after_write']
+    cases += ['unlocked_orange', 'unlocked_vbmeta', 'unlocked_consistent',
+              'no_unlock_evidence', 'locked_flash_orange', 'locked_vbmeta_orange',
+              'verified_green', 'verified_yellow', 'verified_red',
+              'unknown_flash', 'unknown_vbmeta', 'unknown_verified']
     with tempfile.TemporaryDirectory(prefix='konoha-installer-test-') as path:
         results = [execute(case, Path(path)) for case in cases]
     report = {'status': 'PASS', 'installer_sha256': sha(HERE / 'install.sh'), 'cases': results,

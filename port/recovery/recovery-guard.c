@@ -68,8 +68,14 @@ __asm__(".global _start\n_start:\nmov %rsp, %rdi\nand $-16, %rsp\ncall "
 #endif
 #define C3(n, a, b, c) call(n, (long)(a), (long)(b), (long)(c), 0, 0, 0)
 #define AT_FDCWD -100
+/* arm64 retains the ARM open-flag ABI; these differ from asm-generic. */
+#if defined(__aarch64__)
+#define O_DIRECTORY 0040000
+#define O_NOFOLLOW 0100000
+#else
 #define O_DIRECTORY 0200000
 #define O_NOFOLLOW 0400000
+#endif
 #define O_NONBLOCK 0004000
 #define AT_EMPTY_PATH 0x1000
 #define AT_SYMLINK_NOFOLLOW 0x100

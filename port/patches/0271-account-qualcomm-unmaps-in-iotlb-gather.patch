@@ -1,0 +1,15 @@
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu.c
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+@@ -2291,6 +2291,12 @@
+ 		return 0;
+ 
+ 	ret = ops->unmap_pages(ops, iova, pgsize, pgcount, gather);
++	/*
++	 * Qualcomm backends track pending invalidations privately. Keep the
++	 * core gather non-empty so iommu_iotlb_sync() calls our context flush.
++	 */
++	if (gather && ret)
++		iommu_iotlb_gather_add_range(gather, iova, ret);
+ 	if (ret)
+ 		trace_unmap_pages(smmu_domain, iova, pgsize, pgcount);
+ 

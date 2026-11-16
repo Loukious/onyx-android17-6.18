@@ -1,0 +1,11 @@
+--- a/drivers/usb/gadget/function/f_fs_ipc_log.c
++++ b/drivers/usb/gadget/function/f_fs_ipc_log.c
+@@ -47,8 +47,6 @@
+ 	struct ffs_epfile		*epfile_in;	/* P: ffs->eps_lock */
+ 	struct ffs_epfile		*epfile_out;	/* P: ffs->eps_lock */
+ 
+-	struct dentry			*dentry;
+-
+ 	/*
+ 	 * Buffer for holding data from partial reads which may happen since
+ 	 * we’re rounding user read requests to a multiple of a max packet size.

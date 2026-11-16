@@ -43,7 +43,21 @@ say 'Checking exact Onyx ROM baseline and all five matched images.'
 [ "$(getprop ro.product.device)" = onyx ] || [ "$(getprop ro.vendor.product.device)" = onyx ] || die 'This package supports Onyx only.'
 slot=$(getprop ro.boot.slot_suffix)
 case "$slot" in _a|_b) ;; *) die 'Cannot determine active A/B slot.';; esac
-[ "$(getprop ro.boot.flash.locked)" = 0 ] || die 'An unlocked bootloader is required.'
+# Xiaomi recovery can omit flash.locked and vbmeta.device_state. AVB orange
+# is the bootloader's explicit unlocked report; secureboot describes firmware.
+flash_locked=$(getprop ro.boot.flash.locked)
+vbmeta_state=$(getprop ro.boot.vbmeta.device_state)
+verified_state=$(getprop ro.boot.verifiedbootstate)
+case "$flash_locked:$vbmeta_state:$verified_state" in
+    1:*|*:locked:*|*:*:green|*:*:yellow|*:*:red)
+        die 'An unlocked bootloader is required.';;
+esac
+case "$flash_locked" in ''|0) ;; *) die 'Unknown bootloader lock state.';; esac
+case "$vbmeta_state" in ''|unlocked) ;; *) die 'Unknown vbmeta device state.';; esac
+case "$verified_state" in ''|orange) ;; *) die 'Unknown verified boot state.';; esac
+[ "$flash_locked" = 0 ] || [ "$vbmeta_state" = unlocked ] ||
+    [ "$verified_state" = orange ] || die 'Cannot establish that the bootloader is unlocked.'
+
 if ps -A 2>/dev/null | "$BB" grep -q '[z]ygote'; then die 'Install from recovery with Android stopped.'; fi
 command -v blockdev >/dev/null || die 'Recovery blockdev is unavailable.'
 super=

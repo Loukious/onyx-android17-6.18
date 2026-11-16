@@ -2,7 +2,7 @@
   "status": "PASS: offline source toolkit checks; recovery runtime untested",
   "checks": {
     "generator": 7,
-    "actual_shell_scenarios": 30,
+    "actual_shell_scenarios": 42,
     "native_guard_scenarios": 44,
     "dm_parser_scenarios": 48,
     "linux_uapi_assertions": 35

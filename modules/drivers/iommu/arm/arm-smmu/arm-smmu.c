@@ -2291,6 +2291,12 @@ static size_t arm_smmu_unmap_pages(struct iommu_domain *domain, unsigned long io
 		return 0;
 
 	ret = ops->unmap_pages(ops, iova, pgsize, pgcount, gather);
+	/*
+	 * Qualcomm backends track pending invalidations privately. Keep the
+	 * core gather non-empty so iommu_iotlb_sync() calls our context flush.
+	 */
+	if (gather && ret)
+		iommu_iotlb_gather_add_range(gather, iova, ret);
 	if (ret)
 		trace_unmap_pages(smmu_domain, iova, pgsize, pgcount);
 
