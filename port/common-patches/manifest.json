@@ -16,8 +16,8 @@
       "candidate_sha256": "6fcfa3a9f1c00b61a9845afad108aef6ff7a963468ec97112ed31edf91d5644b"
     },
     "drivers/hwtracing/coresight/coresight-etm4x-core.c": {
-      "before_sha256": "df1d71afd472efc05e2677f6a588a6a658384d68add5ba71905143ac8d21d8b4",
-      "candidate_sha256": "b7ceb90751eb02701a41de6c4df8d9553a7416d9d1c828954ffa41a192b7b0e7"
+      "before_sha256": "9f5efc55ced1b6c9a7df2f3fa7878d3819664a12891c91f13d31ffafa20ab8af",
+      "candidate_sha256": "8a84129a20c0162bb2ae8cb7e7b48239b00acba4c782b202e01ae10954b87333"
     },
     "drivers/hwtracing/coresight/coresight-funnel.c": {
       "before_sha256": "86f5d32ba957cecc2ac2268785e5f17d0525ca1c2a057240e46435227015cbf5",
@@ -52,12 +52,12 @@
       "candidate_sha256": "8df9332814347e4ce8ab4d584175f895ae223144b262fc432ce03bfef69e90a8"
     },
     "drivers/hwtracing/coresight/coresight-core.c": {
-      "before_sha256": "519169ac8eb4585add486f4e6af2803dab4e741f54288040f04860d112618846",
-      "candidate_sha256": "33d383595bbfd666e07b1d4a1d9788955c3abad71847bf9c72429ab6c514dbb7"
+      "before_sha256": "ab688265c528a494961d621b4b9e2f1b75f66b7c6501651a834adf84e9d3e758",
+      "candidate_sha256": "f376c5ce0e2da2282f644ec65e604ae81dce50c272a4a3462d547412804fde54"
     },
     "arch/arm64/configs/gki_defconfig": {
-      "before_sha256": "c2ad2dedc508b1a790a91002ae3cfe0f26a9da8212ceb5d3d7fc200f0b69dfd5",
-      "candidate_sha256": "0202b53cd710c178b9ccd11afa61ca88c951f338cbcec0daeada1c4a063e0192"
+      "before_sha256": "c92079fa0c102899644de89c8b7e80158cbfcfc000ddad3f881347ad810b997c",
+      "candidate_sha256": "dbd09439453ef93814ff83ff68b20d4c8492b242ded8c82703516a2b56dad487"
     },
     "certs/onyx-accepted-gki.pem": {
       "before_sha256": null,
@@ -88,8 +88,8 @@
       "candidate_sha256": "628c6b705c64ac1269380e25e151ce78b2ba47f931d3c15ad4b94b213849b584"
     },
     "block/blk-core.c": {
-      "before_sha256": "35030b4d3813dd6a2ddeb849c9de4fdbfcb79f27cde0b54bcd4d91e459782ec0",
-      "candidate_sha256": "384d87b40a5c88eebd96eacd64f8c7bf7511dd0495f7650c742e2865f407bca6"
+      "before_sha256": "14e3d8234d314f0532690a0ee8c59bbccc3d61f9bf47bedd054c01fb3e6a4086",
+      "candidate_sha256": "24b65a529e8e295e9b80e3aa94d8a87bd265406b0474276c45dcd9ee0c9566fc"
     }
   },
   "tnoc": "Not applicable: 6.18 has no itnoc_remove/platform driver; AMBA TNOC is unchanged",
