@@ -178,6 +178,18 @@ def payload_files(artifact, identity):
                 'erofs_compression': compression,
                 'legacy_onyx': {'module_names': legacy['legacy_module_names'], 'default_loads': legacy['default_loads']},
                 'sha256': {name: digest(value[0]) for name, value in sorted(files.items()) if name.startswith('payload/')}}
+    policy_path = artifact / 'inputs/module-loading.json'
+    if policy_path.is_file():
+        data = policy_path.read_bytes()
+        if digest(data) != report['sha256'].get('inputs/module-loading.json'):
+            raise ValueError('Module loading policy differs from the build input')
+        policy = json.loads(data)
+        if policy.get('schema_version') != 1 or policy.get('new_modules_default') != 'manual':
+            raise ValueError('Unsupported module loading policy')
+        wanted = {norm(name) for group in policy['groups'] for name in group['modules']}
+        if not wanted <= set(catalog) | builtin:
+            raise ValueError('Module loading policy requests unavailable modules')
+        metadata['module_loading'] = policy
     files['kernel.json'] = ((json.dumps(metadata, indent=2) + '\n').encode(), False)
     return files, omitted
 

@@ -9,6 +9,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 import kernel_toolchains
+import kernelsu_lock
 import wifi_imports
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,11 +37,18 @@ def detect():
     pins = json.loads((PORT / 'sources.json').read_text())
     current = pins['common']['revision']
     latest = remote_head(TRACK['repository'], TRACK['branch'])
-    ksu = remote_head(TRACK['kernelsu_repository'], TRACK['kernelsu_branch'])
+    latest_ksu = remote_head(TRACK['kernelsu_repository'], TRACK['kernelsu_branch'])
+    locked_ksu = kernelsu_lock.read(PORT)
+    if (PORT / 'components.json').is_file() and locked_ksu is None:
+        raise ValueError('Component sources require a committed KernelSU lock')
+    ksu = locked_ksu['revision'] if locked_ksu else latest_ksu
     source_revision = git(PORT.parent, 'rev-parse', 'HEAD')
     state_path = ROOT / 'ci/last-built.json'
     last = json.loads(state_path.read_text()) if state_path.exists() else {}
     result = {'current': current, 'latest': latest, 'kernelsu': ksu,
+              'latest_kernelsu': latest_ksu,
+              'kernelsu_update_needed': bool(locked_ksu and latest_ksu != ksu),
+              'candidate_needed': latest != current or bool(locked_ksu and latest_ksu != ksu),
               'kernel_changed': latest != current,
               'source_revision': source_revision,
               'source_changed': source_revision != last.get('source_revision'),
@@ -73,7 +81,18 @@ def update(repo, revision):
     build_path, config_path = PORT / 'BUILD.bazel', PORT / 'platform_defconfig'
     old_build = build_path.read_text() if build_path.exists() else None
     fragment = config_path.read_text() if config_path.exists() else None
-    imports, build = wifi_imports.refresh(repo, revision, imports, old_build, fragment)
+    native_wifi = False
+    catalog_path = PORT / 'components.json'
+    if catalog_path.is_file():
+        catalog = json.loads(catalog_path.read_text())
+        native = {row['name'] for row in catalog['components'] if row['kind'] == 'native_common'}
+        native_wifi = {'cfg80211', 'mac80211'} <= native
+        if native_wifi and any(wifi_imports.owned(row['path']) for row in imports):
+            raise ValueError('Native Wi-Fi catalog retains copied wireless imports')
+    if native_wifi:
+        build = old_build
+    else:
+        imports, build = wifi_imports.refresh(repo, revision, imports, old_build, fragment)
     for source in imports:
         if source['project'] == 'common':
             source['revision'] = revision

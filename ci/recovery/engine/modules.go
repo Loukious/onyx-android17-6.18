@@ -21,6 +21,20 @@ type kernelModule struct {
 	Aliases []string `json:"aliases"`
 }
 
+type moduleLoadingGroup struct {
+	Name    string              `json:"name"`
+	Modules []string            `json:"modules"`
+	Ship    []string            `json:"ship"`
+	Load    map[string][]string `json:"load"`
+	Reason  string              `json:"reason"`
+}
+
+type moduleLoadingPolicy struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Default       string               `json:"new_modules_default"`
+	Groups        []moduleLoadingGroup `json:"groups"`
+}
+
 type kernelPackage struct {
 	Format          int                     `json:"format"`
 	Device          string                  `json:"device"`
@@ -31,6 +45,7 @@ type kernelPackage struct {
 	Modules         map[string]kernelModule `json:"modules"`
 	Builtin         []string                `json:"builtin"`
 	NativeAdditions []string                `json:"native_additions"`
+	Loading         *moduleLoadingPolicy    `json:"module_loading,omitempty"`
 	Parameters      []string                `json:"boot_parameters"`
 	Firmware        []string                `json:"firmware"`
 	Compression     string                  `json:"erofs_compression"`
@@ -43,6 +58,7 @@ type kernelPackage struct {
 }
 
 var moduleName = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+var policyModuleFile = regexp.MustCompile(`^[a-zA-Z0-9_-]+\.ko$`)
 var kernelRelease = regexp.MustCompile(`^6\.18\.[0-9]+-android17-[0-9]+-[a-zA-Z0-9.-]+$`)
 
 func normalizeModule(name string) string {
@@ -120,6 +136,9 @@ func loadPackage(root string) (*kernelPackage, error) {
 			return nil, fmt.Errorf("missing native feature module %s", name)
 		}
 	}
+	if err := p.validateLoadingPolicy(builtins); err != nil {
+		return nil, err
+	}
 	for _, name := range p.Firmware {
 		if !safePath(name) || name == "" {
 			return nil, fmt.Errorf("invalid firmware path")
@@ -132,6 +151,51 @@ func loadPackage(root string) (*kernelPackage, error) {
 		return nil, err
 	}
 	return &p, nil
+}
+
+func (p *kernelPackage) validateLoadingPolicy(builtins map[string]bool) error {
+	if p.Loading == nil {
+		return nil
+	}
+	if p.Loading.SchemaVersion != 1 || p.Loading.Default != "manual" {
+		return fmt.Errorf("unsupported module loading policy")
+	}
+	groups, modules := make(map[string]bool), make(map[string]bool)
+	for _, group := range p.Loading.Groups {
+		if group.Name == "" || groups[group.Name] || strings.TrimSpace(group.Reason) == "" {
+			return fmt.Errorf("module loading groups need unique names and a reason")
+		}
+		groups[group.Name] = true
+		for _, file := range group.Modules {
+			name := normalizeModule(file)
+			_, available := p.Modules[name]
+			if !policyModuleFile.MatchString(file) || modules[name] || (!available && !builtins[name]) {
+				return fmt.Errorf("invalid or unavailable policy module %q", file)
+			}
+			modules[name] = true
+		}
+		ships := make(map[string]bool)
+		for _, role := range group.Ship {
+			if (role != "vendor_ramdisk" && role != "vendor_dlkm" && role != "system_dlkm") || ships[role] {
+				return fmt.Errorf("invalid module shipping partition %q", role)
+			}
+			ships[role] = true
+		}
+		for role, lists := range group.Load {
+			if !ships[role] {
+				return fmt.Errorf("module loading requires a shipped partition %q", role)
+			}
+			files := make(map[string]bool)
+			for _, file := range lists {
+				if files[file] || (file != "modules.load" &&
+					(role != "vendor_ramdisk" || file != "modules.load.recovery")) {
+					return fmt.Errorf("invalid module loading list %s/%s", role, file)
+				}
+				files[file] = true
+			}
+		}
+	}
+	return nil
 }
 
 // A directory records the ROM's complete flat module inventory, not only the
@@ -223,7 +287,7 @@ func (p *kernelPackage) moduleFiles(role string, old moduleDirectory, work strin
 		for name, module := range p.Modules {
 			if module.Kind == "platform" {
 				roots[name] = true
-				if role == "vendor_dlkm" && !oldNames[name] && len(retired) == 0 {
+				if p.Loading == nil && role == "vendor_dlkm" && !oldNames[name] && len(retired) == 0 {
 					additions = append(additions, name)
 				}
 			}
@@ -235,9 +299,49 @@ func (p *kernelPackage) moduleFiles(role string, old moduleDirectory, work strin
 		for name := range p.Modules {
 			roots[name] = true
 		}
-		for _, name := range p.NativeAdditions {
-			roots[name] = true
-			additions = append(additions, name)
+		if p.Loading == nil {
+			for _, name := range p.NativeAdditions {
+				roots[name] = true
+				additions = append(additions, name)
+			}
+		}
+	}
+	if p.Loading != nil {
+		for _, group := range p.Loading.Groups {
+			for _, file := range group.Load[role] {
+				if _, exists := loadLists[file]; !exists {
+					loadLists[file] = nil
+				}
+			}
+			for _, partition := range group.Ship {
+				if partition == role {
+					for _, file := range group.Modules {
+						roots[normalizeModule(file)] = true
+					}
+				}
+			}
+		}
+		for file, list := range loadLists {
+			requested := make(map[string]bool)
+			for _, name := range list {
+				requested[name] = true
+			}
+			var explicit []string
+			for _, group := range p.Loading.Groups {
+				for _, target := range group.Load[role] {
+					if target == file {
+						for _, entry := range group.Modules {
+							name := normalizeModule(entry)
+							if !builtins[name] && !requested[name] {
+								explicit = append(explicit, name)
+								requested[name] = true
+							}
+						}
+					}
+				}
+			}
+			sort.Strings(explicit)
+			loadLists[file] = append(list, explicit...)
 		}
 	}
 	sort.Strings(additions)

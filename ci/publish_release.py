@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 from urllib.parse import quote
 
-from verify_artifacts import digest, relative, verify
+from verify_artifacts import digest, relative, verify, inventory_summary
 import installer_assets
 import recovery_assets
 import google_changelog
@@ -136,6 +136,14 @@ def validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attem
         if (pins['common']['revision'], report['kernelsu_next']['revision'], report['kernel_release'], count) != (
                 kernel, kernelsu, identity['kernel_release'], identity['modules']):
             raise ValueError('Archived build identity differs from release metadata')
+        counts = inventory_summary(report)
+        if counts:
+            catalog = json.loads((source_root / 'port/components.json').read_text())
+            counts['native_component_modules'] = sum(row['kind'] == 'native_common' for row in catalog['components'])
+            if any(identity.get(key) != value for key, value in counts.items()):
+                raise ValueError('Native module counts differ from the verified build')
+        if identity.get('automation_revision') != report.get('automation_revision'):
+            raise ValueError('CI automation revision differs from the verified build')
         if digest(artifact / 'report.json') != hashes['report.json'] or digest(artifact / 'build.log') != hashes['build.log']:
             raise ValueError('Exported evidence differs from the build archive')
         for exported, archived in (

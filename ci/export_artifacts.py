@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tarfile
 
-from verify_artifacts import digest, verify
+from verify_artifacts import digest, verify, inventory_summary
 from release_naming import ASSET_FORMAT, archive_name, artifact_name, write_checksums
 
 
@@ -39,6 +39,12 @@ def export(workspace, output, source_root, source_revision, run_id, run_attempt)
         'artifact_root': artifact.name,
         'sha256': {p.relative_to(output).as_posix(): digest(p) for p in sorted(output.rglob('*')) if p.is_file()},
     }
+    identity.update(inventory_summary(report))
+    if (source_root / 'port/components.json').is_file():
+        catalog = json.loads((source_root / 'port/components.json').read_text())
+        identity['native_component_modules'] = sum(row['kind'] == 'native_common' for row in catalog['components'])
+    if report.get('automation_revision'):
+        identity['automation_revision'] = report['automation_revision']
     (output / 'release.json').write_text(json.dumps(identity, indent=2) + '\n')
     write_checksums(output)
     if os.environ.get('GITHUB_OUTPUT'):

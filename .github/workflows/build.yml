@@ -15,7 +15,7 @@ on:
         type: boolean
         default: false
       kernelsu_revision:
-        description: Tracker's detected dev HEAD (build still fetches latest dev; leave blank for manual builds)
+        description: Expected committed KernelSU lock revision (leave blank to use the source lock)
         type: string
         default: ''
       source_revision:
@@ -48,12 +48,15 @@ jobs:
       build_attempt: ${{ steps.export.outputs.build_attempt }}
     steps:
       - name: Checkout CI automation
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Checkout selected source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_revision || inputs.source_ref || 'android17-6.18-lts' }}
           path: source
+      - name: Resolve CI automation commit
+        id: automation
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Resolve source commit
         id: source
         run: echo "revision=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -62,10 +65,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REVISION: ${{ steps.source.outputs.revision }}
         run: python3 ci/post_status.py "$REVISION" pending
+      - name: Verify committed KernelSU build input
+        env:
+          EXPECTED_KERNELSU_REVISION: ${{ inputs.kernelsu_revision }}
+        run: python3 ci/kernelsu_lock.py --expected "$EXPECTED_KERNELSU_REVISION"
       - name: Validate automation
         run: python3 -m unittest discover -s ci/tests -v
       - name: Set up the pinned recovery helper compiler
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.25.4'
           cache: false
@@ -92,7 +99,7 @@ jobs:
           fi
       - name: Restore Kleaf incremental build cache
         id: kleaf-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ${{ runner.temp }}/kleaf-cache-links.json
@@ -106,10 +113,11 @@ jobs:
         env:
           CACHE_MATCHED_KEY: ${{ steps.kleaf-cache.outputs.cache-matched-key }}
         run: python3 ci/build_cache.py restore
-      - name: Build matching GKI and every ported module with latest KernelSU Next dev
+      - name: Build matching GKI and every ported module with the committed KernelSU source
         id: compile
         env:
           DIAGNOSTIC: ${{ inputs.diagnostic || false }}
+          KONOHA_CI_REVISION: ${{ steps.automation.outputs.revision }}
         run: |
           flags=()
           if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--qdss-diagnostic); fi
@@ -127,7 +135,7 @@ jobs:
       - name: Package the complete Onyx recovery installer
         run: python3 ci/recovery_assets.py artifacts source
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.export.outputs.artifact_name }}
           path: artifacts/
@@ -143,7 +151,7 @@ jobs:
         run: python3 ci/build_cache.py prepare
       - name: Save verified Kleaf incremental build cache
         if: success() && steps.compile.outputs.cache_enabled == 'true' && steps.kleaf-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ${{ runner.temp }}/kleaf-cache-links.json
@@ -160,7 +168,7 @@ jobs:
         run: python3 ci/build_cache.py confirm "$CACHE_KEY"
       - name: Upload failure evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: failed-build-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -196,14 +204,14 @@ jobs:
       SOURCE_REVISION: ${{ needs.build.outputs.source_revision }}
       BUILD_RUN_ATTEMPT: ${{ needs.build.outputs.build_attempt }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Download the verified build bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ needs.build.outputs.artifact_name }}
           path: artifacts
       - name: Checkout the exact built source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.build.outputs.source_revision }}
           path: source
