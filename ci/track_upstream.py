@@ -8,6 +8,7 @@ import re
 import subprocess
 import xml.etree.ElementTree as ET
 
+import kernel_toolchains
 import wifi_imports
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +63,10 @@ def update(repo, revision):
     if (fields.get('VERSION'), fields.get('PATCHLEVEL')) != ('6', '18'):
         raise ValueError('Refusing a kernel outside Linux 6.18')
     pins = json.loads((PORT / 'sources.json').read_text())
+    dependency_path = PORT / 'dependency-lock.xml'
+    old_dependencies = dependency_path.read_text() if dependency_path.exists() else None
+    pins['common'], dependencies = kernel_toolchains.refresh(
+        repo, revision, pins['common'], old_dependencies)
     pins['common']['revision'] = revision
     pins['common']['kernel'] = '.'.join(fields[k] for k in ('VERSION', 'PATCHLEVEL', 'SUBLEVEL'))
     imports = json.loads((PORT / 'imports.json').read_text())
@@ -85,6 +90,8 @@ def update(repo, revision):
     (PORT / 'imports.json').write_text(json.dumps(imports, indent=2) + '\n')
     if build != old_build:
         build_path.write_text(build)
+    if dependencies != old_dependencies:
+        dependency_path.write_text(dependencies)
     xml.write(PORT / 'onyx-port.xml', encoding='utf-8', xml_declaration=True)
     return {'revision': revision, 'kernel': pins['common']['kernel']}
 
