@@ -5,6 +5,7 @@ import json
 import re
 import time
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 GOOGLE = 'https://android.googlesource.com/kernel/common'
@@ -105,7 +106,20 @@ def summary(releases, current_tag, tip):
     if base == tip:
         return heading + (f'No new Google GKI commits since `{tag}`; the Google revision remains '
                           f'[`{tip[:12]}`]({GOOGLE}/+/{tip}). Onyx and KernelSU Next revisions are recorded above.\n')
-    commits = commits_between(base, tip)
+    try:
+        commits = commits_between(base, tip)
+    except HTTPError as error:
+        if error.code != 429 and not 500 <= error.code < 600:
+            raise
+        commits = None
+    except OSError:
+        commits = None
+    if commits is None:
+        return heading + (
+            f'Google GKI changed from [`{base[:12]}`]({GOOGLE}/+/{base}) to '
+            f'[`{tip[:12]}`]({GOOGLE}/+/{tip}) since `{tag}`. '
+            f'[Full Google commit range]({GOOGLE}/+log/{base}..{tip}). '
+            'Google\'s commit summary could not be fetched for this release.\n')
     counts = Counter(area(subject) for _, subject in commits)
     result = heading + (f'**{len(commits)} Google commits** since `{tag}`, '
         f'from `{base[:12]}` to `{tip[:12]}` on `android17-6.18-lts`. '
