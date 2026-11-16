@@ -99,6 +99,9 @@ _ARM_GKI_MODULES_LIST = [
 _ARM64_GKI_MODULES_LIST = [
     # keep sorted
     "arch/arm64/geniezone/gzvm.ko",
+    "crypto/camellia_generic.ko",
+    "crypto/krb5/krb5.ko",
+    "crypto/krb5enc.ko",
     "drivers/bluetooth/btintel.ko",
     "drivers/bluetooth/btrtl.ko",
     "drivers/bluetooth/btusb.ko",

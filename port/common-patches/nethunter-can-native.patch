@@ -78,10 +78,13 @@ diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
 diff --git a/bazel/modules_private.bzl b/bazel/modules_private.bzl
 --- a/bazel/modules_private.bzl
 +++ b/bazel/modules_private.bzl
-@@ -99,13 +99,50 @@
+@@ -99,13 +99,53 @@
  _ARM64_GKI_MODULES_LIST = [
      # keep sorted
      "arch/arm64/geniezone/gzvm.ko",
++    "crypto/camellia_generic.ko",
++    "crypto/krb5/krb5.ko",
++    "crypto/krb5enc.ko",
 +    "drivers/bluetooth/btintel.ko",
 +    "drivers/bluetooth/btrtl.ko",
 +    "drivers/bluetooth/btusb.ko",

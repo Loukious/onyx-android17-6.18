@@ -1,6 +1,6 @@
 {
   "patch": "0005-required-common-fixes-with-blk-plug-ordering.patch",
-  "patch_sha256": "3537e405a82ff47f4b6b1c26e690493737096f795a51de41674b3fdf5d5157d3",
+  "patch_sha256": "85a35bfa73bebd36887e919c32adcc09dd2a5c91743d1100d4edd23419a1f2c5",
   "upstream": "https://lists.openwall.net/linux-kernel/2026/07/10/62",
   "files": {
     "drivers/hwtracing/coresight/coresight-catu.c": {
@@ -81,7 +81,7 @@
     },
     "bazel/modules_private.bzl": {
       "before_sha256": "d93adc60fdd792cc5d6eed6415f99dffb67fb3b4425235745104577618843595",
-      "candidate_sha256": "95eaadf870ffeab3d2f082bafb8e70e47715eb1284ccebc8393f7430aed64a3f"
+      "candidate_sha256": "1863d492921da6cf9d799f4331fc119dc4fcf659c715bc821a3aed3af0bd6590"
     },
     "fs/timerfd.c": {
       "before_sha256": "e2f56800708897205c1588b22040071b4b150513b50ff1c694bdefdb575898cc",
@@ -121,7 +121,7 @@
     },
     {
       "patch": "nethunter-can-native.patch",
-      "sha256": "5ffa842f1ed321cf1f97bdfbc7a8da276a822eeb23498e263443549482bb658b",
+      "sha256": "ad2acd2fd095013404abc35dea64d0a3a1d143be9c9cf21e7c438dad2c18f2d0",
       "role": "Native GKI NetHunter peripherals/filesystems and common USB/virtual CAN"
     },
     {

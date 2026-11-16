@@ -116448,7 +116448,7 @@
     "executable": false
   },
   "bazel/modules_private.bzl": {
-    "sha256": "95eaadf870ffeab3d2f082bafb8e70e47715eb1284ccebc8393f7430aed64a3f",
+    "sha256": "1863d492921da6cf9d799f4331fc119dc4fcf659c715bc821a3aed3af0bd6590",
     "executable": false
   },
   "bazel/test/BUILD.bazel": {
