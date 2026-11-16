@@ -227,3 +227,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: python3 ci/record_success.py "$KERNEL_REVISION" "$KERNELSU_REVISION" "$SOURCE_REVISION" --release-tag "$RELEASE_TAG"
+      - name: Remove merged tracker branches after release
+        if: steps.release.outputs.release_ready == 'true'
+        run: python3 ci/cleanup_branches.py "$SOURCE_REVISION"

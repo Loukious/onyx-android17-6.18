@@ -19,7 +19,8 @@ def run(args, **kwargs):
     return subprocess.check_output(args, cwd=ROOT, text=True, **kwargs).strip()
 
 
-def publish(revision, kernelsu=None):
+def publish(revision, kernelsu=None, *, pin_source=False):
+    """Publish a candidate; the tracker CLI pins source, legacy API callers may omit it."""
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('Invalid upstream revision')
     if kernelsu is not None and not re.fullmatch('[0-9a-f]{40}', kernelsu):
@@ -67,15 +68,27 @@ def publish(revision, kernelsu=None):
             path.write_text(body)
             url = run(['gh', 'pr', 'create', '--base', TRACK['source_branch'], '--head', branch,
                        '--title', f'Android 17 LTS {version}', '--body-file', str(path)])
+    source = None
+    if pin_source:
+        ref = 'refs/heads/' + branch
+        remote = run(['git', 'ls-remote', 'origin', ref]).splitlines()
+        fields = remote[0].split() if len(remote) == 1 else []
+        if len(fields) != 2 or not re.fullmatch('[0-9a-f]{40}', fields[0]) or fields[1] != ref:
+            raise ValueError('Candidate source ref must resolve to one exact commit')
+        source = fields[0]
     builds = json.loads(run(['gh', 'run', 'list', '--workflow', 'build.yml', '--branch', TRACK['ci_branch'],
                             '--limit', '100', '--json', 'displayTitle,status,conclusion,url']))
-    title = 'Build ' + branch + (' / KSU ' + kernelsu if kernelsu else '')
-    builds = [build for build in builds if build['displayTitle'] == title]
+    legacy_title = 'Build ' + branch + (' / KSU ' + kernelsu if kernelsu else '')
+    title = 'Build ' + branch + (' @ ' + source if source else '') + (' / KSU ' + kernelsu if kernelsu else '')
+    builds = [build for build in builds if build['displayTitle'] == title or
+              (source and build['displayTitle'] == legacy_title and build['status'] != 'completed')]
     if not should_dispatch(builds):
         return {'status': 'candidate build active, successful, or retry limit reached', 'branch': branch,
                 'url': url, 'builds': builds}
     # GITHUB_TOKEN pushes do not trigger another workflow; dispatch explicitly.
     dispatch = ['gh', 'workflow', 'run', 'build.yml', '--ref', TRACK['ci_branch'], '-f', 'source_ref=' + branch]
+    if source:
+        dispatch += ['-f', 'source_revision=' + source]
     if kernelsu:
         dispatch += ['-f', 'kernelsu_revision=' + kernelsu]
     run(dispatch)
@@ -87,4 +100,4 @@ if __name__ == '__main__':
     p.add_argument('revision')
     p.add_argument('--kernelsu', help='detected dev HEAD used to identify a new candidate build')
     a = p.parse_args()
-    print(json.dumps(publish(a.revision, a.kernelsu), indent=2))
+    print(json.dumps(publish(a.revision, a.kernelsu, pin_source=True), indent=2))
