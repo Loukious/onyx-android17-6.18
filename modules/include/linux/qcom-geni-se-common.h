@@ -97,7 +97,9 @@ if (print) { \
 #define SE_DMA_RX_IRQ_EN_CLR	(0xD50)
 
 #define TX_GENI_CANCEL_IRQ		(BIT(14))
+#ifndef SE_HW_PARAM_2
 #define SE_HW_PARAM_2                   (0xE2C)
+#endif
 /* DMA DEBUG Register fields */
 #define DMA_TX_ACTIVE			(BIT(0))
 #define DMA_RX_ACTIVE			(BIT(1))
