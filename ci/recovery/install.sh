@@ -14,7 +14,7 @@ hash() { "$BB" sha256sum "$1" | "$BB" awk '{print $1}'; }
 parts='system_dlkm vendor_dlkm dtbo vendor_boot recovery boot'
 write_started=0
 completed=0
-backup=
+original_dir="$work/original"
 
 find_partition() {
     case "$1" in *dlkm) bases='/dev/block/mapper';; *) bases='/dev/block/by-name /dev/block/bootdevice/by-name';; esac
@@ -51,29 +51,30 @@ restore_ro() {
     if [ "$original_ro" = 1 ]; then "$BB" blockdev --setro "$2"; else "$BB" blockdev --setrw "$2"; fi
 }
 rollback() {
-    say "Installation failed. Restoring all six original images from $backup."
+    say 'Installation failed. Restoring all six original images from recovery working space.'
     if ! stable_layout || ! snapshot_clean; then
-        say "Partition or OTA state changed. Keep recovery open; the original images remain at $backup."
+        say "Partition or OTA state changed. Keep recovery open; temporary originals remain at $original_dir until recovery reboots."
         return 1
     fi
     rollback_failed=0
     for part in $parts; do
         target=$(lookup "$part" 2)
         expected=$(lookup "$part" 4)
-        if [ "$(hash "$backup/$part.img")" != "$expected" ] || ! stable_mapping "$part" "$target"; then
+        if [ "$(hash "$original_dir/$part.img")" != "$expected" ] || ! stable_mapping "$part" "$target"; then
             rollback_failed=1; continue
         fi
         if ! "$BB" blockdev --setrw "$target"; then rollback_failed=1; continue; fi
-        "$BB" dd if="$backup/$part.img" of="$target" bs=1048576 conv=fsync 2>/dev/null || rollback_failed=1
+        "$BB" dd if="$original_dir/$part.img" of="$target" bs=1048576 conv=fsync 2>/dev/null || rollback_failed=1
         restore_ro "$part" "$target" || rollback_failed=1
         stable_mapping "$part" "$target" || rollback_failed=1
         [ "$(hash "$target")" = "$expected" ] || rollback_failed=1
     done
     "$BB" sync
     if [ "$rollback_failed" = 0 ]; then
-        say "Original images restored and verified. Backups remain at $backup."
+        say 'Original images restored and verified.'
+        rm -f "$work/retain-originals"
     else
-        say "Rollback could not be fully verified. Keep recovery open and restore the saved images at $backup."
+        say "Rollback could not be fully verified. Keep recovery open; temporary originals remain at $original_dir until recovery reboots."
     fi
     return "$rollback_failed"
 }
@@ -93,7 +94,21 @@ say 'Checking Onyx recovery, active slot and OTA state.'
 [ "${ONYX_GUARD_ACTIVE:-}" = 1 ] || die 'Start this installer through the recovery ZIP entry.'
 "$BB" sha256sum -c SHA256SUMS >/dev/null 2>&1 || die 'Package checksum verification failed.'
 [ "$(getprop ro.product.device)" = onyx ] || [ "$(getprop ro.vendor.product.device)" = onyx ] || die 'This package supports Onyx only.'
-[ "$(getprop ro.boot.flash.locked)" = 0 ] || die 'An unlocked bootloader is required.'
+# Xiaomi recovery can omit flash.locked and vbmeta.device_state. AVB orange
+# is the bootloader's explicit unlocked report; secureboot describes firmware.
+flash_locked=$(getprop ro.boot.flash.locked)
+vbmeta_state=$(getprop ro.boot.vbmeta.device_state)
+verified_state=$(getprop ro.boot.verifiedbootstate)
+case "$flash_locked:$vbmeta_state:$verified_state" in
+    1:*|*:locked:*|*:*:green|*:*:yellow|*:*:red)
+        die 'An unlocked bootloader is required.';;
+esac
+case "$flash_locked" in ''|0) ;; *) die 'Unknown bootloader lock state.';; esac
+case "$vbmeta_state" in ''|unlocked) ;; *) die 'Unknown vbmeta device state.';; esac
+case "$verified_state" in ''|orange) ;; *) die 'Unknown verified boot state.';; esac
+[ "$flash_locked" = 0 ] || [ "$vbmeta_state" = unlocked ] ||
+    [ "$verified_state" = orange ] || die 'Cannot establish that the bootloader is unlocked.'
+
 if ps -A 2>/dev/null | "$BB" grep -q '[z]ygote'; then die 'Install this ZIP from recovery.'; fi
 slot=$(getprop ro.boot.slot_suffix)
 case "$slot" in _a|_b) ;; *) die 'Cannot determine the active A/B slot.';; esac
@@ -127,46 +142,42 @@ for part in $parts vbmeta; do
     if "$BB" awk -v target="$target" '$2 == target {found=1} END {exit !found}' "$plan"; then die 'Partition targets overlap.'; fi
     expected=$(hash "$target") || die "Cannot hash $part"
     printf '%s\t%s\t%s\t%s\t%s\n' "$part" "$target" "$bytes" "$expected" "$original_ro" >> "$plan"
-    [ "$part" = vbmeta ] || required_bytes=$((required_bytes + bytes))
+    required_bytes=$((required_bytes + bytes))
 done
 "$ENGINE" check-layout "$super" "$slot" "$work" > "$work/layout.txt" 2>&1 || {
     "$BB" cat "$work/layout.txt" | while IFS= read -r line; do say "$line"; done
     die 'The logical partition layout cannot be updated safely by this package.'
 }
+while IFS= read -r line; do
+    case "$line" in 'Exact opposite-slot DLKM aliases:'*)
+        say 'DLKM storage is shared across slots. This install also updates inactive-slot drivers.';;
+    esac
+done < "$work/layout.txt"
 
-# Require persistent storage for all originals. Never place the only rollback
-# copy in recovery's temporary RAM filesystem.
-for candidate in /data /cache /metadata; do
-    if ! "$BB" awk -v p="$candidate" '$2 == p && ($3 == "ext4" || $3 == "f2fs") {found=1} END {exit !found}' /proc/mounts; then continue; fi
-    available=$("$BB" df -Pk "$candidate" | "$BB" awk 'NR == 2 {print $4}')
-    case "$available" in ''|*[!0-9]*) continue;; esac
-    [ "$available" -ge $((required_bytes / 1024 + 65536)) ] || continue
-    backup=$("$BB" mktemp -d "$candidate/onyx-kernel-backup.XXXXXX") || continue
-    break
-done
-[ -n "$backup" ] || die 'Mount writable /data or /cache with enough space for the complete rollback backup.'
-chmod 0700 "$backup"
+# The image engine requires the installed images as its reconstruction input.
+# Stage them in temporary recovery working space; no persistent backup is made.
 available=$("$BB" df -Pk "$work" | "$BB" awk 'NR == 2 {print $4}')
 case "$available" in ''|*[!0-9]*) die 'Cannot measure recovery working space.';; esac
 [ "$available" -ge $((required_bytes * 4 / 1024 + 131072)) ] || die 'Recovery has insufficient working space to rebuild and verify the images.'
-printf '%s\n' "$slot" > "$backup/slot"
-cp "$plan" "$backup/install-plan.tsv"
-cp "$package/kernel.json" "$backup/kernel.json"
-say "Saving and verifying original images in $backup."
+mkdir -m 0700 "$original_dir"
+printf '%s\n' "$slot" > "$original_dir/slot"
+cp "$plan" "$original_dir/install-plan.tsv"
+cp "$package/kernel.json" "$original_dir/kernel.json"
+say 'Reading and verifying installed images in temporary recovery working space.'
 for part in $parts vbmeta; do
     target=$(lookup "$part" 2)
     expected=$(lookup "$part" 4)
-    "$BB" dd if="$target" of="$backup/$part.img" bs=1048576 conv=fsync 2>/dev/null || die "Backup failed: $part"
-    [ "$(hash "$backup/$part.img")" = "$expected" ] || die "Backup verification failed: $part"
+    "$BB" dd if="$target" of="$original_dir/$part.img" bs=1048576 conv=fsync 2>/dev/null || die "Image staging failed: $part"
+    [ "$(hash "$original_dir/$part.img")" = "$expected" ] || die "Staged image verification failed: $part"
 done
 "$BB" sync
-snapshot_clean || die 'OTA state changed while saving backups; no partition was written.'
+snapshot_clean || die 'OTA state changed while staging images; no partition was written.'
 say 'Rebuilding the kernel, drivers and recovery using the installed ROM configuration.'
-if ! "$ENGINE" prepare "$package" "$backup" "$work/prepared" "$work/repack" > "$backup/repack.log" 2>&1; then
-    "$BB" tail -n 8 "$backup/repack.log" | while IFS= read -r line; do say "$line"; done
+if ! "$ENGINE" prepare "$package" "$original_dir" "$work/prepared" "$work/repack" > "$original_dir/repack.log" 2>&1; then
+    "$BB" tail -n 8 "$original_dir/repack.log" | while IFS= read -r line; do say "$line"; done
     die 'Image preparation failed; no partition was written.'
 fi
-cp "$work/prepared/prepared.json" "$backup/prepared.json"
+cp "$work/prepared/prepared.json" "$original_dir/prepared.json"
 seen=' '
 count=0
 while read -r part bytes expected original extra; do
@@ -189,6 +200,7 @@ for part in $parts vbmeta; do
     [ "$(hash "$target")" = "$(lookup "$part" 4)" ] || die "Partition contents changed before installation: $part"
 done
 
+: > "$work/retain-originals"
 write_started=1
 for part in $parts; do
     [ "$(getprop ro.boot.slot_suffix)" = "$slot" ] || die 'Active slot changed during installation.'
@@ -208,5 +220,6 @@ for part in $parts; do
 done
 "$BB" sync
 completed=1
+rm -f "$work/retain-originals"
 say "Kernel, WLAN, all modules and recovery modules installed on $slot."
-say "Original images are saved at $backup. Reboot when ready."
+say 'Installation verified. No persistent backup was created. Reboot when ready.'

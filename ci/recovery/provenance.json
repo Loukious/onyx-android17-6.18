@@ -25,7 +25,7 @@
     "AnyKernel3-LICENSE.txt": "7644d1de215bd7d543e9cec7cd43da88931551a6507399590d06c1e75ea31edf",
     "GPL-2.0.txt": "bbfc9843646d483c334664f651c208b9839626891d8f17604db2146962f43548",
     "Go-LICENSE.txt": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
-    "README.md": "b9bf2e3e0f3c2292e1f299e959311ffabc6ed410ec11500ac3506b4063d236ec",
+    "README.md": "3ae8a122a48cd763adc72c21686715ea14a3db00f1e050adb1eb160dc072d445",
     "build_guard.sh": "a92cc1416e6ab01cd06ebf3e58fdcf5087ddc25cb2955565116a9cc7e6574557",
     "busybox-notices/GPL-2.0.txt": "bbfc9843646d483c334664f651c208b9839626891d8f17604db2146962f43548",
     "busybox-notices/NOTICE.txt": "18070d5bbd3695cbdbe3c648210d1e3133b8894cd9df03954e7809b4c441205b",
@@ -41,7 +41,8 @@
     "engine/extract_test.go": "3065cfc5a7242d5eb1f4ecb8f1046f8adf9a53b50bd1a6afd245a2fc188d3ce1",
     "engine/go.mod": "1c84775a868a7e755620ce53ed39e24ff89ecd8151e6a26ce73a53aa7aacb48d",
     "engine/images_test.go": "8526890def242d373168455cebb26c388be75ec10e0ba7fe08b0b5ded954ec76",
-    "engine/layout.go": "71d9000a99abb65ad7a1b0e78e2477fc42b957d33bef159da4e861bab9b0ebe0",
+    "engine/layout.go": "3428a7957242323b739563948aec2da48422345f0d99e3217ebfeb07ff3aa534",
+    "engine/layout_test.go": "70ac4283a03e8b6c3842dc0e3d71dd62fd8fa13c06f9a640b08fc6cc9058340b",
     "engine/legacy.go": "c5a279e919bc1a6bc6c6fc58a37c5e5023de4d010b56d3f93a7e5fb63ead7851",
     "engine/main.go": "cb840ccc2782186d670f4e519a6f5429fc496cb7ad604faa32cdd1a5bb7a4222",
     "engine/migration_test.go": "205afe089c39c46434b181e8f654acbc6122a59ee543f595f55ad53519014a0e",
@@ -57,24 +58,64 @@
     "engine/testdata/vendor-v4.gz": "50299cd1f70c03ce57a1ccb470c05b5eeade3f37e942c3bccdc44b5038694db1",
     "engine/testdata/vendor-v4.json": "c92b2d47fa4ad5a5e58c45b0643f64da9fd585811ec36a315e5314b5fa60ad98",
     "erofs-meta.c": "59b47067dd8b97592792b950c8a68fe9eb642d01f7e13932d68acc1cd2faf8d3",
-    "install.sh": "a4d33cee07d9802d8a2c0f390a93b4a6c43a6337d35da5b329cb4707cd4f572b",
+    "install.sh": "21fe0551d3750bac141f419d50c82e1d607bb756794eba1fa595e6ede47889a8",
     "legacy-onyx.json": "e09d28334debfa3e736ddfacf3f8631e68aeebecdf2df8a3b594fb6361e235d0",
-    "recovery-guard.c": "3af4232e49632cd22567e63587004cd21cc1131fd8487c28dec873f558a36f76",
+    "recovery-guard.c": "0adc47b9828b5b4380e2f7d5ec9a43501c99f7b4a404c8b744758e0cb9f71808",
     "tests/dm_cases.py": "ec41ed57edb4d2d92c7c30e50da4ab729de1492f61336f6de0d9a602c8f62a0d",
     "tests/guard_cases.py": "94685e529c2d777c2592fe4275f4a4e8304e71a69035a69ca81a9f905b25769e",
     "toolchain-packages.tsv": "dd16b7ca6d2ff0b66e18584b4eb7de9e91eb0c9278c2c851792b61bb3947fc1e",
     "tools/erofs-meta": "62244c09c53adfdb64cf0fcc1b2339c1ab609cdbe929ecc06b5ab3fd226b95e0",
     "tools/fsck.erofs": "9a810bbc5d7e6a1d43f1fa40e805997ed194dc81e6901e3d096244da061223a8",
     "tools/mkfs.erofs": "91185358f371e9428c9d460d7c7f0a39ca0b292e489d37cad7d63d87ff940a7c",
-    "tools/onyx-recovery": "b8c427df336709fd311f2bf922068739ef014774aa8a99e6fa5da5cb14443bac",
-    "tools/recovery-guard": "e064fafe9053a25e1580f63a1ded0426a57f061f513364093c1f6127f2579425",
-    "tools/recovery-guard-build.json": "06639f6f195652b3b84386d99b210f2ed7f02210007dea2156910a4a38b2ee9d",
-    "update-binary.sh": "68901a692b3b71728d62a35fd2a25609efc2b8df02c8a67e6d7e3b3a02537f27",
+    "tools/onyx-recovery": "53924b36557b67e36ddf06c38f85a535b9b0ed16f63e78c495aaa2f0684843d7",
+    "tools/recovery-guard": "9e3bfb2218e2b09ec41909bb5337e0ed8c65ced9e3d311fef6d6519e6097373c",
+    "tools/recovery-guard-build.json": "d6fbe6cbb7bbd14cfdf92dc7b483d0f22371e75e0577032d01ab619277579530",
+    "update-binary.sh": "33d0b5e488cbe85abdaab27f59efa0a66e9f8fc450a5c9848fb4d26c3825d979",
     "vendor/erofs-utils.tar.gz": "1118fb3b951031676e36903280f33107495aad41d45578d1fe776af38bd00013",
     "vendor/lz4.tar.gz": "aac1655e2278bbfc49bbc99fe6c26744ac7b56569388027ea905e3447e5d0ab6",
     "vendor/musl-1.2.5.tar.gz": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
     "vendor/sources.json": "aa16f0790a7886009f1d511eefe0ed7148a73c94b315216a301fcc6dba3f65dc",
     "vendor/zlib.tar.gz": "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
     "vendor/zstd.tar.gz": "9255722e5ad28adecf0f8009f1c07b88a3f19ca0c7df50e772f29f91242f22ca"
+  },
+  "recovery_guard_local_correction": {
+    "reason": "Use ARM64 open flag ABI for O_DIRECTORY and O_NOFOLLOW",
+    "source_sha256": "0adc47b9828b5b4380e2f7d5ec9a43501c99f7b4a404c8b744758e0cb9f71808",
+    "guard_build_receipt": "tools/recovery-guard-build.json"
+  },
+  "installer_local_correction": {
+    "reason": "Accept explicit AVB orange unlocked state; stage originals in temporary recovery RAM without persistent-storage backup preflight",
+    "validation": "Production shell flow tested against file-backed fixtures: explicit unlocked states, missing/locked/unknown evidence rejection, successful installation without persistent backup mounts, complete write/readback rollback, and retention of verified temporary originals after rollback failure. Shell syntax and complete package checksum verification passed. No device operation or installation."
+  },
+  "recovery_engine_local_correction": {
+    "reason": "Allow proven exact opposite-slot DLKM prefixes in either active slot on clean read-only/updated Virtual A/B metadata. Require equal extent sizes, physical starts and logical offsets in the complete shorter partition, with any longer tail disjoint from that prefix; reject partial overlaps, unrelated sharing and changed mappings.",
+    "source_sha256": "3428a7957242323b739563948aec2da48422345f0d99e3217ebfeb07ff3aa534",
+    "binary_sha256": "53924b36557b67e36ddf06c38f85a535b9b0ed16f63e78c495aaa2f0684843d7",
+    "test_source_sha256": "70ac4283a03e8b6c3842dc0e3d71dd62fd8fa13c06f9a640b08fc6cc9058340b",
+    "validation": "Pinned Go 1.25.4 host engine tests including AOSP liblp prefix fixtures and both-slot tail regressions; original fixed3 source fails the new active-tail regression; reproducible static ARM64 engine build; exact source/tool provenance verification. External EROFS/AVB tests skipped because their optional utilities are not configured. No device operation, installation or flashing.",
+    "prior_fixed3_read_only_device_validation": {
+      "source_sha256": "d2d095741894282e825b127a9fda9fd5355696f2a0f03e5bb4bf4d0a831d84a3",
+      "binary_sha256": "1f611d5632d8e9b0000652cb7d25e85efdf12a379ac1e5ea22b8fd204e420f02",
+      "evidence": {
+        "device_serial": "5493f3c6",
+        "active_slot": "_b",
+        "read_only": true,
+        "check_layout_exit": 0,
+        "mapping_guard_exits": [
+          0,
+          0
+        ],
+        "snapshot_guard_exits": [
+          0,
+          0
+        ],
+        "metadata_digests": [
+          "b62fbbdbbe998bc0307bff280738704297040ca77d995b1873f3fe041aa61dde",
+          "1e8ea9a96ecbebc1f20ac14ac1583d242f1817ef422201ded81269c4c7764df2"
+        ],
+        "evidence_sha256": "fc359c3176497e8bbbbcc58720f6301a1493c470ba07d93d948db81c1e195103"
+      }
+    },
+    "device_tested": false
   }
 }

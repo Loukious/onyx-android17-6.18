@@ -14,16 +14,19 @@ import (
 )
 
 // Android liblp on-disk structures, not a writable partition implementation.
-// Besides checking the active mappings, reject extents shared with any other
-// logical partition or the inactive slot before permitting a recovery write.
-type lpExtent struct{ Start, Count uint64 }
+// Besides checking the active mappings, reject shared extents except a proven
+// exact opposite-slot DLKM alias on a completed Virtual A/B layout. Updating
+// such an alias changes the inactive slot's drivers too, without changing liblp.
+type lpExtent struct{ Start, Count, Logical uint64 }
 type lpPartition struct {
-	Name    string
-	Extents []lpExtent
+	Name       string
+	Attributes uint32
+	Extents    []lpExtent
 }
 type lpMetadata struct {
-	Partitions []lpPartition
-	Digest     string
+	Partitions  []lpPartition
+	Digest      string
+	HeaderFlags uint32
 }
 
 var lpName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -135,6 +138,9 @@ func readLP(super string, slot int) (*lpMetadata, error) {
 		return nil, fmt.Errorf("unexpected physical super device")
 	}
 	result := &lpMetadata{}
+	if headerSize == 256 && le.Uint16(data[6:]) == 2 {
+		result.HeaderFlags = le.Uint32(data[128:])
+	}
 	fullSum := sha256.Sum256(data[:headerSize+tablesSize])
 	result.Digest = hex.EncodeToString(fullSum[:])
 	seen := make(map[string]bool)
@@ -154,19 +160,25 @@ func readLP(super string, slot int) (*lpMetadata, error) {
 			return nil, fmt.Errorf("duplicate logical partition name")
 		}
 		seen[name] = true
-		partition := lpPartition{Name: name}
+		partition := lpPartition{Name: name, Attributes: flags}
+		logical := uint64(0)
 		for _, e := range extents[start : start+n] {
 			sectors, kind, target, source := le.Uint64(e), le.Uint32(e[8:]), le.Uint64(e[12:]), le.Uint32(e[20:])
 			if sectors == 0 {
 				return nil, fmt.Errorf("empty logical extent")
 			}
+			if sectors > ^uint64(0)-logical {
+				return nil, fmt.Errorf("logical extent size overflow")
+			}
 			if kind == 1 {
+				logical += sectors
 				continue
 			}
 			if kind != 0 || source != 0 || target < first || target > size || sectors > size-target {
 				return nil, fmt.Errorf("logical extent exceeds physical super bounds")
 			}
-			partition.Extents = append(partition.Extents, lpExtent{target, sectors})
+			partition.Extents = append(partition.Extents, lpExtent{target, sectors, logical})
+			logical += sectors
 		}
 		result.Partitions = append(result.Partitions, partition)
 	}
@@ -174,6 +186,52 @@ func readLP(super string, slot int) (*lpMetadata, error) {
 }
 
 func overlap(a, b lpExtent) bool { return a.Start < b.Start+b.Count && b.Start < a.Start+a.Count }
+
+func exactDLKMAlias(active, other lpPartition, activeFlags, otherFlags uint32) bool {
+	// LP_HEADER_FLAG_VIRTUAL_AB_DEVICE and READONLY | UPDATED are evidence
+	// that this is a completed Virtual A/B shared partition, not arbitrary
+	// overlap. SLOT_SUFFIXED is also allowed after readLP resolves the name.
+	if activeFlags != 1 || otherFlags != 1 || active.Attributes & ^uint32(2) != 5 || other.Attributes & ^uint32(2) != 5 {
+		return false
+	}
+	base := strings.TrimSuffix(strings.TrimSuffix(active.Name, "_a"), "_b")
+	if base != "vendor_dlkm" && base != "system_dlkm" {
+		return false
+	}
+	opposite := base + "_b"
+	if active.Name == base+"_b" {
+		opposite = base + "_a"
+	} else if active.Name != base+"_a" {
+		return false
+	}
+	if other.Name != opposite || len(active.Extents) == 0 || len(other.Extents) == 0 {
+		return false
+	}
+	prefix, extended := active.Extents, other.Extents
+	if len(prefix) > len(extended) {
+		prefix, extended = extended, prefix
+	}
+	logical := uint64(0)
+	for i, extent := range prefix {
+		if extent.Logical != logical || extent != extended[i] {
+			return false
+		}
+		logical += extent.Count
+	}
+	// Either slot may have a larger suffix. It must remain disjoint from
+	// the exact shared prefix, regardless of which slot is being installed.
+	for _, tail := range extended[len(prefix):] {
+		if tail.Logical < logical {
+			return false
+		}
+		for _, extent := range prefix {
+			if overlap(extent, tail) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 func checkLayout(super, slot, maps string) error {
 	index := 0
@@ -190,6 +248,7 @@ func checkLayout(super, slot, maps string) error {
 			return fmt.Errorf("logical metadata slot %d: %w", i, err)
 		}
 	}
+	var aliases []string
 	for _, base := range []string{"vendor_dlkm", "system_dlkm"} {
 		name := base + slot
 		var selected *lpPartition
@@ -208,19 +267,28 @@ func checkLayout(super, slot, maps string) error {
 				}
 			}
 		}
+		shared := false
 		for _, meta := range metadata {
 			for _, other := range meta.Partitions {
 				if other.Name == name {
 					continue
 				}
+				alias := exactDLKMAlias(*selected, other, metadata[index].HeaderFlags, meta.HeaderFlags)
 				for _, a := range selected.Extents {
 					for _, b := range other.Extents {
 						if overlap(a, b) {
+							if alias {
+								shared = true
+								continue
+							}
 							return fmt.Errorf("%s shares physical data with %s; a full ROM OTA is required for this layout", name, other.Name)
 						}
 					}
 				}
 			}
+		}
+		if shared {
+			aliases = append(aliases, base)
 		}
 		text, err := os.ReadFile(filepath.Join(maps, base+"-map.txt"))
 		if err != nil {
@@ -239,12 +307,15 @@ func checkLayout(super, slot, maps string) error {
 			start, e1 := strconv.ParseUint(words[0], 10, 64)
 			count, e2 := strconv.ParseUint(words[1], 10, 64)
 			physical, e3 := strconv.ParseUint(words[4], 10, 64)
-			if e1 != nil || e2 != nil || e3 != nil || start != logical || count != selected.Extents[i].Count || physical != selected.Extents[i].Start {
+			if e1 != nil || e2 != nil || e3 != nil || start != logical || start != selected.Extents[i].Logical || count != selected.Extents[i].Count || physical != selected.Extents[i].Start {
 				return fmt.Errorf("%s mapping differs from logical metadata", name)
 			}
 			logical += count
 		}
 	}
-	fmt.Printf("Active slot %s; separate DLKM extents; metadata %s %s\n", slot, metadata[0].Digest, metadata[1].Digest)
+	fmt.Printf("Active slot %s; verified DLKM mapping; metadata %s %s\n", slot, metadata[0].Digest, metadata[1].Digest)
+	if len(aliases) != 0 {
+		fmt.Printf("Exact opposite-slot DLKM aliases: %s; updating these blocks also updates inactive-slot drivers\n", strings.Join(aliases, ", "))
+	}
 	return nil
 }

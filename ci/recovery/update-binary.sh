@@ -6,7 +6,12 @@ case "$OUTFD" in ''|*[!0-9]*) exit 1;; esac
 export OUTFD
 ONYX_WORK=$(mktemp -d /tmp/onyx-install.XXXXXX)
 export ONYX_WORK
-trap 'rm -rf "$ONYX_WORK"' EXIT
+cleanup() {
+    # Preserve temporary input images if rollback could not be verified.
+    # These files live only until recovery reboots; they are not a backup.
+    if [ ! -f "$ONYX_WORK/retain-originals" ]; then rm -rf "$ONYX_WORK"; fi
+}
+trap cleanup EXIT
 unzip -p "$ZIPFILE" tools/onyx-recovery > "$ONYX_WORK/onyx-recovery"
 chmod 0755 "$ONYX_WORK/onyx-recovery"
 "$ONYX_WORK/onyx-recovery" extract "$ZIPFILE" "$ONYX_WORK/package"

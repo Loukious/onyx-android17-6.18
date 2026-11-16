@@ -13,19 +13,18 @@ this ZIP: the complete package already includes that injection-enabled driver.
 2. Boot custom recovery on an unlocked Onyx. Finish any pending ROM OTA and boot
    Android once before returning to recovery. The installed ROM must already
    use AVB flags 3, disabling verification and verity.
-3. Make `/metadata` and writable persistent backup storage available in recovery.
-   The installer uses mounted `/data`, `/cache`, or `/metadata`, in that order,
-   when there is enough space. Encrypted `/data` must be decrypted or another
-   sufficiently large backup location must be mounted. Recovery must also have
-   enough temporary space for all image reconstruction and verification.
+3. Make `/metadata` available for checking OTA snapshot state. Recovery must have
+   enough temporary RAM working space for image reconstruction and verification.
+   Decrypted `/data`, `/cache`, and a USB OTG drive are not required.
 4. Select **Install update / ADB sideload** or install the ZIP from storage.
-   For sideload, run `adb sideload Onyx-Complete-<kernel-release>.zip` on the PC.
+   For sideload, run `adb.exe sideload Onyx-Complete-<kernel-release>.zip` on the PC.
    Keep recovery open until the installer reports success. Reboot afterward.
 
-The installer checks actual free space and partition sizes. For the saved Onyx
-layouts used in validation, allow roughly 1 GiB of persistent backup space and
-3 GiB of available recovery working space. The exact requirement is calculated
-from the installed partitions. It reports the backup directory on screen.
+The installer checks actual free space and partition sizes. It requires temporary
+working space equal to four times the total image sizes plus 128 MiB. The exact
+requirement is calculated from the installed partitions. Original images are
+staged under `/tmp/onyx-install.*/original` as input to reconstruction and for
+immediate rollback. No persistent backup is created.
 
 ## Images and compatibility
 
@@ -45,8 +44,15 @@ there. ROMs with a separate recovery module directory have that directory
 updated as well.
 
 Supported layouts use Android boot/vendor-boot headers 3 or 4, EROFS DLKM images,
-flat `lib/modules` directories and separate active/inactive logical partition
-storage. The release kernel must provide every required ROM driver or a builtin
+flat `lib/modules` directories and verified logical partition storage. Separate
+active/inactive storage is supported, as are exact opposite-slot DLKM aliases
+on clean Virtual A/B layouts marked read-only and updated in liblp metadata.
+The shorter partition must match an exact prefix of the longer partition at the
+same logical offsets. Either slot may have an additional disjoint tail. An active
+tail is updated; an inactive tail is left untouched. Updating shared
+DLKM blocks also updates the inactive slot's drivers; switching slots does not
+restore the old drivers. The installer reports shared storage before rebuilding
+images. The release kernel must provide every required ROM driver or a builtin
 equivalent. The recorded Onyx 6.6 migration additionally recognizes old ARM64 ELF
 modules by their `.modinfo` name and 6.6 vermagic. It uses reviewed 6.18 load
 profiles when retiring those drivers; unrelated or unknown modules cause an
@@ -54,7 +60,7 @@ abort. Small `system_dlkm` partitions retain their compatible module selection;
 the full catalog remains available in `vendor_dlkm`.
 
 This is not an installer for every stock or custom Onyx layout. Missing drivers,
-unsupported image formats, active snapshots, shared inactive-slot extents,
+unsupported image formats, active snapshots, unproven or partial shared extents,
 insufficient partition capacity, and locked or AVB-enforced configurations are
 rejected before writing partitions. It does not resize logical partitions,
 change the active slot, patch SELinux policy, or change parallel module loading.
@@ -63,12 +69,17 @@ hardlinks, module options/blocklists and vendor bootconfig. Required kernel
 command-line sizes and the external firmware search path are updated.
 
 All six images are rebuilt and verified before the first partition write. The
-installer saves and verifies original images on persistent storage, checks
+installer stages and verifies original images in recovery RAM, checks
 snapshot/layout state throughout installation, and hashes every written image.
 A detected write or readback failure attempts to restore all six originals.
 If restoration cannot be verified, keep recovery open and recover using the
-saved image set. Power loss cannot be made transactional by this installer.
-`init_boot`, `vbmeta`, the other slot and the ROM's recovery application stay in
+temporary original images at the path printed on screen. They are retained only
+for the current recovery session. They disappear on reboot or power loss; no
+persistent backup is created. Power loss cannot be made transactional by this
+installer.
+`init_boot`, `vbmeta`, inactive-slot boot images and the ROM's recovery application
+stay in place. Inactive DLKM drivers change when their blocks are shared with the
+active slot as described above. Logical metadata and partition sizes stay in
 place. AVB footer hashes/trees are regenerated for the existing disabled-AVB
 configuration; they do not carry the ROM maintainer's signature or FEC data.
 
