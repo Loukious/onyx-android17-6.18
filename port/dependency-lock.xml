@@ -11,7 +11,7 @@
   <extend-project name="platform/prebuilts/build-tools" path="prebuilts/build-tools" revision="e25d4821f50af3f6e0b87d7751dfd27037445fe5" upstream="main-kernel-2026" />
   <extend-project name="platform/prebuilts/clang-tools" path="prebuilts/clang-tools" revision="4155cb466dcd9b53c6f873829c53aa6f905449dd" upstream="main-kernel-2026" />
   <extend-project name="kernel/prebuilts/build-tools" path="prebuilts/kernel-build-tools" revision="78af2daf5d9d36fc6e1ddb28ee0d7b6516709eb4" upstream="main-kernel-2026" />
-  <extend-project name="platform/prebuilts/rust-toolchain/linux-x86" path="prebuilts/rust-toolchain/linux-x86" revision="a04f70c5179f23eff11c58cb480acee4afb1334b" upstream="main-kernel-2026" />
+  <extend-project name="platform/prebuilts/rust-toolchain/linux-x86" path="prebuilts/rust-toolchain/linux-x86" revision="844e1621bcf67c25ceae15bdd3ddd698cbe8df7c" upstream="main-kernel-2026" />
   <extend-project name="toolchain/prebuilts/ndk/r27" path="prebuilts/ndk-r27" revision="86613fbdf16e5d1528ea2015d8ee00c29cc747ae" upstream="main-kernel-2026" />
   <extend-project name="platform/prebuilts/jdk/jdk11" path="prebuilts/jdk/jdk11" revision="b43dc974b874d58e939c51c774276d3ed173e4e1" upstream="main-kernel-2026" />
   <extend-project name="platform/external/bazel-contrib-bazel_features" path="external/bazel-contrib-bazel_features" revision="b0305957ee55fc3c2401ec3f2fe476276e350904" upstream="main-kernel-2026" />
