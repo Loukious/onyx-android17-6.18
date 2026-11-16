@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+/* The wired-only Onyx port evaluates VBAT OVP without an absent wireless
+ * provider aborting the check. The imported 4420/4470 mV Global bases are
+ * below the stock Global JEITA targets. Use its normal/FFC maxima while
+ * retaining the native trip hysteresis, recharge delta and China limits.
+ */
+&mca_vbat_ovp_mon {
+	vbat_ovp_threshold_normal_gl = <4530>;
+	vbat_ovp_threshold_ffc_gl = <4580>;
+};

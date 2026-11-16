@@ -74,7 +74,8 @@
     "onyx-sm8735-overlay.dtbo": [
       "devicetrees/onyx-6.18-shared-wcn-sw-ctrl.dts",
       "devicetrees/onyx-6.18-pmic-inventory.dts",
-      "devicetrees/onyx-6.18-wlan-temperature.dts"
+      "devicetrees/onyx-6.18-wlan-temperature.dts",
+      "devicetrees/onyx-6.18-global-vbat-ovp.dts"
     ]
   },
   "board_overlay": "onyx-sm8735-overlay.dtbo",
