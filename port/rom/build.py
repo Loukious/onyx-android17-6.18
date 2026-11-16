@@ -20,6 +20,25 @@ def read(path):
     return json.loads(path.read_text())
 
 
+def module_shipping_roots(source, report):
+    """Retain source-ROM placement when catalog providers move into Common."""
+    spec = importlib.util.spec_from_file_location('onyx_shipping_catalog',
+                                                  source / 'port/catalog.py')
+    catalog = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(catalog)
+    migrated = {Path(entry['output']).name for entry in catalog.native_modules()}
+    external = {entry['output'] for entry in catalog.vendor_modules()}
+    records = report.get('native_module_verification')
+    if not isinstance(records, list):
+        raise ValueError('Source-ROM placement requires verified native module records')
+    native = [entry['module'] for entry in records]
+    if len(native) != len(set(native)) or not migrated <= set(native):
+        raise ValueError('Verified native module records omit or duplicate source-ROM providers')
+    return {'system_dlkm': sorted(set(native) - migrated - external),
+            'vendor_dlkm': sorted(external | migrated),
+            'vendor_ramdisk': sorted(external | migrated)}
+
+
 def digest(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -75,7 +94,8 @@ def package(source, artifact, destination):
             raise ValueError('Build output hash mismatch: ' + name)
     if read(artifact / 'inputs/sources.json') != read(source / 'port/sources.json'):
         raise ValueError('Build outputs belong to different source inputs')
-    for filename in ('common-source-hashes.json', 'module-source-hashes.json', 'modules.json'):
+    for filename in ('common-source-hashes.json', 'module-source-hashes.json', 'modules.json',
+                     'components.json', 'kernelsu-lock.json', 'module-loading.json'):
         if read(artifact / 'inputs' / filename) != read(source / 'port' / filename):
             raise ValueError('Build outputs belong to different source: ' + filename)
 
@@ -101,21 +121,28 @@ def package(source, artifact, destination):
         builder = Builder()
         trees = {}
         old_names = {name for part in layout['partitions'].values() for name in part['modules']}
-        additions = sorted(entry['output'] for entry in read(source / 'port/modules.json')
-                           if entry['output'] not in old_names)
+        shipping_roots = module_shipping_roots(source, report)
+        external = {entry['output'] for entry in read(source / 'port/modules.json')}
+        migrated = set(shipping_roots['vendor_dlkm']) - external
+        policy = assembler.load_policy(artifact / 'inputs/module-loading.json')
         for partition, definition in layout['partitions'].items():
             trees[partition] = work / ('requests-' + partition)
             target = trees[partition] / 'lib/modules'
             target.mkdir(parents=True)
             for name, contents in definition['config'].items():
                 if partition == 'vendor_dlkm' and name == 'modules.load':
-                    contents += ''.join(n + '\n' for n in additions)
+                    # Retain the released source-ROM order: migrated USB WLAN
+                    # roots precede the existing native peripheral roots.
+                    explicit = set(assembler.policy_additions(policy, partition, name))
+                    additions = sorted((explicit & migrated) - set(contents.splitlines()))
+                    contents += ''.join(module + '\n' for module in additions)
                 (target / name).write_text(contents)
         # These are the three audited stale native softdeps, with their evidence
         # descriptions maintained by the source port. Unknown dependencies fail.
         profile = read(source / 'port/recovery/examples/saved-baseline-profile.json')
         reports, verification = assembler.assemble_modules(builder, artifact, trees,
-                                                           {'omissions': profile['omissions']})
+            {'omissions': profile['omissions'],
+             'shipping_roots': shipping_roots})
         all_modules = {p.name for p in (work / 'catalog').glob('*.ko')}
         builtins = {assembler.norm(n) for n in (artifact / 'gki/modules.builtin').read_text().splitlines()}
         missing = {n for n in old_names if n not in all_modules and assembler.norm(n) not in builtins}

@@ -6,6 +6,8 @@ This module contains a full list of kernel modules
  compiled by GKI.
 """
 
+load("//onyx:native_modules.bzl", "NATIVE_WIRELESS_MODULES")
+
 visibility("private")
 
 _COMMON_GKI_MODULES_LIST = [
@@ -146,7 +148,7 @@ _ARM64_GKI_MODULES_LIST = [
     "net/sunrpc/auth_gss/auth_rpcgss.ko",
     "net/sunrpc/auth_gss/rpcsec_gss_krb5.ko",
     "net/sunrpc/sunrpc.ko",
-]
+] + NATIVE_WIRELESS_MODULES
 
 _X86_GKI_MODULES_LIST = [
     # keep sorted

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "new_modules_default": "manual",
+  "groups": [
+    {
+      "name": "existing-usb-wifi",
+      "modules": [
+        "ath.ko",
+        "ath9k_common.ko",
+        "ath9k_htc.ko",
+        "ath9k_hw.ko",
+        "rt2800lib.ko",
+        "rt2800usb.ko",
+        "rt2x00lib.ko",
+        "rt2x00usb.ko",
+        "rtl8xxxu.ko"
+      ],
+      "ship": [
+        "vendor_ramdisk",
+        "vendor_dlkm"
+      ],
+      "load": {
+        "vendor_dlkm": [
+          "modules.load"
+        ]
+      },
+      "reason": "Preserve the existing released USB Wi-Fi load profile."
+    },
+    {
+      "name": "existing-native-features",
+      "modules": [
+        "btintel.ko",
+        "btrtl.ko",
+        "btusb.ko",
+        "can327.ko",
+        "ems_usb.ko",
+        "esd_usb.ko",
+        "etas_es58x.ko",
+        "f81604.ko",
+        "gs_usb.ko",
+        "kvaser_usb.ko",
+        "mcba_usb.ko",
+        "peak_usb.ko",
+        "ucan.ko",
+        "usb_8dev.ko",
+        "vxcan.ko",
+        "cdc_subset.ko",
+        "rndis_host.ko",
+        "ch341.ko",
+        "cp210x.ko",
+        "option.ko",
+        "pl2303.ko",
+        "usb_wwan.ko",
+        "lockd.ko",
+        "nfs.ko",
+        "nfsv3.ko",
+        "nfsv4.ko",
+        "grace.ko",
+        "nls_ucs2_utils.ko",
+        "cifs.ko",
+        "cifs_md4.ko",
+        "can-isotp.ko",
+        "can-j1939.ko",
+        "dns_resolver.ko",
+        "af_packet_diag.ko",
+        "auth_rpcgss.ko",
+        "rpcsec_gss_krb5.ko",
+        "sunrpc.ko"
+      ],
+      "ship": [
+        "vendor_dlkm"
+      ],
+      "load": {
+        "vendor_dlkm": [
+          "modules.load"
+        ]
+      },
+      "reason": "Preserve the existing released NetHunter, CAN and network filesystem load profile."
+    }
+  ]
+}

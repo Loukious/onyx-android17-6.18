@@ -1,0 +1,44 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -246,6 +246,7 @@
+     ddk_headers_archive = ":kernel_aarch64_ddk_headers_archive",
+     ddk_module_headers = [":all_headers_aarch64"],
+     defconfig = "arch/arm64/configs/gki_defconfig",
++    pre_defconfig_fragments = ["//onyx:native_wireless.fragment"],
+     extra_dist = [
+         ":test_mappings_zip",
+         ":tests_zip_arm64",
+diff --git a/bazel/modules_private.bzl b/bazel/modules_private.bzl
+--- a/bazel/modules_private.bzl
++++ b/bazel/modules_private.bzl
+@@ -5,6 +5,8 @@
+ This module contains a full list of kernel modules
+  compiled by GKI.
+ """
++
++load("//onyx:native_modules.bzl", "NATIVE_WIRELESS_MODULES")
+ 
+ visibility("private")
+ 
+@@ -146,7 +148,7 @@
+     "net/sunrpc/auth_gss/auth_rpcgss.ko",
+     "net/sunrpc/auth_gss/rpcsec_gss_krb5.ko",
+     "net/sunrpc/sunrpc.ko",
+-]
++] + NATIVE_WIRELESS_MODULES
+ 
+ _X86_GKI_MODULES_LIST = [
+     # keep sorted
+diff --git a/net/wireless/chan.c b/net/wireless/chan.c
+--- a/net/wireless/chan.c
++++ b/net/wireless/chan.c
+@@ -1551,8 +1551,6 @@
+ {
+ 	if (!rdev->ops->set_monitor_channel)
+ 		return -EOPNOTSUPP;
+-	if (!cfg80211_has_monitors_only(rdev))
+-		return -EBUSY;
+ 
+ 	return rdev_set_monitor_channel(rdev, dev, chandef);
+ }

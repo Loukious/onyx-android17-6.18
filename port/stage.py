@@ -9,6 +9,9 @@ import shutil
 import subprocess
 import tempfile
 
+from catalog import check_generated, generated_files
+from generate_imports import derive, ordered_lock
+
 HERE = Path(__file__).resolve().parent
 RECEIPT = ".staged-files.json"
 
@@ -23,8 +26,16 @@ def main():
     parser.add_argument("workspace", type=Path)
     args = parser.parse_args()
     workspace = args.workspace.resolve()
+    check_generated()
     if not (workspace / ".repo").is_dir():
         parser.error("run prepare.py first")
+    imports = json.loads((HERE / "imports.json").read_text())
+    from catalog import load_catalog
+    expected, _ = derive(load_catalog(), json.loads((HERE / "sources.json").read_text()),
+                         workspace, HERE / "patches")
+    generated, _ = ordered_lock(expected, imports)
+    if generated != (HERE / "imports.json").read_text():
+        parser.error("source lock is stale; run port/generate_imports.py before staging")
     destination = workspace / "onyx"
     previous = None
     if destination.exists():
@@ -36,7 +47,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix=".onyx-stage-", dir=workspace) as temporary:
         root = Path(temporary)
-        for source in json.loads((HERE / "imports.json").read_text()):
+        for source in imports:
             repo = workspace / source["project"]
             revision = subprocess.check_output(
                 ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
@@ -55,7 +66,10 @@ def main():
         for patch in sorted((HERE / "patches").glob("*.patch")):
             subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i", str(patch)],
                            cwd=root, check=True)
-        for name in ["BUILD.bazel", "Kconfig", "scm_defconfig", "platform_defconfig", "relay.fragment", "kmi-symbols"]:
+        projections = generated_files()
+        for name in ["BUILD.bazel", "native_modules.bzl", "native_wireless.fragment", "native-kmi-symbols"]:
+            (root / name).write_text(projections[name])
+        for name in ["Kconfig", "scm_defconfig", "platform_defconfig", "relay.fragment", "kmi-symbols"]:
             shutil.copyfile(HERE / name, root / name)
         contents = hashes(root)
         (root / RECEIPT).write_text(json.dumps(contents, indent=2) + "\n")

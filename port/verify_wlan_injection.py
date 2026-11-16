@@ -42,6 +42,9 @@ def verify(root):
     def header(name):
         staged = root / 'include' / name
         return (staged if staged.is_file() else kernel / 'include' / name).read_text()
+    def wireless(name):
+        staged = root / name
+        return staged if staged.is_file() else kernel / name
     ieee = header('linux/ieee80211.h')
     radiotap = header('net/ieee80211_radiotap.h')
     cfg = header('net/cfg80211.h')
@@ -61,7 +64,7 @@ def verify(root):
                  'ieee80211_is_mgmt', 'ieee80211_is_ctl', 'ieee80211_is_data',
                  'ieee80211_is_data_qos', 'ieee80211_is_ext'):
         definitions.append(function(ieee, name))
-    definitions.append(function((root / 'net/wireless/util.c').read_text(),
+    definitions.append(function(wireless('net/wireless/util.c').read_text(),
                                 'ieee80211_hdrlen'))
     for name in ('ieee80211_radiotap_presence', 'ieee80211_radiotap_flags',
                  'ieee80211_radiotap_channel_flags', 'ieee80211_radiotap_tx_flags',
@@ -72,7 +75,7 @@ def verify(root):
     params = (root / PARAMS).read_text()
     params = params[params.index('enum cdp_tx_injection_preamble {'):
                     params.index('\nstatic inline bool cdp_nbuf_is_injection')]
-    rt = (root / 'net/wireless/radiotap.c').read_text()
+    rt = wireless('net/wireless/radiotap.c').read_text()
     rt = rt[rt.index('static const struct radiotap_align_size'):]
     parser = hdd[hdd.index('static int hdd_injection_legacy_rate('):
                  hdd.index('\nstatic void hdd_monitor_mode_tx_inject(')]
@@ -180,7 +183,9 @@ def verify(root):
         'malformed_packets': 12000, 'sanitizers': 'ASan+UBSan',
         'source_sha256': {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
                           for name in (HDD, WMA, DP, PARAMS, POWER, HTT, MLME,
-                                       MLME_HEADER, MLME_CONTROL, 'net/wireless/radiotap.c')},
+                                       MLME_HEADER, MLME_CONTROL)},
+        'native_source_sha256': {'net/wireless/radiotap.c': hashlib.sha256(
+            wireless('net/wireless/radiotap.c').read_bytes()).hexdigest()},
         'limits': ['Uses actual cfg80211 radiotap iterator, frame parser and HTT encoder.',
                    'Actual WMA queue, refill, lookup, completion/release, init, stop and coex-resume functions use mocked scheduling/DP.',
                    'Actual MLME READY, ownership, snapshot and generation checks cover restart and failed-drain admission.',

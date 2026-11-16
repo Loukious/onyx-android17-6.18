@@ -1,11 +1,39 @@
 {
-  "patch": "0005-required-common-fixes-with-blk-plug-ordering.patch",
-  "patch_sha256": "85a35bfa73bebd36887e919c32adcc09dd2a5c91743d1100d4edd23419a1f2c5",
+  "patch": "0006-required-common-fixes-with-native-wireless.patch",
+  "patch_sha256": "208d157321851b6d0a49def1f5af7c6214dd494467dfe069ca9418dbf359a153",
   "upstream": "https://lists.openwall.net/linux-kernel/2026/07/10/62",
   "files": {
+    "BUILD.bazel": {
+      "before_sha256": "9b2d8cccd46ea86869edd394496f4d531ac77b1517ed4cf5ca2e3f9197d6d38e",
+      "candidate_sha256": "bab388c8665fffd378c1f3cc47bab2f82f39e1355eccc30499fc9e50cf26215f"
+    },
+    "arch/arm64/configs/gki_defconfig": {
+      "before_sha256": "c92079fa0c102899644de89c8b7e80158cbfcfc000ddad3f881347ad810b997c",
+      "candidate_sha256": "dbd09439453ef93814ff83ff68b20d4c8492b242ded8c82703516a2b56dad487"
+    },
+    "bazel/modules_private.bzl": {
+      "before_sha256": "d93adc60fdd792cc5d6eed6415f99dffb67fb3b4425235745104577618843595",
+      "candidate_sha256": "775506200f8612f5b93d99b7f0bc0b5848ae43b09850ab74b1a3662cd0f206bf"
+    },
+    "block/blk-core.c": {
+      "before_sha256": "14e3d8234d314f0532690a0ee8c59bbccc3d61f9bf47bedd054c01fb3e6a4086",
+      "candidate_sha256": "24b65a529e8e295e9b80e3aa94d8a87bd265406b0474276c45dcd9ee0c9566fc"
+    },
+    "certs/onyx-accepted-gki.pem": {
+      "before_sha256": null,
+      "candidate_sha256": "f43da0db6b640a37b18e8e8a863b91cae3543210f6f897285a2137bf72111759"
+    },
+    "certs/system_certificates.S": {
+      "before_sha256": "23b927e393266e50fc790f4763dc6558c81df8cd62f91baf418960b21aeb87cb",
+      "candidate_sha256": "f1a9fc749d302147ad302dc75a1a5bcc6cc64b73a63a6ca116e6b94ffdd531d6"
+    },
     "drivers/hwtracing/coresight/coresight-catu.c": {
       "before_sha256": "663c782c1738b5ad45f2fc53c43b3460df670bfe2bd32504f760f3a606dbc411",
       "candidate_sha256": "7b152f259732d83afda1087d8b821b43846f099ef4f5996b7016df42cd7607cf"
+    },
+    "drivers/hwtracing/coresight/coresight-core.c": {
+      "before_sha256": "ab688265c528a494961d621b4b9e2f1b75f66b7c6501651a834adf84e9d3e758",
+      "candidate_sha256": "f376c5ce0e2da2282f644ec65e604ae81dce50c272a4a3462d547412804fde54"
     },
     "drivers/hwtracing/coresight/coresight-cpu-debug.c": {
       "before_sha256": "258d02e854d84d8e29eb592c77fc15092da59561739edf1aab53f921847eece1",
@@ -43,30 +71,6 @@
       "before_sha256": "7284c6f4aa2c686ea509c91d48f6e99848d3f853a6edf29fbc23ef0bb7543187",
       "candidate_sha256": "6a7a9f92facefd992585a6d1e6c5a2211e97ec81fb9913dc66bc2f690e5ee053"
     },
-    "include/linux/thermal.h": {
-      "before_sha256": "2ddf3a9d865ebc02fe54db4aec6fc8d402474a3a06a04177bd6c701ac1594bbf",
-      "candidate_sha256": "95b1f3e7c5831f4c9c8a96944613498e719afc58594cf5fd6fc9403c0a95951d"
-    },
-    "include/linux/coresight.h": {
-      "before_sha256": "06082e886070890b4e57f538bc1f71873a9ebbd5fdc2dde039c95a43e0bb4b00",
-      "candidate_sha256": "8df9332814347e4ce8ab4d584175f895ae223144b262fc432ce03bfef69e90a8"
-    },
-    "drivers/hwtracing/coresight/coresight-core.c": {
-      "before_sha256": "ab688265c528a494961d621b4b9e2f1b75f66b7c6501651a834adf84e9d3e758",
-      "candidate_sha256": "f376c5ce0e2da2282f644ec65e604ae81dce50c272a4a3462d547412804fde54"
-    },
-    "arch/arm64/configs/gki_defconfig": {
-      "before_sha256": "c92079fa0c102899644de89c8b7e80158cbfcfc000ddad3f881347ad810b997c",
-      "candidate_sha256": "dbd09439453ef93814ff83ff68b20d4c8492b242ded8c82703516a2b56dad487"
-    },
-    "certs/onyx-accepted-gki.pem": {
-      "before_sha256": null,
-      "candidate_sha256": "f43da0db6b640a37b18e8e8a863b91cae3543210f6f897285a2137bf72111759"
-    },
-    "certs/system_certificates.S": {
-      "before_sha256": "23b927e393266e50fc790f4763dc6558c81df8cd62f91baf418960b21aeb87cb",
-      "candidate_sha256": "f1a9fc749d302147ad302dc75a1a5bcc6cc64b73a63a6ca116e6b94ffdd531d6"
-    },
     "drivers/tty/hvc/hvc_console.c": {
       "before_sha256": "69fb3de81e04e9897d6add781541f461e0fe239e31288611205039fa6f929e42",
       "candidate_sha256": "408d093e002848b13975a244eafeb6d66302ab51e86f05d36643ea0aec334dec"
@@ -75,21 +79,25 @@
       "before_sha256": "7d0ee761e376fa3c44f9e433c21651f1edd5da48c654f89d2d15f54ec6525bb1",
       "candidate_sha256": "b50961f952f56bfa3560ccced66775ddf6984006d4c19d0291c9d0f4387926eb"
     },
-    "include/linux/hvc_backend.h": {
-      "before_sha256": null,
-      "candidate_sha256": "5acdf31e54db1c5a2c4e9b194dfaa87b7e916e31c2aee57166b932de906132c8"
-    },
-    "bazel/modules_private.bzl": {
-      "before_sha256": "d93adc60fdd792cc5d6eed6415f99dffb67fb3b4425235745104577618843595",
-      "candidate_sha256": "1863d492921da6cf9d799f4331fc119dc4fcf659c715bc821a3aed3af0bd6590"
-    },
     "fs/timerfd.c": {
       "before_sha256": "e2f56800708897205c1588b22040071b4b150513b50ff1c694bdefdb575898cc",
       "candidate_sha256": "628c6b705c64ac1269380e25e151ce78b2ba47f931d3c15ad4b94b213849b584"
     },
-    "block/blk-core.c": {
-      "before_sha256": "14e3d8234d314f0532690a0ee8c59bbccc3d61f9bf47bedd054c01fb3e6a4086",
-      "candidate_sha256": "24b65a529e8e295e9b80e3aa94d8a87bd265406b0474276c45dcd9ee0c9566fc"
+    "include/linux/coresight.h": {
+      "before_sha256": "06082e886070890b4e57f538bc1f71873a9ebbd5fdc2dde039c95a43e0bb4b00",
+      "candidate_sha256": "8df9332814347e4ce8ab4d584175f895ae223144b262fc432ce03bfef69e90a8"
+    },
+    "include/linux/hvc_backend.h": {
+      "before_sha256": null,
+      "candidate_sha256": "5acdf31e54db1c5a2c4e9b194dfaa87b7e916e31c2aee57166b932de906132c8"
+    },
+    "include/linux/thermal.h": {
+      "before_sha256": "2ddf3a9d865ebc02fe54db4aec6fc8d402474a3a06a04177bd6c701ac1594bbf",
+      "candidate_sha256": "95b1f3e7c5831f4c9c8a96944613498e719afc58594cf5fd6fc9403c0a95951d"
+    },
+    "net/wireless/chan.c": {
+      "before_sha256": "66fd0ecc55940b8767cdf0e84ee1768fbc478c06202537fd8b6b3942728b4c85",
+      "candidate_sha256": "6441ebfc017270b4fbe688584d23b8c0d19b6d40510da6bec41a5865279cce31"
     }
   },
   "tnoc": "Not applicable: 6.18 has no itnoc_remove/platform driver; AMBA TNOC is unchanged",
@@ -105,7 +113,8 @@
     "Remove interior certificate-list alignment so the native X.509 loader reaches the added public certificate",
     "Native CAN USB/virtual/ISO-TP/J1939, USB serial generic/adapters, Bluetooth USB, network filesystems and host-network diagnostics with exact ARM64 module outputs",
     "Defer timerfd resume cancellation notifications on the freezable workqueue until actual system resume, preserving timer expiry and explicit clock changes",
-    "Order PF_BLOCK_TS clearing before plug detachment with a compiler barrier while retaining AutoFDO"
+    "Order PF_BLOCK_TS clearing before plug detachment with a compiler barrier while retaining AutoFDO",
+    "Build cfg80211/mac80211 and USB WLAN through native Common Kbuild with generated catalog outputs and wireless configuration; preserve monitor channel policy and use native debugfs/LED/USB exports directly"
   ],
   "integrated_upstream": [],
   "components": [
@@ -133,6 +142,11 @@
       "patch": "blk-plug-timestamp-ordering.patch",
       "sha256": "388b84018575a04e2d186866bc24f5ab4c286670839dca61296070e14ee9f0f5",
       "role": "Preserve the plug timestamp invariant across preemption after compiler inlining"
+    },
+    {
+      "patch": "native-wireless-common.patch",
+      "sha256": "1b122fbffc27e45da17b201c233bee7d5b1c389106ed8e63cbc076c8e878e385",
+      "role": "Common Kbuild wireless providers with catalog-generated outputs/config and preserved monitor channel policy"
     }
   ],
   "upstream_checks": {
@@ -143,5 +157,18 @@
       "status": "applied_locally",
       "evidence": "barrier_in_finish"
     }
+  },
+  "native_wireless": {
+    "modules_provider": "//onyx:native_modules.bzl%NATIVE_WIRELESS_MODULES",
+    "config_fragment": "//onyx:native_wireless.fragment",
+    "migrated_staging_patches": [
+      "0092-preserve-konoha-monitor-channel-policy.patch"
+    ],
+    "compatibility_status": "Native Common Kbuild callers use exported debugfs/LED/USB helpers directly; module CRC checks validate native providers",
+    "retired_staging_patches": [
+      "0240-native-rtl8xxxu-debugfs.patch",
+      "0241-native-rt2x00-gki-helpers.patch",
+      "0242-native-ath9k-htc-usb-helper.patch"
+    ]
   }
 }

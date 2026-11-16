@@ -1,24 +1,47 @@
 #!/usr/bin/env python3
-"""Fetch KernelSU Next dev at build time; materialize and verify built-in sources."""
+"""Materialize and verify KernelSU Next from the committed source lock."""
 
 import argparse
 import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
 
 HERE = Path(__file__).resolve().parent
 UPSTREAM = "https://github.com/KernelSU-Next/KernelSU-Next.git"
-BRANCH = "dev"
 COMMON_REVISION = json.loads((HERE / "sources.json").read_text())["common"]["revision"]
 
 
-def expected(common):
+def validate_pin(pin):
+    fields = {"repository", "branch", "revision", "tag", "git_commit_count", "version", "sha256"}
+    if (not isinstance(pin, dict) or set(pin) != fields
+            or pin.get("repository") != UPSTREAM or pin.get("branch") != "dev"
+            or not isinstance(pin.get("revision"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", pin.get("revision", ""))
+            or not isinstance(pin.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", pin.get("sha256", ""))
+            or type(pin.get("git_commit_count")) is not int
+            or pin["git_commit_count"] < 1
+            or pin.get("version") != 30000 + pin["git_commit_count"]
+            or not isinstance(pin.get("tag"), str)
+            or not re.fullmatch(r"[A-Za-z0-9._+-]+", pin.get("tag", ""))):
+        raise ValueError("invalid KernelSU Next source lock")
+    return pin
+
+
+def locked_pin():
+    return validate_pin(json.loads((HERE / "kernelsu-lock.json").read_text()))
+
+
+def expected(common, require_lock=True):
     source = common.parent / ".kernelsu-next"
-    pin = json.loads((source / "source.json").read_text())
+    pin = validate_pin(json.loads((source / "source.json").read_text()))
+    if require_lock and pin != locked_pin():
+        raise ValueError("KernelSU Next inputs differ from the committed source lock")
     data = (source / "source.tar").read_bytes()
     if hashlib.sha256(data).hexdigest() != pin["sha256"]:
         raise ValueError("KernelSU Next source archive hash mismatch")
@@ -42,7 +65,7 @@ def expected(common):
     start = kbuild.index("LPATH :=")
     end = kbuild.index("KSU_NEW_DCACHE_FLUSH :=")
     # Resolve Git metadata before entering Kleaf's hermetic build sandbox.
-    # This is upstream's 30000 + rev-list --count algorithm on the fetched dev HEAD.
+    # The source lock freezes upstream's commit-count version and tag as well.
     kbuild = (kbuild[:start] + f"# Upstream dev {pin['revision']}; see artifact inputs/kernelsu-next.\n"
               + f"ccflags-y += -DKSU_VERSION={pin['version']}\n"
               + 'ccflags-y += -DKSU_VERSION_TAG=\\"' + pin['tag'] + '\\"\n\n'
@@ -59,10 +82,10 @@ def expected(common):
     return files, additions
 
 
-def verify(common):
+def verify(common, require_lock=True):
     if (common / "drivers/kernelsu").is_symlink():
         raise ValueError("unexpected KernelSU Next source symlink")
-    files, additions = expected(common)
+    files, additions = expected(common, require_lock)
     changed = subprocess.check_output([
         "git", "-C", str(common), "diff", "HEAD", "--name-only"], text=True).splitlines()
     if set(changed) != set(additions):
@@ -82,36 +105,38 @@ def verify(common):
 def integrate(common):
     previous = None
     if (common / "drivers/kernelsu").exists():
-        previous = verify(common)
+        previous = verify(common, require_lock=False)
     elif subprocess.check_output([
             "git", "-C", str(common), "status", "--porcelain", "-uno"]):
         raise ValueError("preserve tracked common changes before integrating KernelSU Next")
     source = common.parent / ".kernelsu-next"
     repo = source / "repo"
     source.mkdir(exist_ok=True)
-    if repo.exists():
-        if subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain"]):
-            raise ValueError("preserve local changes in the KernelSU Next checkout")
-        remote = subprocess.check_output([
-            "git", "-C", str(repo), "remote", "get-url", "origin"], text=True).strip()
-        if remote != UPSTREAM:
-            raise ValueError("unexpected KernelSU Next origin")
-        subprocess.run(["git", "-C", str(repo), "fetch", "origin", BRANCH, "--tags"], check=True)
-    else:
-        subprocess.run(["git", "clone", "--branch", BRANCH, UPSTREAM, str(repo)], check=True)
-    git = lambda *args: subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
-    revision = git("rev-parse", f"origin/{BRANCH}")
-    subprocess.run(["git", "-C", str(repo), "checkout", "--detach", revision], check=True)
-    count = int(git("rev-list", "--count", revision))
-    tag = git("describe", "--tags", "--abbrev=0", revision)
-    data = subprocess.check_output([
-        "git", "-C", str(repo), "archive", "--format=tar", revision, "kernel", "uapi", "LICENSE"])
-    pin = {"repository": UPSTREAM, "branch": BRANCH, "revision": revision,
-           "tag": tag, "git_commit_count": count, "version": 30000 + count,
-           "sha256": hashlib.sha256(data).hexdigest()}
+    pin = locked_pin()
+    archive = source / "source.tar"
+    data = archive.read_bytes() if archive.exists() else None
+    if data is None or hashlib.sha256(data).hexdigest() != pin["sha256"]:
+        if repo.exists():
+            if subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain"]):
+                raise ValueError("preserve local changes in the KernelSU Next checkout")
+            remote = subprocess.check_output([
+                "git", "-C", str(repo), "remote", "get-url", "origin"], text=True).strip()
+            if remote != UPSTREAM:
+                raise ValueError("unexpected KernelSU Next origin")
+        else:
+            subprocess.run(["git", "clone", "--no-checkout", UPSTREAM, str(repo)], check=True)
+        revision = pin["revision"]
+        available = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", revision + "^{commit}"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if available.returncode:
+            subprocess.run(["git", "-C", str(repo), "fetch", "origin", revision], check=True)
+        data = subprocess.check_output([
+            "git", "-C", str(repo), "archive", "--format=tar", revision, "kernel", "uapi", "LICENSE"])
+        if hashlib.sha256(data).hexdigest() != pin["sha256"]:
+            raise ValueError("fetched KernelSU Next archive differs from the source lock")
     # Refresh only a previously verified source tree. Unknown edits are never reset.
     if previous is not None:
-        verify(common)
+        verify(common, require_lock=False)
         shutil.rmtree(common / "drivers/kernelsu")
     (source / "source.tar").write_bytes(data)
     (source / "source.json").write_text(json.dumps(pin, indent=2) + "\n")
@@ -130,4 +155,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     (verify if args.verify_only else integrate)(args.workspace.resolve() / "common")
     pin = json.loads((args.workspace / ".kernelsu-next/source.json").read_text())
-    print(f"KernelSU Next dev {pin['revision']} / {pin['version']}: source and integration verified")
+    print(f"Pinned KernelSU Next {pin['revision']} / {pin['version']}: source and integration verified")

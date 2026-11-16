@@ -11,12 +11,15 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import zipfile
 
 from verify_modules import verify
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from module_loading import additions as policy_additions, load_policy, normalize as policy_normalize, validate_available
 PARTITIONS = ('system_dlkm', 'vendor_dlkm', 'dtbo', 'vendor_boot', 'boot')
 EPOCH = 1790812800
 # These exact contexts and init/vendor_modprobe permissions were checked against
@@ -382,7 +385,24 @@ def assemble_modules(builder, artifact, trees, profile):
         return selected
     reports = {}
     layout = profile.get('module_layout')
+    shipping_roots = profile.get('shipping_roots')
+    require(not (layout and shipping_roots is not None),
+            'Specify either verified module layout or explicit shipping roots')
     layout_root = None
+    all_names = set()
+    if shipping_roots is not None:
+        partitions = {'vendor_ramdisk', 'vendor_dlkm', 'system_dlkm'}
+        require(isinstance(shipping_roots, dict) and set(shipping_roots) == partitions,
+                'Shipping roots need every supported module partition')
+        normalized_roots = {}
+        for partition, filenames in shipping_roots.items():
+            require(isinstance(filenames, list), 'Shipping roots must be filename lists')
+            names = [policy_normalize(name) for name in filenames]
+            require(len(names) == len(set(names)), 'Duplicate normalized shipping root')
+            require(set(names) <= set(paths) | builtin | set(omissions),
+                    f'Unavailable shipping roots: {partition}: {sorted(set(names)-set(paths)-builtin-set(omissions))}')
+            normalized_roots[partition] = [name for name in names if name in paths]
+            all_names.update(names)
     if layout:
         layout_root = Path(layout['source']).resolve()
         require(sha(layout_root / 'SHA256SUMS') == layout['sha256'], 'Module layout checksum manifest changed')
@@ -405,7 +425,12 @@ def assemble_modules(builder, artifact, trees, profile):
         require(native_additions | existing_required <= set(paths), 'Required native NetHunter/CAN module is absent')
         require(all(kinds[name] == 'gki' for name in native_additions), 'Native module source kind changed')
     platform_additions = ({n for n, k in kinds.items() if k == 'platform'} - all_names
-                          if layout_root else set())
+                          if layout_root or shipping_roots is not None else set())
+    policy_path = artifact / 'inputs/module-loading.json'
+    require('inputs/module-loading.json' in read(artifact / 'report.json')['sha256'],
+            'Module loading policy is not hashed by the artifact')
+    policy = load_policy(policy_path)
+    validate_available(policy, set(paths) | builtin)
     for partition in ('vendor_ramdisk', 'vendor_dlkm', 'system_dlkm'):
         original = trees[partition] / 'lib/modules'
         require(original.is_dir(), f'Missing baseline modules: {partition}')
@@ -422,7 +447,8 @@ def assemble_modules(builder, artifact, trees, profile):
         native = {norm(p.name) for p in original.glob('*.ko')}
         require(not native - set(paths) - builtin - set(omissions),
                 f'Unreviewed missing ROM modules: {sorted(native-set(paths)-builtin-set(omissions))}')
-        roots = ([norm(p.name) for p in (layout_root / partition / 'lib/modules').glob('*.ko')]
+        roots = (list(normalized_roots[partition]) if shipping_roots is not None else
+                 [norm(p.name) for p in (layout_root / partition / 'lib/modules').glob('*.ko')]
                  if layout_root else [n for n, kind in kinds.items()
                                      if kind == ('gki' if partition == 'system_dlkm' else 'platform')])
         # Keep the small, previously selected system partition stable. New native
@@ -430,9 +456,10 @@ def assemble_modules(builder, artifact, trees, profile):
         # its independently checked capacity remains a hard gate.
         if partition in ['vendor_ramdisk', 'vendor_dlkm']:
             roots += sorted(platform_additions)
-        if partition == 'vendor_dlkm':
-            roots += sorted(native_additions)
-            requested['modules.load'] += sorted((platform_additions | native_additions) - set(requested['modules.load']))
+        roots += [norm(name) for name in policy_additions(policy, partition)]
+        for filename, names in requested.items():
+            names += sorted({norm(name) for name in policy_additions(policy, partition, filename)
+                             if norm(name) in paths} - set(names))
         roots += [n for values in requested.values() for n in values]
         selected = closure(roots)
         root = builder.output / ('depmod-' + partition)

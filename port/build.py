@@ -6,12 +6,16 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 
+from catalog import check_generated, load_catalog, native_configs, native_modules, vendor_modules
+from verify_native_abi import verify_native_exports
 from verify_modules import verify
 
 HERE = Path(__file__).resolve().parent
@@ -21,6 +25,41 @@ def output_category(path, execution_root):
     """Classify the Bazel target path, ignoring the workspace's directory names."""
     relative = path.relative_to(execution_root)
     return "platform" if "onyx" in relative.parts else "gki"
+
+
+def verify_native_modules(kernel_dir, symvers, release):
+    """Verify native Kbuild outputs without adding another shipped source copy."""
+    components = load_catalog()
+    wanted = {entry["output"] for entry in native_modules(components)}
+    selected = {}
+    members = {}
+    prefix = "lib/modules/" + release + "/kernel/"
+    with tempfile.TemporaryDirectory(prefix="onyx-native-modules-") as temporary:
+        directory = Path(temporary)
+        with tarfile.open(kernel_dir / "modules_staging_dir.tar.gz", "r:gz") as archive:
+            for member in archive:
+                if not member.name.endswith(".ko"):
+                    continue
+                name = member.name.removeprefix("./")
+                path = Path(name)
+                if (not member.isfile() or not name.startswith(prefix)
+                        or path.is_absolute() or ".." in path.parts):
+                    raise ValueError("Unsafe native module archive member")
+                relative = name.removeprefix(prefix)
+                if path.name in members or relative in selected:
+                    raise ValueError("Duplicate native module output")
+                target = directory / path.name
+                target.write_bytes(archive.extractfile(member).read())
+                selected[relative] = target
+                members[path.name] = name
+        if not wanted <= set(selected):
+            raise ValueError("Native component outputs are missing: " + ", ".join(sorted(wanted-set(selected))))
+        verification = verify(list(selected.values()), symvers, release)
+        native_abi = [verify_native_exports(selected[output], output, symvers, components)
+                      for output in sorted(wanted)]
+        for entry in verification:
+            entry["archive_member"] = members[entry["module"]]
+    return verification, native_abi
 
 
 def verify_standalone_provider(verifier, harness, receipt, staged, artifacts):
@@ -59,6 +98,7 @@ def main():
     if args.jobs < 1 or args.memory_mb < 1024:
         parser.error("jobs must be positive and memory-mb at least 1024")
     workspace = args.workspace.resolve()
+    check_generated()
     for script in ["prepare.py", "stage.py", "integrate_kernelsu.py"]:
         command = [sys.executable, str(HERE / script), str(workspace)]
         if script == "prepare.py":
@@ -146,7 +186,7 @@ def main():
         cache_flags = ["--config=local", f"--cache_dir={cache}"]
     command = ["tools/bazel", "build", *cache_flags, "--keep_going", f"--jobs={args.jobs}",
                f"--local_resources=memory={args.memory_mb}",
-               "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx:kmi-symbols",
+               "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx:kmi_symbol_lists",
                "//common:kernel_aarch64", "//onyx:platform_modules"]
     print(f"Building; log: {artifacts / 'build.log'}", flush=True)
     from qdss_diagnostic import applied
@@ -165,7 +205,7 @@ def main():
         ["tools/bazel", "info", "execution_root"], cwd=workspace, text=True).strip())
     query = subprocess.check_output([
         "tools/bazel", "cquery", *cache_flags, "--output=files",
-        "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx:kmi-symbols",
+        "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx:kmi_symbol_lists",
         "//common:kernel_aarch64 + //onyx:platform_modules"
     ], cwd=workspace, text=True)
     (artifacts / "bazel-outputs.txt").write_text(query)
@@ -178,12 +218,18 @@ def main():
     for option in ["KSU_DEBUG", "KSU_DISABLE_MANAGER", "KSU_DISABLE_POLICY"]:
         if f"\nCONFIG_{option}=y\n" in config:
             raise ValueError(f"unexpected KernelSU Next option: {option}")
-    modules = [p for p in outputs if p.suffix == ".ko"]
-    catalog = json.loads((HERE / "modules.json").read_text())
+    modules = [p for p in outputs if p.suffix == ".ko"
+               and output_category(p, execution_root) == "platform"]
+    catalog = vendor_modules()
     if {p.name for p in modules} != {entry["output"] for entry in catalog}:
         raise ValueError("unexpected platform module set")
     symvers = [p for p in outputs if p.name.endswith("_Module.symvers")]
     verification = verify(modules, symvers, release)
+    selections = dict(line.split("=", 1) for line in config.splitlines() if line.startswith("CONFIG_"))
+    for option, value in native_configs().items():
+        if selections.get("CONFIG_" + option, "n") != value:
+            raise ValueError("Native wireless Kconfig selection differs: " + option)
+    native_verification, native_abi_validation = verify_native_modules(kernel_dir, symvers, release)
 
     for path in outputs:
         category = output_category(path, execution_root)
@@ -209,6 +255,8 @@ def main():
     inputs = artifacts / "inputs"
     inputs.mkdir()
     for name in ["sources.json", "imports.json", "onyx-port.xml", "dependency-lock.xml",
+                 "components.json", "catalog.py", "generate_imports.py", "native_modules.bzl", "native_wireless.fragment", "native-kmi-symbols", "verify_native_abi.py",
+                 "kernelsu-lock.json", "module-loading.json", "module_loading.py",
                  "module-source-hashes.json", "common-source-hashes.json",
                  "BUILD.bazel", "Kconfig", "scm_defconfig", "platform_defconfig", "relay.fragment", "modules.json",
                  "build.py", "prepare.py", "stage.py", "integrate_kernelsu.py", "verify_modules.py", "verify_mi_thermal.py", "verify_charger_thermal.py", "verify_device_services.py", "verify_platform_providers.py", "boot-parameters.txt",
@@ -248,6 +296,7 @@ def main():
                     stream, "sha256").hexdigest()
     report = {
         "command": command,
+        "automation_revision": os.environ.get("KONOHA_CI_REVISION"),
         "qdss_diagnostic": args.qdss_diagnostic,
         "kernel_release": release,
         "kernelsu_next": {
@@ -256,6 +305,8 @@ def main():
             "hardware_validated": False,
         },
         "module_verification": verification,
+        "native_module_verification": native_verification,
+        "native_abi_validation": native_abi_validation,
         "nethunter_host_validation": nethunter_validation,
         "mi_thermal_host_validation": thermal_validation,
         "charger_thermal_host_validation": charger_thermal_validation,

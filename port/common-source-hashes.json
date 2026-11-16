@@ -40,7 +40,7 @@
     "executable": false
   },
   "BUILD.bazel": {
-    "sha256": "9b2d8cccd46ea86869edd394496f4d531ac77b1517ed4cf5ca2e3f9197d6d38e",
+    "sha256": "bab388c8665fffd378c1f3cc47bab2f82f39e1355eccc30499fc9e50cf26215f",
     "executable": false
   },
   "COPYING": {
@@ -116448,7 +116448,7 @@
     "executable": false
   },
   "bazel/modules_private.bzl": {
-    "sha256": "1863d492921da6cf9d799f4331fc119dc4fcf659c715bc821a3aed3af0bd6590",
+    "sha256": "775506200f8612f5b93d99b7f0bc0b5848ae43b09850ab74b1a3662cd0f206bf",
     "executable": false
   },
   "bazel/test/BUILD.bazel": {
@@ -315067,7 +315067,7 @@
     "executable": false
   },
   "net/wireless/chan.c": {
-    "sha256": "66fd0ecc55940b8767cdf0e84ee1768fbc478c06202537fd8b6b3942728b4c85",
+    "sha256": "6441ebfc017270b4fbe688584d23b8c0d19b6d40510da6bec41a5865279cce31",
     "executable": false
   },
   "net/wireless/core.c": {
