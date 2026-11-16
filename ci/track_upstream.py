@@ -8,6 +8,8 @@ import re
 import subprocess
 import xml.etree.ElementTree as ET
 
+import wifi_imports
+
 ROOT = Path(__file__).resolve().parents[1]
 PORT = Path(os.environ.get('KONOHA_SOURCE_ROOT', ROOT)) / 'port'
 TRACK = json.loads((ROOT / 'ci/upstream.json').read_text())
@@ -63,6 +65,10 @@ def update(repo, revision):
     pins['common']['revision'] = revision
     pins['common']['kernel'] = '.'.join(fields[k] for k in ('VERSION', 'PATCHLEVEL', 'SUBLEVEL'))
     imports = json.loads((PORT / 'imports.json').read_text())
+    build_path, config_path = PORT / 'BUILD.bazel', PORT / 'platform_defconfig'
+    old_build = build_path.read_text() if build_path.exists() else None
+    fragment = config_path.read_text() if config_path.exists() else None
+    imports, build = wifi_imports.refresh(repo, revision, imports, old_build, fragment)
     for source in imports:
         if source['project'] == 'common':
             source['revision'] = revision
@@ -73,10 +79,12 @@ def update(repo, revision):
         raise ValueError('Common project missing from source manifest')
     entry.set('revision', revision)
     entry.set('upstream', TRACK['branch'])
+    ET.indent(xml)
     # Validate every imported path before changing any recipe file.
     (PORT / 'sources.json').write_text(json.dumps(pins, indent=2) + '\n')
     (PORT / 'imports.json').write_text(json.dumps(imports, indent=2) + '\n')
-    ET.indent(xml)
+    if build != old_build:
+        build_path.write_text(build)
     xml.write(PORT / 'onyx-port.xml', encoding='utf-8', xml_declaration=True)
     return {'revision': revision, 'kernel': pins['common']['kernel']}
 
