@@ -13,6 +13,10 @@ SHA = r'[0-9a-f]{40}'
 TAG = r'gki-6\.18\.\d+-s[0-9a-f]{12}-k[0-9a-f]{12}'
 
 
+class ChangelogTooLarge(ValueError):
+    """A valid commit range exceeds the optional summary's page budget."""
+
+
 def previous_release(releases, current_tag):
     current = next((r for r in releases if r.get('tag_name') == current_tag), {})
     cutoff = current.get('published_at') or '9999'
@@ -70,7 +74,7 @@ def commits_between(base, tip):
         if not re.fullmatch(SHA, cursor) or cursor in pages:
             raise ValueError('Invalid Google changelog pagination')
         pages.add(cursor)
-    raise ValueError('Google changelog exceeds 10,000 commits')
+    raise ChangelogTooLarge('Google changelog exceeds 10,000 commits')
 
 
 def area(subject):
@@ -112,7 +116,7 @@ def summary(releases, current_tag, tip):
         if error.code != 429 and not 500 <= error.code < 600:
             raise
         commits = None
-    except OSError:
+    except (OSError, ChangelogTooLarge):
         commits = None
     if commits is None:
         return heading + (
