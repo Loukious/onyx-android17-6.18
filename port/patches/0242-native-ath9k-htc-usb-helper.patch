@@ -1,7 +1,6 @@
 --- a/drivers/net/wireless/ath/ath9k/hif_usb.c
 +++ b/drivers/net/wireless/ath/ath9k/hif_usb.c
-@@ -16,6 +16,7 @@
- 
+@@ -17,5 +17,6 @@
  #include <linux/unaligned.h>
  #include "htc.h"
 +#include "native_usb_helpers.h"
