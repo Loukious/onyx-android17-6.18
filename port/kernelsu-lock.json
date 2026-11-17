@@ -1,9 +1,9 @@
 {
   "repository": "https://github.com/KernelSU-Next/KernelSU-Next.git",
   "branch": "dev",
-  "revision": "7ccf61479621f240c0d968ef46f1b167b6ceb500",
+  "revision": "aa235b99574b5b349cdb4980bcb98fd58e6abb28",
   "tag": "v3.4.2",
-  "git_commit_count": 3553,
-  "version": 33553,
-  "sha256": "2c481831ff41622a948747628cb78981982b17723d3ad1f7b0c6aed29c069585"
+  "git_commit_count": 3554,
+  "version": 33554,
+  "sha256": "e4dbe9d44f3dfccae8fd79da98269cc32533b51546a3921caf2f011f836b6137"
 }
