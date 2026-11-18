@@ -43,13 +43,84 @@ struct wlan_mlme_sta_mon_snapshot {
 /* Called under the control lock: only pause delivery and queue work. */
 typedef void (*wlan_mlme_sta_mon_stop_cb)(void *arg);
 
+struct scan_event;
+
+/* A private scan reservation does not change the associated STA's home BSS.
+ * Only an exact single-channel request may consume it. Firmware observations
+ * and a proven never-submitted request are distinct notice types: an ordinary
+ * scan-manager cancellation notification cannot prove that firmware drained.
+ */
+struct wlan_mlme_sta_mon_scan_reservation {
+	uint64_t generation;
+	uint64_t helper_cookie;
+	uint32_t scan_id;
+	uint32_t requester;
+	uint32_t frequency;
+	uint8_t vdev_id;
+};
+
+enum wlan_mlme_sta_mon_scan_notice {
+	WLAN_STA_MON_SCAN_FIRMWARE,
+	WLAN_STA_MON_SCAN_NOT_SUBMITTED,
+};
+
+/* Called under the admission lock. It must be nonblocking, must not re-enter
+ * MLME admission, and must not retain the borrowed event pointer.
+ * Generation/cookie identify the reserved callback context; they are not wire
+ * fields supplied by the firmware event.
+ */
+typedef void (*wlan_mlme_sta_mon_scan_cb)(void *arg,
+				const struct scan_event *event,
+				enum wlan_mlme_sta_mon_scan_notice notice,
+				uint64_t generation, uint64_t helper_cookie);
+
+bool wlan_mlme_sta_mon_scan_reserve(struct wlan_objmgr_psoc *psoc,
+		const struct wlan_mlme_sta_mon_scan_reservation *reservation,
+		wlan_mlme_sta_mon_scan_cb callback, void *arg);
+/* @reserved selects a distinct scheduler callback that does not revoke this
+ * one reservation. A Wonder-owned monitor rejects unmatched scans until native
+ * teardown is proven; ordinary monitors retain normal invalidation semantics.
+ */
+bool wlan_mlme_sta_mon_scan_admission_begin(struct wlan_objmgr_psoc *psoc,
+		uint32_t vdev_id, uint32_t scan_id, uint32_t requester,
+		uint32_t frequency, uint32_t channel_count, bool offchan_data_tx,
+		bool *reserved);
+/* Called immediately before tgt_scan_start, after scan-manager parameter
+ * updates. Unrelated requests pass through; a reserved request must still
+ * have its exact single channel and live owner. It never authorizes traffic.
+ */
+bool wlan_mlme_sta_mon_scan_activate(struct wlan_objmgr_psoc *psoc,
+		uint32_t vdev_id, uint32_t scan_id, uint32_t requester,
+		uint32_t frequency, uint32_t channel_count, bool offchan_data_tx,
+		bool reserved_request);
+/* This entry point is exclusively for the successfully decoded target scan
+ * event, before scan serialization drops late firmware completions.
+ */
+void wlan_mlme_sta_mon_scan_fw_event(struct wlan_objmgr_psoc *psoc,
+				    const struct scan_event *event);
+/* Only request paths which prove that tgt_scan_start never accepted this
+ * request may use this entry point. A cancel send or a timeout is insufficient.
+ */
+void wlan_mlme_sta_mon_scan_not_submitted(struct wlan_objmgr_psoc *psoc,
+					const struct scan_event *event);
+/* Synchronous submit rejection, before a scheduler/firmware event can own it. */
+bool wlan_mlme_sta_mon_scan_release_unsubmitted(struct wlan_objmgr_psoc *psoc,
+		const struct wlan_mlme_sta_mon_scan_reservation *reservation);
+
 void wlan_mlme_sta_mon_register(struct wlan_objmgr_psoc *psoc,
 			       wlan_mlme_sta_mon_stop_cb stop, void *arg);
 bool wlan_mlme_sta_mon_attach(struct wlan_objmgr_psoc *psoc);
 void wlan_mlme_sta_mon_detach(struct wlan_objmgr_psoc *psoc);
 uint64_t wlan_mlme_sta_mon_epoch(struct wlan_objmgr_psoc *psoc);
+/* HDD passes the actual adapter's Wonder ownership. Arm and host scan admission
+ * atomically select either the new session lease or the existing scan work.
+ * A fresh exclusive Wonder arm uses the native RESTART transaction, with no
+ * STA/monitor ID yet. HDD must verify the started monitor with handoff_ready,
+ * then complete, or cancel before proven native/DP teardown releases the lease.
+ */
 bool wlan_mlme_sta_mon_arm(struct wlan_objmgr_psoc *psoc,
-			  struct wlan_mlme_sta_mon_snapshot *snapshot);
+			  struct wlan_mlme_sta_mon_snapshot *snapshot,
+			  bool wonder_owned);
 /* Record native ownership before CREATE can start an asynchronous cleanup. */
 void wlan_mlme_sta_mon_vdev_created(struct wlan_objmgr_psoc *psoc,
 				   uint8_t mon_vdev_id);

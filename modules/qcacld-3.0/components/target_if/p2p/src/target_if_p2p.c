@@ -28,6 +28,9 @@
 #include "target_if_p2p_mcc_quota.h"
 #include "init_deinit_lmac.h"
 #include "wmi_unified_p2p_api.h"
+#ifdef FEATURE_WLAN_WONDER
+#include "wlan_hdd_wonder_peer.h"
+#endif
 
 static inline struct wlan_lmac_if_p2p_rx_ops *
 target_if_psoc_get_p2p_rx_ops(struct wlan_objmgr_psoc *psoc)
@@ -528,6 +531,10 @@ static int target_p2p_mac_rx_filter_event_handler(ol_scn_t scn, uint8_t *data,
 	}
 	target_if_debug("vdev_id %d status %d", event_info.vdev_id,
 			event_info.status);
+#ifdef FEATURE_WLAN_WONDER
+	if (hdd_wonder_peer_reply(psoc, event_info.vdev_id, event_info.status))
+		return 0;
+#endif
 	p2p_rx_ops = target_if_psoc_get_p2p_rx_ops(psoc);
 	if (p2p_rx_ops && p2p_rx_ops->add_mac_addr_filter_evt_handler)
 		status = p2p_rx_ops->add_mac_addr_filter_evt_handler(

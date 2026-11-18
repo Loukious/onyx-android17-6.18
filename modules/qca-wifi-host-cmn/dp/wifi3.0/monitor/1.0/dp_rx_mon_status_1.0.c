@@ -16,6 +16,7 @@
  */
 #include "hal_hw_headers.h"
 #include "dp_types.h"
+#include <cdp_txrx_injection.h>
 #include "dp_rx.h"
 #include "dp_peer.h"
 #include "hal_rx.h"
@@ -485,9 +486,32 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
 		    mon_pdev->undecoded_metadata_capture ||
 		    rx_enh_capture_mode != CDP_RX_ENH_CAPTURE_DISABLED) {
 			do {
+#if defined(FEATURE_WLAN_WONDER) && \
+	defined(QCA_WIFI_WCN7750)
+				/* Full monitor may retain the previous status until its
+				 * destination is consumed. Track actual TLVs for this PPDU.
+				 */
+				if (HAL_RX_GET_USER_TLV32_TYPE(rx_tlv) ==
+				    WIFIRX_PPDU_START_E) {
+					mon_mac->wonder_rx_start_seen = true;
+					mon_mac->wonder_rx_end_seen = false;
+					dp_mon_wonder_rx_frequency_reset(mon_mac);
+				}
+#endif
 				tlv_status = hal_rx_status_get_tlv_info(rx_tlv,
 						ppdu_info, pdev->soc->hal_soc,
 						status_nbuf);
+#if defined(FEATURE_WLAN_WONDER) && defined(QCA_WIFI_WCN7750)
+				if (HAL_RX_GET_USER_TLV32_TYPE(rx_tlv) ==
+				    WIFIRX_PPDU_START_E)
+					dp_mon_wonder_rx_frequency_start(mon_mac);
+#endif
+#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE) && \
+	defined(QCA_WIFI_WCN7750)
+				if (HAL_RX_GET_USER_TLV32_TYPE(rx_tlv) ==
+				    WIFIRXPCU_PPDU_END_INFO_E)
+					mon_mac->wonder_rx_end_seen = true;
+#endif
 
 				if (qdf_unlikely(IS_LOCAL_PKT_CAPTURE_RUNNING(mon_pdev, is_local_pkt_capture_running)))
 					dp_rx_handle_local_pkt_capture(pdev, ppdu_info, status_nbuf, mac_id, tlv_status);
@@ -570,10 +594,28 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
 		}
 
 		if (qdf_unlikely(tlv_status == HAL_TLV_STATUS_PPDU_NON_STD_DONE)) {
+#ifdef FEATURE_WLAN_WONDER
+			mon_mac->wonder_rx_start_seen = false;
+			mon_mac->wonder_rx_end_seen = false;
+			dp_mon_wonder_rx_frequency_reset(mon_mac);
+#endif
 			dp_rx_mon_deliver_non_std(soc, mac_id);
 			dp_mon_rx_ppdu_status_reset(mon_mac);
 		} else if ((qdf_likely(tlv_status == HAL_TLV_STATUS_PPDU_DONE)) &&
 				(qdf_likely(!dp_rx_mon_check_phyrx_abort(pdev, ppdu_info)))) {
+#ifdef FEATURE_WLAN_WONDER
+			if (!mon_mac->wonder_rx_start_seen)
+				dp_mon_wonder_rx_frequency_reset(mon_mac);
+#endif
+#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE) && \
+	defined(QCA_WIFI_WCN7750)
+			/* Once per PPDU, before per-user stats and channel fallbacks. */
+			if (mon_mac->wonder_rx_start_seen &&
+			    mon_mac->wonder_rx_end_seen)
+				dp_mon_wonder_rx_ppdu(pdev, mac_id, ppdu_info);
+			mon_mac->wonder_rx_start_seen = false;
+			mon_mac->wonder_rx_end_seen = false;
+#endif
 			rx_mon_stats->status_ppdu_done++;
 			dp_rx_mon_handle_mu_ul_info(ppdu_info);
 
@@ -624,6 +666,13 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
 						DP_PPDU_STATUS_START;
 			}
 		} else {
+#ifdef FEATURE_WLAN_WONDER
+			if (tlv_status == HAL_TLV_STATUS_PPDU_DONE) {
+				mon_mac->wonder_rx_start_seen = false;
+				mon_mac->wonder_rx_end_seen = false;
+				dp_mon_wonder_rx_frequency_reset(mon_mac);
+			}
+#endif
 			dp_rx_mon_handle_ppdu_undecoded_metadata(soc, pdev,
 								 ppdu_info,
 								 mon_mac);

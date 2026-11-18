@@ -60,6 +60,15 @@
       "repo": "LineageOS/android_kernel_qcom_sm8850",
       "revision": "557159b6a0d06f1c6f07ec4c1f22bc9309a113e4",
       "upstream": "lineage-24.0"
+    },
+    {
+      "rom_path": "kernel/google/wonder",
+      "workspace_path": "baseline/kernel/google/wonder",
+      "repo": "kernel/common-modules/wonder",
+      "remote": "google-wonder",
+      "fetch": "https://android.googlesource.com/",
+      "revision": "f70b3a428939460201f8ebbca0bf309027dd7320",
+      "upstream": "android17-6.18"
     }
   ]
 }

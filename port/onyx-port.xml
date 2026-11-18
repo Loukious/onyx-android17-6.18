@@ -1,6 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <manifest>
   <remote name="github-onyx" fetch="https://github.com/" />
+  <remote name="google-wonder" fetch="https://android.googlesource.com/" />
   <extend-project name="kernel/common" revision="c29a11a6da74fe6ffbc7bc4bbcb21f2e579e814d" upstream="android17-6.18-lts" />
   <project path="baseline/kernel/xiaomi/sm8735" name="crdroidandroid/android_kernel_xiaomi_sm8735" remote="github-onyx" revision="10570812a4878b644e31b47c2f0bd052664cf86d" upstream="17.0" clone-depth="1" />
   <project path="baseline/kernel/xiaomi/sm8735-modules" name="crdroidandroid/android_kernel_xiaomi_sm8735-modules" remote="github-onyx" revision="8500748dae32f10507c02f1c94bc971553cb525b" upstream="17.0" clone-depth="1" />
@@ -9,4 +10,5 @@
   <project path="baseline/device/xiaomi/onyx" name="crdroidandroid/android_device_xiaomi_onyx" remote="github-onyx" revision="80e10cbdd977be75b8734e27856d77961aa991f6" upstream="17.0" clone-depth="1" />
   <project path="baseline/tools/dtc" name="LineageOS/android_external_dtc" remote="github-onyx" revision="c1197f56b8f468effbbf5e79feae353c4280e2ea" upstream="lineage-24.0" clone-depth="1" />
   <project path="baseline/kernel/qcom/sm8850" name="LineageOS/android_kernel_qcom_sm8850" remote="github-onyx" revision="557159b6a0d06f1c6f07ec4c1f22bc9309a113e4" upstream="lineage-24.0" clone-depth="1" />
+  <project path="baseline/kernel/google/wonder" name="kernel/common-modules/wonder" remote="google-wonder" revision="f70b3a428939460201f8ebbca0bf309027dd7320" upstream="android17-6.18" clone-depth="1" />
 </manifest>

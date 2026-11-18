@@ -689,6 +689,16 @@ bool dp_ppdu_stats_ind_handler(struct htt_soc *soc,
 			       qdf_nbuf_t htt_t2h_msg);
 #endif
 
+#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE)
+QDF_STATUS dp_htt_wonder_set_airtime(struct dp_pdev *pdev, uint8_t monitor_id,
+				     bool enabled);
+/* Consume raw PPDU metadata before per-user or delayed-BA transformations. */
+void dp_mon_wonder_tx_ppdu(struct htt_soc *soc, uint32_t *msg_word,
+			 qdf_nbuf_t htt_t2h_msg);
+void dp_mon_wonder_rx_ppdu(struct dp_pdev *pdev, uint32_t mac_id,
+			 struct hal_rx_ppdu_info *ppdu_info);
+#endif
+
 #if defined(QCA_ENHANCED_STATS_SUPPORT) || \
 	(!defined(WLAN_TX_PKT_CAPTURE_ENH) || defined(WLAN_PKT_CAPTURE_TX_2_0))
 /**
@@ -1214,6 +1224,14 @@ struct dp_mon_mac {
 	uint32_t mon_last_buf_cookie;
 	qdf_nbuf_queue_t rx_status_q;
 	struct hal_rx_ppdu_info ppdu_info;
+#ifdef FEATURE_WLAN_WONDER
+	/* Metadata must belong to this PPDU, including after a missing end TLV. */
+	bool wonder_rx_start_seen;
+	bool wonder_rx_end_seen;
+	/* Captured from this PPDU START, before the configured HOME fallback. */
+	uint32_t wonder_rx_frequency;
+	uint32_t wonder_rx_frequency_ppdu_id;
+#endif
 #ifdef WLAN_FEATURE_LOCAL_PKT_CAPTURE
 	/* Maintain MSDU list on PPDU */
 	qdf_nbuf_queue_t msdu_queue;
@@ -1235,6 +1253,17 @@ struct  dp_mon_pdev {
 	/* monitor */
 	bool monitor_configured;
 	uint32_t mon_vdev_id;
+#ifdef FEATURE_WLAN_WONDER
+	bool wonder_airtime_enabled;
+	uint8_t wonder_airtime_vdev_id;
+	/* Last successfully submitted request before the Wonder COMMON bit. */
+	uint32_t wonder_airtime_base_mask;
+	struct {
+		uint64_t tsf;
+		uint32_t ppdu_id;
+		bool valid;
+	} wonder_airtime_last[MAX_NUM_LMAC_HW][2];
+#endif
 
 #if defined(FEATURE_ML_MONITOR_MODE_SUPPORT) || \
 	defined(FEATURE_ML_LOCAL_PKT_CAPTURE)
@@ -5367,6 +5396,29 @@ dp_mon_mode_local_pkt_capture(struct dp_soc *soc)
 }
 #endif
 
+#ifdef FEATURE_WLAN_WONDER
+static inline void
+dp_mon_wonder_rx_frequency_reset(struct dp_mon_mac *mon_mac)
+{
+	mon_mac->wonder_rx_frequency = 0;
+	mon_mac->wonder_rx_frequency_ppdu_id = 0;
+}
+
+/* Call only after decoding this actual PPDU START TLV. */
+static inline void
+dp_mon_wonder_rx_frequency_start(struct dp_mon_mac *mon_mac)
+{
+	uint32_t frequency = mon_mac->ppdu_info.rx_status.chan_freq;
+
+	dp_mon_wonder_rx_frequency_reset(mon_mac);
+	if (frequency && frequency <= 65535) {
+		mon_mac->wonder_rx_frequency = frequency;
+		mon_mac->wonder_rx_frequency_ppdu_id =
+			mon_mac->ppdu_info.com_info.ppdu_id;
+	}
+}
+#endif
+
 #ifdef WIFI_MONITOR_SUPPORT
 void
 dp_check_and_dump_full_mon_info(struct dp_soc *soc, struct dp_pdev *pdev,
@@ -5382,6 +5434,10 @@ static inline void
 dp_mon_rx_ppdu_status_reset(struct dp_mon_mac *mon_mac)
 {
 	mon_mac->mon_ppdu_status = DP_PPDU_STATUS_START;
+
+#ifdef FEATURE_WLAN_WONDER
+	dp_mon_wonder_rx_frequency_reset(mon_mac);
+#endif
 	mon_mac->ppdu_info.com_info.num_users = 0;
 	qdf_mem_zero(&mon_mac->ppdu_info.rx_status,
 		     sizeof(mon_mac->ppdu_info.rx_status));

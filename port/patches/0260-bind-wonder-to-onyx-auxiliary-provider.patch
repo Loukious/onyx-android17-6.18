@@ -1,0 +1,10 @@
+--- a/wonder/main.c
++++ b/wonder/main.c
+@@ -102,6 +102,7 @@
+ }
+ 
+ static const struct auxiliary_device_id wonder_aux_id_table[] = {
++	{ .name = "qca_cld3_wcn7750.wondertap", .driver_data = 1 },
+ 	{ .name = "bcmdhd4390.wondertap" },
+ 	{ .name = "iwlmld.wondertap" },
+ 	{},

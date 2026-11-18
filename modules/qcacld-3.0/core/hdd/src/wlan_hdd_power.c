@@ -41,6 +41,7 @@
 #include <mac_init_api.h>
 #include <wlan_qct_sys.h>
 #include <wlan_hdd_main.h>
+#include <wlan_hdd_wonder.h>
 extern qdf_wake_lock_t wlan_wake_lock;
 #include <wlan_hdd_assoc.h>
 #include <wlan_nlink_srv.h>
@@ -1975,6 +1976,7 @@ QDF_STATUS hdd_wlan_shutdown(void)
 		}
 	}
 
+	hdd_wonder_unregister(hdd_ctx);
 	hdd_reset_all_adapters(hdd_ctx);
 
 	ucfg_ipa_uc_ssr_cleanup(hdd_ctx->pdev);
@@ -2245,6 +2247,8 @@ QDF_STATUS hdd_wlan_re_init(void)
 
 	if (hdd_ctx->hdd_wlan_suspended)
 		hdd_ctx->hdd_wlan_suspended = false;
+
+	hdd_wonder_register(hdd_ctx);
 
 	return QDF_STATUS_SUCCESS;
 

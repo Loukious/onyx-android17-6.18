@@ -1,3 +1,4 @@
+#include "wma_wonder_tsf.h"
 /*
  * Copyright (c) 2013-2021 The Linux Foundation. All rights reserved.
  * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
@@ -5227,7 +5228,14 @@ QDF_STATUS wma_wmi_work_close(void)
 
 	/* remove the wmi work */
 	wma_debug("calling wmi_unified_remove_work");
+#ifdef FEATURE_WLAN_WONDER
+	wma_wonder_offchan_event_stop(wma_handle);
+#endif
 	wmi_unified_remove_work(wmi_handle);
+#ifdef FEATURE_WLAN_WONDER
+	wma_wonder_offchan_events_drained(wma_handle);
+	wma_wonder_tsf_reset();
+#endif
 
 	wma_debug("Exit");
 	return QDF_STATUS_SUCCESS;

@@ -602,6 +602,13 @@ static int target_if_vdev_mgr_delete_response_handler(ol_scn_t scn,
 		return -EINVAL;
 	}
 
+	/* Raw standalone injection vdevs deliberately have no objmgr timer.
+	 * A timeout-synthesized response never passes through this event handler.
+	 */
+	if (rx_ops->raw_injection_delete_response &&
+	    rx_ops->raw_injection_delete_response(psoc, vdev_del_resp.vdev_id))
+		return 0;
+
 	vdev_rsp = rx_ops->psoc_get_vdev_response_timer_info(psoc,
 							 vdev_del_resp.vdev_id);
 	if (!vdev_rsp) {

@@ -4,6 +4,7 @@
   __cfg80211_alloc_reply_skb
   __cfg80211_get_bss
   __cfg80211_send_event_skb
+  __ieee80211_schedule_txq
   cfg80211_calculate_bitrate
   cfg80211_ch_switch_notify
   cfg80211_ch_switch_started_notify
@@ -38,15 +39,33 @@
   cfg80211_update_owe_info_event
   cfg80211_vendor_cmd_get_sender
   cfg80211_vendor_cmd_reply
+  get_wiphy_regdom
+  ieee80211_alloc_hw_nm
   ieee80211_channel_to_freq_khz
+  ieee80211_emulate_add_chanctx
+  ieee80211_emulate_change_chanctx
+  ieee80211_emulate_remove_chanctx
+  ieee80211_free_hw
   ieee80211_freq_khz_to_channel
   ieee80211_get_channel_khz
   ieee80211_hdrlen
+  ieee80211_next_txq
   ieee80211_radiotap_iterator_init
   ieee80211_radiotap_iterator_next
+  ieee80211_register_hw
+  ieee80211_rx_napi
+  ieee80211_start_tx_ba_cb_irqsafe
+  ieee80211_stop_tx_ba_cb_irqsafe
+  ieee80211_tx_dequeue
+  ieee80211_tx_status_ext
+  ieee80211_txq_get_depth
+  ieee80211_txq_schedule_start
+  ieee80211_unregister_hw
+  ieee80211_vif_to_wdev
   regulatory_set_wiphy_regd
   regulatory_set_wiphy_regd_sync
   wiphy_free
   wiphy_new_nm
   wiphy_register
+  wiphy_to_ieee80211_hw
   wiphy_unregister

@@ -108,6 +108,9 @@
 #include "sme_api.h"
 #include "init_deinit_lmac.h"
 #include <../../core/src/vdev_mgr_ops.h>
+#ifdef FEATURE_WLAN_WONDER
+#include "wlan_hdd_wonder_peer.h"
+#endif
 
 #define WMA_INJECTION_DESC_BASE 0xf000
 #define WMA_INJECTION_DESC_MASK 0x0fff
@@ -217,6 +220,18 @@ struct wma_injection_helper {
 	uint8_t interface_mac[QDF_MAC_ADDR_SIZE];
 	uint8_t mac_addr[QDF_MAC_ADDR_SIZE];
 	uint8_t peer_addr[QDF_MAC_ADDR_SIZE];
+	uint8_t max_nss;
+	uint8_t channel_bw_mask;
+	uint32_t phy_mode;
+	bool ht_supported;
+	bool vht_supported;
+	bool he_supported;
+#ifdef FEATURE_WLAN_WONDER
+	uint64_t wonder_cookie;
+	bool wonder_owned;
+	bool wonder_delete_sent;
+	bool wonder_module_held;
+#endif
 };
 
 static struct {
@@ -241,6 +256,47 @@ static struct {
 	/* Fresh context or a completed stop, never a timeout/retune shortcut. */
 	bool coex_resume_ready;
 } wma_injection_ctx;
+
+#ifdef FEATURE_WLAN_WONDER
+static atomic64_t wma_wonder_helper_cookie = ATOMIC64_INIT(0);
+
+/* Called directly from the real FW DELETE event, before objmgr timer lookup.
+ * No lifecycle/helper mutex: teardown can hold both while awaiting this event.
+ */
+static bool wma_wonder_legacy_delete_response(struct wlan_objmgr_psoc *psoc,
+					     uint8_t id)
+{
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+	tp_wma_handle wma = READ_ONCE(wma_injection_ctx.wma);
+
+	if (!wma || wma->psoc != psoc || READ_ONCE(helper->native) ||
+	    !READ_ONCE(helper->wonder_owned) ||
+	    !READ_ONCE(helper->wonder_delete_sent) ||
+	    READ_ONCE(helper->vdev_id) != id)
+		return false;
+	hdd_wonder_peer_helper_deleted(psoc, id);
+	helper->delete_confirmed = true;
+	complete_all(&helper->delete_done);
+	return true;
+}
+
+/* Caller has drained TX and owns helper_lock; CLEAR has no acknowledgement. */
+static void wma_wonder_clear_helper(tp_wma_handle wma)
+{
+	struct set_rx_mac_filter param = { 0 };
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+	QDF_STATUS status;
+
+	if (!helper->wonder_owned ||
+	    !hdd_wonder_peer_take_clear(wma->psoc, helper->vdev_id, &param))
+		return;
+	status = wmi_unified_set_mac_addr_rx_filter(wma->wmi_handle, &param);
+	hdd_wonder_peer_clear_result(wma->psoc, helper->vdev_id,
+				     qdf_status_to_os_return(status));
+}
+#else
+static inline void wma_wonder_clear_helper(tp_wma_handle wma) { }
+#endif
 
 struct wma_injection_power_entry {
 	/* Identity only; every dereference uses the caller's live vdev reference. */
@@ -770,6 +826,9 @@ bool wma_injection_helper_deleted(uint8_t vdev_id)
 	WRITE_ONCE(helper->vdev, NULL);
 	helper->delete_status = QDF_STATUS_SUCCESS;
 	helper->delete_confirmed = true;
+#ifdef FEATURE_WLAN_WONDER
+	hdd_wonder_peer_helper_deleted(wma_injection_ctx.wma->psoc, vdev_id);
+#endif
 	complete_all(&helper->delete_done);
 	return true;
 }
@@ -784,6 +843,11 @@ void wma_injection_peer_map_notify(uint8_t vdev_id)
 
 bool wma_injection_coex_is_quiesced(void)
 {
+#ifdef FEATURE_WLAN_WONDER
+	if (READ_ONCE(wma_injection_ctx.helper.wonder_owned) &&
+	    READ_ONCE(wma_injection_ctx.helper.wmi_created))
+		return false;
+#endif
 	return !READ_ONCE(wma_injection_ctx.helper.native) &&
 		!READ_ONCE(wma_injection_ctx.in_flight);
 }
@@ -929,6 +993,9 @@ QDF_STATUS wma_injection_helper_start_rsp(struct vdev_mlme_obj *mlme,
 			     sizeof(struct wlan_channel));
 		wma->interfaces[helper->vdev_id].ch_freq = helper->chanfreq;
 		wma->interfaces[helper->vdev_id].tx_streams = rsp->cfgd_tx_streams;
+		/* Firmware may reduce the preferred stream count for the chosen MAC. */
+		helper->max_nss = rsp->cfgd_tx_streams ?
+			qdf_min((uint32_t)helper->max_nss, rsp->cfgd_tx_streams) : 1;
 		wlan_mlme_set_vdev_mac_id(wma->pdev, helper->vdev_id, mac_id);
 		cdp_update_mac_id(wlan_psoc_get_dp_handle(wma->psoc),
 				 helper->vdev_id, mac_id);
@@ -1085,6 +1152,8 @@ struct wma_injection_helper_snapshot {
 	uint8_t vdev_id;
 	uint16_t peer_id;
 	bool direct_dp;
+	uint8_t max_nss;
+	uint8_t channel_bw_mask;
 };
 
 static void wma_injection_queue_work(void)
@@ -1112,11 +1181,64 @@ wma_injection_get_helper_snapshot(uint8_t monitor_vdev_id,
 
 	snapshot->vdev_id = READ_ONCE(helper->vdev_id);
 	snapshot->peer_id = READ_ONCE(helper->peer_id);
+	snapshot->max_nss = READ_ONCE(helper->max_nss);
+	snapshot->channel_bw_mask = READ_ONCE(helper->channel_bw_mask);
 	snapshot->direct_dp = READ_ONCE(helper->dp_attached) &&
 			      READ_ONCE(helper->dp_peer_attached) &&
 			      READ_ONCE(helper->wmi_started) &&
 			      READ_ONCE(helper->wmi_up);
 	return true;
+}
+
+static uint8_t wma_injection_nss_limit(uint8_t configured)
+{
+	return configured ? qdf_min(configured, (uint8_t)2) : 1;
+}
+
+static uint8_t wma_injection_channel_bw_mask(enum phy_ch_width width)
+{
+	switch (width) {
+	case CH_WIDTH_40MHZ:
+		return BIT(2) | BIT(3);
+	case CH_WIDTH_80MHZ:
+	case CH_WIDTH_160MHZ:
+	case CH_WIDTH_80P80MHZ:
+		return BIT(2) | BIT(3) | BIT(4);
+	default:
+		return BIT(2);
+	}
+}
+
+static void wma_injection_set_phy_limits(struct wma_injection_helper *helper,
+					uint32_t mode, bool ht, bool vht)
+{
+	helper->phy_mode = mode;
+	helper->ht_supported = ht && helper->chanfreq < 5925;
+	helper->vht_supported = vht && helper->chanfreq < 5925 &&
+		mode >= WMI_HOST_MODE_11AC_VHT20 && mode < WMI_HOST_MODE_UNKNOWN;
+	switch (mode) {
+	case WMI_HOST_MODE_11AX_HE20:
+	case WMI_HOST_MODE_11AX_HE40:
+	case WMI_HOST_MODE_11AX_HE80:
+	case WMI_HOST_MODE_11AX_HE80_80:
+	case WMI_HOST_MODE_11AX_HE160:
+	case WMI_HOST_MODE_11AX_HE20_2G:
+	case WMI_HOST_MODE_11AX_HE40_2G:
+	case WMI_HOST_MODE_11AX_HE80_2G:
+#ifdef WLAN_FEATURE_11BE
+	case WMI_HOST_MODE_11BE_EHT20:
+	case WMI_HOST_MODE_11BE_EHT40:
+	case WMI_HOST_MODE_11BE_EHT80:
+	case WMI_HOST_MODE_11BE_EHT160:
+	case WMI_HOST_MODE_11BE_EHT320:
+	case WMI_HOST_MODE_11BE_EHT20_2G:
+	case WMI_HOST_MODE_11BE_EHT40_2G:
+#endif
+		helper->he_supported = true;
+		break;
+	default:
+		helper->he_supported = false;
+	}
 }
 
 static void wma_injection_select_mac(uint8_t *helper_mac,
@@ -1230,6 +1352,7 @@ static bool wma_injection_destroy_native(tp_wma_handle wma)
 	if (helper->start_requested &&
 	    !wait_for_completion_timeout(&helper->start_done, 6 * HZ))
 		return false;
+	wma_wonder_clear_helper(wma);
 	if (helper->wmi_started || helper->wmi_up) {
 		if (!helper->stop_requested) {
 			reinit_completion(&helper->stop_done);
@@ -1380,6 +1503,8 @@ wma_injection_native_channel(tp_wma_handle wma,
 	start->channel.allow_ht = owner_mlme->proto.ht_info.allow_ht;
 	start->channel.allow_vht = owner_mlme->proto.vht_info.allow_vht;
 	start->channel.phy_mode = owner_mlme->mgmt.generic.phy_mode;
+	wma_injection_set_phy_limits(helper, start->channel.phy_mode,
+				     start->channel.allow_ht, start->channel.allow_vht);
 	start->channel.cfreq1 = channel->ch_cfreq1;
 	start->channel.cfreq2 = channel->ch_cfreq2;
 	start->channel.maxpower = power_limit;
@@ -1391,8 +1516,12 @@ wma_injection_native_channel(tp_wma_handle wma,
 	start->channel.puncture_bitmap = channel->puncture_bitmap;
 	start->eht_ops = owner_mlme->proto.eht_ops_info.eht_ops;
 #endif
-	start->preferred_tx_streams = 1;
-	start->preferred_rx_streams = 1;
+	helper->max_nss = wma_injection_nss_limit(channel->ch_freq < 3000 ?
+		qdf_min(owner_mlme->proto.generic.nss_2g, mlme->proto.generic.nss_2g) :
+		qdf_min(owner_mlme->proto.generic.nss_5g, mlme->proto.generic.nss_5g));
+	helper->channel_bw_mask = wma_injection_channel_bw_mask(channel->ch_width);
+	start->preferred_tx_streams = helper->max_nss;
+	start->preferred_rx_streams = helper->max_nss;
 	wlan_reg_get_dfs_region(wma->pdev, &dfs_region);
 	start->regdomain = dfs_region;
 	start->he_ops = owner_mlme->proto.he_ops_info.he_ops;
@@ -1615,6 +1744,9 @@ static void __wma_injection_destroy_helper(tp_wma_handle wma)
 	struct peer_delete_cmd_params peer_delete = {0};
 	struct vdev_stop_params vdev_stop = {0};
 	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+#ifdef FEATURE_WLAN_WONDER
+	QDF_STATUS status;
+#endif
 
 	if (helper->native) {
 		if (!wma_injection_destroy_native(wma))
@@ -1624,6 +1756,7 @@ static void __wma_injection_destroy_helper(tp_wma_handle wma)
 	smp_store_release(&helper->created, false);
 	if (!wma || !wma->wmi_handle)
 		return;
+	wma_wonder_clear_helper(wma);
 
 	if (helper->wmi_up) {
 		wmi_unified_vdev_down_send(wma->wmi_handle, helper->vdev_id);
@@ -1645,12 +1778,41 @@ static void __wma_injection_destroy_helper(tp_wma_handle wma)
 	}
 	wma_injection_detach_dp(helper);
 	if (helper->wmi_created) {
-		wmi_unified_vdev_delete_send(wma->wmi_handle, helper->vdev_id);
-		helper->wmi_created = false;
-		msleep(50);
+#ifdef FEATURE_WLAN_WONDER
+		if (helper->wonder_owned) {
+			if (!helper->wonder_delete_sent) {
+				reinit_completion(&helper->delete_done);
+				helper->delete_confirmed = false;
+				WRITE_ONCE(helper->wonder_delete_sent, true);
+				status = wmi_unified_vdev_delete_send(wma->wmi_handle,
+								 helper->vdev_id);
+				if (QDF_IS_STATUS_ERROR(status)) {
+					WRITE_ONCE(helper->wonder_delete_sent, false);
+					wma_err("Wonder helper DELETE submission failed: %d", status);
+					return;
+				}
+			}
+			if (!wait_for_completion_timeout(&helper->delete_done, 6 * HZ) ||
+			    !helper->delete_confirmed) {
+				wma_err("Wonder helper retained awaiting real DELETE: vdev=%u",
+					 helper->vdev_id);
+				return;
+			}
+			helper->wmi_created = false;
+		} else
+#endif
+		{
+			wmi_unified_vdev_delete_send(wma->wmi_handle, helper->vdev_id);
+			helper->wmi_created = false;
+			msleep(50);
+		}
 	}
 	wma_info("Injection helper released: monitor=%u helper=%u",
 		 helper->monitor_vdev_id, helper->vdev_id);
+#ifdef FEATURE_WLAN_WONDER
+	if (helper->wonder_module_held)
+		module_put(THIS_MODULE);
+#endif
 	qdf_mem_zero(helper, sizeof(*helper));
 }
 
@@ -1685,6 +1847,10 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
 						     generation);
 	if (helper->native)
 		return QDF_STATUS_E_BUSY;
+#ifdef FEATURE_WLAN_WONDER
+	if (helper->wonder_owned && helper->wmi_created && !helper->created)
+		return QDF_STATUS_E_BUSY;
+#endif
 
 	if (smp_load_acquire(&helper->created) &&
 	    helper->monitor_vdev_id == monitor_vdev_id &&
@@ -1696,6 +1862,10 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
 		if (!wma_injection_wait_for_idle())
 			return QDF_STATUS_E_BUSY;
 		__wma_injection_destroy_helper(wma);
+#ifdef FEATURE_WLAN_WONDER
+		if (helper->wonder_owned && helper->wmi_created)
+			return QDF_STATUS_E_BUSY;
+#endif
 	}
 
 	if (!soc || monitor_vdev_id >= wma->max_bssid ||
@@ -1738,8 +1908,10 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
 	stage = "vdev_create";
 	create.vdev_id = helper->vdev_id;
 	create.type = WMI_VDEV_TYPE_AP;
-	create.nss_2g = 1;
-	create.nss_5g = 1;
+	create.nss_2g = wma_injection_nss_limit(monitor_mlme->proto.generic.nss_2g);
+	create.nss_5g = wma_injection_nss_limit(monitor_mlme->proto.generic.nss_5g);
+	helper->max_nss = chanfreq < 3000 ? create.nss_2g : create.nss_5g;
+	helper->channel_bw_mask = wma_injection_channel_bw_mask(monitor_chan->ch_width);
 	status = wmi_unified_vdev_create_send(wma->wmi_handle,
 					      helper->mac_addr, &create);
 	if (QDF_IS_STATUS_ERROR(status))
@@ -1818,6 +1990,8 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
 	start.channel.allow_vht = monitor_mlme->proto.vht_info.allow_vht;
 	/* MLME stores the firmware/WMI phymode required by vdev_start. */
 	start.channel.phy_mode = monitor_mlme->mgmt.generic.phy_mode;
+	wma_injection_set_phy_limits(helper, start.channel.phy_mode,
+				     start.channel.allow_ht, start.channel.allow_vht);
 	start.channel.cfreq1 = monitor_chan->ch_cfreq1 ?: chanfreq;
 	start.channel.cfreq2 = monitor_chan->ch_cfreq2;
 	start.channel.maxpower = monitor_mlme->mgmt.generic.maxpower;
@@ -1829,8 +2003,8 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
 	start.channel.puncture_bitmap = monitor_chan->puncture_bitmap;
 	start.eht_ops = monitor_mlme->proto.eht_ops_info.eht_ops;
 #endif
-	start.preferred_tx_streams = 1;
-	start.preferred_rx_streams = 1;
+	start.preferred_tx_streams = helper->max_nss;
+	start.preferred_rx_streams = helper->max_nss;
 	wlan_reg_get_dfs_region(wma->pdev, &dfs_region);
 	start.regdomain = dfs_region;
 	start.he_ops = monitor_mlme->proto.he_ops_info.he_ops;
@@ -1881,6 +2055,870 @@ fail:
 	__wma_injection_destroy_helper(wma);
 	return status;
 }
+
+#ifdef FEATURE_WLAN_WONDER
+bool wma_wonder_standalone_helper_reserved(void)
+{
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+
+	return !READ_ONCE(helper->native) && READ_ONCE(helper->wonder_owned) &&
+		READ_ONCE(helper->wmi_created);
+}
+
+bool wma_wonder_helper_identity_valid(uint8_t monitor_id, uint8_t helper_id,
+				      uint64_t cookie)
+{
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+	struct wma_injection_helper_snapshot helper_snapshot;
+	tp_wma_handle wma;
+	bool valid = false;
+
+	if (!cookie || !READ_ONCE(wma_injection_ctx.active))
+		return false;
+	mutex_lock(&wma_injection_ctx.lifecycle_lock);
+	mutex_lock(&wma_injection_ctx.helper_lock);
+	wma = wma_injection_ctx.wma;
+	if (!wma || !wma->wmi_handle || !wma_injection_ctx.active ||
+	    wma_injection_ctx.paused || wma_injection_ctx.channel_change_paused ||
+	    monitor_id >= wma->max_bssid || !wma->interfaces[monitor_id].vdev ||
+	    wma->interfaces[monitor_id].ch_freq != helper->chanfreq ||
+	    helper_id >= wma->max_bssid || !helper->wonder_owned ||
+	    helper->wonder_cookie != cookie || helper->vdev_id != helper_id ||
+	    helper->wonder_delete_sent ||
+	    !wma_injection_get_helper_snapshot(monitor_id, helper->chanfreq,
+					helper->interface_mac, helper->generation,
+					&helper_snapshot) || !helper_snapshot.direct_dp ||
+	    (helper->generation && !wlan_mlme_sta_mon_token_valid(wma->psoc,
+					monitor_id, helper->generation)) ||
+	    (!helper->generation && wlan_mlme_sta_mon_is_owner(wma->psoc, monitor_id)))
+		goto out;
+	valid = true;
+out:
+	mutex_unlock(&wma_injection_ctx.helper_lock);
+	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+	return valid;
+}
+
+QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		struct wma_wonder_helper_snapshot *snapshot)
+{
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+	struct wma_injection_helper_snapshot helper_snapshot;
+	tp_wma_handle wma;
+	QDF_STATUS status = QDF_STATUS_E_AGAIN;
+
+	if (!frequency || !interface_mac || !snapshot ||
+	    !READ_ONCE(wma_injection_ctx.active))
+		return QDF_STATUS_E_INVAL;
+	mutex_lock(&wma_injection_ctx.lifecycle_lock);
+	mutex_lock(&wma_injection_ctx.helper_lock);
+	wma = wma_injection_ctx.wma;
+	if (!wma || !wma->wmi_handle || !wma_injection_ctx.active ||
+	    wma_injection_ctx.paused || wma_injection_ctx.channel_change_paused ||
+	    monitor_id >= wma->max_bssid || !wma->interfaces[monitor_id].vdev ||
+	    wma->interfaces[monitor_id].ch_freq != frequency ||
+	    (generation && !wlan_mlme_sta_mon_token_valid(wma->psoc, monitor_id,
+							  generation)) ||
+	    (!generation && wlan_mlme_sta_mon_is_owner(wma->psoc, monitor_id)))
+		goto out;
+	if (!wmi_service_enabled(wma->wmi_handle, wmi_service_sync_delete_cmds) ||
+	    !wma->psoc->soc_cb.rx_ops) {
+		status = QDF_STATUS_E_NOSUPPORT;
+		goto out;
+	}
+	if (!wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+					      generation, &helper_snapshot)) {
+		status = __wma_injection_ensure_helper(wma, monitor_id, frequency,
+						     interface_mac, generation);
+		if (QDF_IS_STATUS_ERROR(status))
+			goto out;
+	}
+	if (!wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+					      generation, &helper_snapshot) || !helper_snapshot.direct_dp) {
+		status = QDF_STATUS_E_AGAIN;
+		goto out;
+	}
+	if (!helper->wonder_owned) {
+		/* Native helpers already hold a module pin and real MLME lifecycle. */
+		if (!helper->native) {
+			if (!try_module_get(THIS_MODULE)) {
+				status = QDF_STATUS_E_CANCELED;
+				goto out;
+			}
+			helper->wonder_module_held = true;
+			init_completion(&helper->delete_done);
+			WRITE_ONCE(wma->psoc->soc_cb.rx_ops->mops.raw_injection_delete_response,
+				   wma_wonder_legacy_delete_response);
+		}
+		helper->wonder_cookie = atomic64_inc_return(&wma_wonder_helper_cookie);
+		if (!helper->wonder_cookie)
+			helper->wonder_cookie = atomic64_inc_return(&wma_wonder_helper_cookie);
+		WRITE_ONCE(helper->wonder_owned, true);
+	}
+	snapshot->vdev_id = helper_snapshot.vdev_id;
+	snapshot->cookie = helper->wonder_cookie;
+	status = QDF_STATUS_SUCCESS;
+out:
+	mutex_unlock(&wma_injection_ctx.helper_lock);
+	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+	return status;
+}
+
+QDF_STATUS wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot, bool set)
+{
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+	struct wma_injection_helper_snapshot helper_snapshot;
+	struct set_rx_mac_filter param = { 0 };
+	tp_wma_handle wma;
+	QDF_STATUS status = QDF_STATUS_E_AGAIN;
+
+	if (!snapshot || !interface_mac || !READ_ONCE(wma_injection_ctx.active))
+		return QDF_STATUS_E_INVAL;
+	mutex_lock(&wma_injection_ctx.lifecycle_lock);
+	mutex_lock(&wma_injection_ctx.helper_lock);
+	wma = wma_injection_ctx.wma;
+	if (!wma || !wma->wmi_handle || !wma_injection_ctx.active ||
+	    !helper->wonder_owned || helper->wonder_cookie != snapshot->cookie ||
+	    helper->vdev_id != snapshot->vdev_id || helper->wonder_delete_sent ||
+	    !wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+					      generation, &helper_snapshot) ||
+	    (set && (wma_injection_ctx.paused ||
+		     wma_injection_ctx.channel_change_paused ||
+		     (generation && !wlan_mlme_sta_mon_token_valid(wma->psoc,
+							 monitor_id, generation)))))
+		goto out;
+	param.vdev_id = snapshot->vdev_id;
+	param.freq = frequency;
+	qdf_mem_copy(param.mac, interface_mac, QDF_MAC_ADDR_SIZE);
+	param.set = set;
+	status = wmi_unified_set_mac_addr_rx_filter(wma->wmi_handle, &param);
+out:
+	mutex_unlock(&wma_injection_ctx.helper_lock);
+	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+	return status;
+}
+
+QDF_STATUS wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot,
+		struct wma_wonder_helper_limits *limits)
+{
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+	struct wma_injection_helper_snapshot helper_snapshot;
+	tp_wma_handle wma;
+	QDF_STATUS status = QDF_STATUS_E_AGAIN;
+
+	if (!snapshot || !interface_mac || !limits ||
+	    !READ_ONCE(wma_injection_ctx.active))
+		return QDF_STATUS_E_INVAL;
+	mutex_lock(&wma_injection_ctx.lifecycle_lock);
+	mutex_lock(&wma_injection_ctx.helper_lock);
+	wma = wma_injection_ctx.wma;
+	if (!wma || !wma_injection_ctx.active || wma_injection_ctx.paused ||
+	    !helper->wonder_owned || helper->wonder_cookie != snapshot->cookie ||
+	    helper->vdev_id != snapshot->vdev_id ||
+	    !wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+					      generation, &helper_snapshot) || !helper_snapshot.direct_dp ||
+	    (generation && !wlan_mlme_sta_mon_token_valid(wma->psoc, monitor_id,
+							  generation)))
+		goto out;
+	limits->frequency = helper->chanfreq;
+	limits->phy_mode = helper->phy_mode;
+	limits->max_nss = helper_snapshot.max_nss;
+	limits->bandwidth_mask = helper_snapshot.channel_bw_mask;
+	limits->ht_supported = helper->ht_supported;
+	limits->vht_supported = helper->vht_supported;
+	limits->he_supported = helper->he_supported;
+	status = QDF_STATUS_SUCCESS;
+out:
+	mutex_unlock(&wma_injection_ctx.helper_lock);
+	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+	return status;
+}
+#define WMA_WONDER_OFFCHAN_SLOTS 64
+
+/*
+ * This owner survives injection-context and provider teardown. A slot is never
+ * retired by a dwell event, host timeout, queue flush or helper DELETE.
+ */
+struct wma_wonder_offchan_slot {
+	qdf_nbuf_t nbuf;
+	struct __qdf_device dma_device;
+	uint32_t desc_id;
+	uint32_t pdev_id;
+	uint32_t completion_status;
+	bool publishing;
+	bool completion_seen;
+	bool releasing;
+};
+
+static DEFINE_SPINLOCK(wma_wonder_offchan_lock);
+static struct {
+	struct wma_wonder_offchan_slot slots[WMA_WONDER_OFFCHAN_SLOTS];
+	wmi_unified_t wmi_handle;
+	void *wma_context;
+	uint32_t next_desc;
+	unsigned int in_flight;
+	unsigned int queued;
+	uint64_t epoch;
+	uint64_t sent;
+	uint64_t failed;
+	uint64_t completed;
+	uint64_t descriptor_exhausted;
+	uint64_t pdev_mismatch;
+	uint64_t malformed;
+	uint64_t unknown_desc;
+	bool registered;
+	bool accepting;
+	bool stopped;
+} wma_wonder_offchan;
+
+static int wma_wonder_offchan_stats_get(char *buffer,
+				       const struct kernel_param *kp)
+{
+	unsigned long flags;
+	unsigned int i, mapped = 0, publishing = 0, quarantined = 0;
+	int length;
+
+	(void)kp;
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	for (i = 0; i < WMA_WONDER_OFFCHAN_SLOTS; i++) {
+		struct wma_wonder_offchan_slot *slot = &wma_wonder_offchan.slots[i];
+
+		if (!slot->nbuf || slot->releasing)
+			continue;
+		if (slot->publishing) {
+			publishing++;
+		} else {
+			mapped++;
+			if (!wma_wonder_offchan.accepting)
+				quarantined++;
+		}
+	}
+	length = scnprintf(buffer, PAGE_SIZE,
+		"registered=%u quiesced=%u epoch=%llu queued=%u sent=%llu failed=%llu completed=%llu pending_mapped=%u publishing=%u quarantined=%u descriptor_exhausted=%llu pdev_mismatch=%llu malformed=%llu unknown_desc=%llu\n",
+		wma_wonder_offchan.registered, !wma_wonder_offchan.accepting,
+		(unsigned long long)wma_wonder_offchan.epoch, wma_wonder_offchan.queued,
+		(unsigned long long)wma_wonder_offchan.sent,
+		(unsigned long long)wma_wonder_offchan.failed,
+		(unsigned long long)wma_wonder_offchan.completed, mapped, publishing,
+		quarantined, (unsigned long long)wma_wonder_offchan.descriptor_exhausted,
+		(unsigned long long)wma_wonder_offchan.pdev_mismatch,
+		(unsigned long long)wma_wonder_offchan.malformed,
+		(unsigned long long)wma_wonder_offchan.unknown_desc);
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	return length;
+}
+
+static const struct kernel_param_ops wma_wonder_offchan_stats_ops = {
+	.get = wma_wonder_offchan_stats_get,
+};
+module_param_cb(wonder_offchan_stats, &wma_wonder_offchan_stats_ops, NULL, 0444);
+MODULE_PARM_DESC(wonder_offchan_stats,
+		"Offchannel queue and DMA ownership counters; sent is not an RF receipt");
+
+struct wma_wonder_offchan_packet {
+	struct list_head node;
+	qdf_nbuf_t nbuf;
+	struct wma_wonder_helper_snapshot snapshot;
+	struct cdp_tx_injection_params params;
+	uint64_t generation;
+	uint32_t home_frequency;
+	uint32_t frequency;
+	uint32_t desc_id;
+	uint8_t monitor_id;
+	bool (*begin)(void *arg, unsigned long *flags);
+	void (*end)(void *arg, unsigned long flags);
+	void (*release)(void *arg);
+	void *arg;
+};
+
+static LIST_HEAD(wma_wonder_offchan_queue);
+static void wma_wonder_offchan_worker(struct work_struct *work);
+static DECLARE_WORK(wma_wonder_offchan_work, wma_wonder_offchan_worker);
+
+/* Both lifecycle_lock and helper_lock are held by this process-context caller. */
+static bool wma_wonder_offchan_helper_valid(tp_wma_handle wma,
+		uint8_t monitor_id, uint32_t home_frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot)
+{
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+	struct wma_injection_helper_snapshot helper_snapshot;
+
+	return wma && wma->wmi_handle && wma->qdf_dev &&
+		wma->qdf_dev->dev && wma_injection_ctx.active &&
+		!wma_injection_ctx.paused &&
+		!wma_injection_ctx.channel_change_paused &&
+		monitor_id < wma->max_bssid &&
+		wma->interfaces[monitor_id].vdev &&
+		wma->interfaces[monitor_id].ch_freq == home_frequency &&
+		helper->wonder_owned && !helper->wonder_delete_sent &&
+		helper->wonder_cookie == snapshot->cookie &&
+		helper->vdev_id == snapshot->vdev_id &&
+		wma_injection_get_helper_snapshot(monitor_id, home_frequency,
+				interface_mac, generation, &helper_snapshot) &&
+		helper_snapshot.direct_dp &&
+		(generation ?
+		 wlan_mlme_sta_mon_token_valid(wma->psoc, monitor_id, generation) :
+		 !wlan_mlme_sta_mon_is_owner(wma->psoc, monitor_id));
+}
+
+/* Completion/failed-publication owns a slot after setting releasing. */
+static void wma_wonder_offchan_release(struct wma_wonder_offchan_slot *slot,
+				       bool mapped)
+{
+	struct wma_wonder_offchan_slot released = *slot;
+	unsigned long flags;
+
+	if (mapped) {
+		qdf_nbuf_unmap_single(&released.dma_device, released.nbuf,
+				     QDF_DMA_TO_DEVICE);
+		qdf_nbuf_free(released.nbuf);
+		atomic64_inc(&injection_completed);
+		if (released.completion_status != WMI_MGMT_TX_COMP_TYPE_COMPLETE_OK)
+			atomic64_inc(&injection_completion_failed);
+	}
+	put_device(released.dma_device.dev);
+
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	qdf_mem_zero(slot, sizeof(*slot));
+	wma_wonder_offchan.in_flight--;
+	if (mapped)
+		wma_wonder_offchan.completed++;
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	/* Shared idle accounting keeps helper destruction behind the DMA return. */
+	spin_lock_irqsave(&wma_injection_ctx.lock, flags);
+	if (wma_injection_ctx.in_flight)
+		wma_injection_ctx.in_flight--;
+	spin_unlock_irqrestore(&wma_injection_ctx.lock, flags);
+	wake_up_all(&wma_injection_ctx.idle_wait);
+	wma_injection_queue_work();
+	module_put(THIS_MODULE);
+}
+
+static int wma_wonder_offchan_completion(void *context, uint8_t *buf, uint32_t len)
+{
+	struct wmi_host_offchan_data_tx_compl_event event;
+	struct wma_wonder_offchan_slot *slot;
+	wmi_unified_t wmi;
+	unsigned long flags;
+	unsigned int i;
+	bool release = false;
+
+	(void)len;
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	wmi = context == wma_wonder_offchan.wma_context ?
+		wma_wonder_offchan.wmi_handle : NULL;
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	if (!wmi)
+		return -EINVAL;
+	if (QDF_IS_STATUS_ERROR(wmi_extract_offchan_data_tx_compl_param(wmi, buf, &event))) {
+		spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+		wma_wonder_offchan.malformed++;
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		return -EINVAL;
+	}
+
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	for (i = 0; i < WMA_WONDER_OFFCHAN_SLOTS; i++) {
+		slot = &wma_wonder_offchan.slots[i];
+		if (!slot->nbuf || slot->desc_id != event.desc_id || slot->releasing)
+			continue;
+		if (slot->pdev_id != event.pdev_id) {
+			wma_wonder_offchan.pdev_mismatch++;
+			break;
+		}
+		/* Ignore duplicates while the send is returning on another CPU. */
+		if (!slot->completion_seen) {
+			slot->completion_status = event.status;
+			slot->completion_seen = true;
+		}
+		if (!slot->publishing) {
+			slot->releasing = true;
+			release = true;
+		}
+		break;
+	}
+	if (i == WMA_WONDER_OFFCHAN_SLOTS)
+		wma_wonder_offchan.unknown_desc++;
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	if (release)
+		wma_wonder_offchan_release(slot, true);
+	return 0;
+}
+
+QDF_STATUS wma_wonder_offchan_prepare(uint8_t monitor_id,
+		uint32_t home_frequency, const uint8_t *interface_mac,
+		uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot)
+{
+	tp_wma_handle wma;
+	unsigned long flags;
+	QDF_STATUS status = QDF_STATUS_E_CANCELED;
+
+	if (!home_frequency || !interface_mac || !snapshot || !snapshot->cookie ||
+	    !READ_ONCE(wma_injection_ctx.active))
+		return QDF_STATUS_E_INVAL;
+	mutex_lock(&wma_injection_ctx.lifecycle_lock);
+	mutex_lock(&wma_injection_ctx.helper_lock);
+	wma = wma_injection_ctx.wma;
+	if (!wma_wonder_offchan_helper_valid(wma, monitor_id, home_frequency,
+					    interface_mac, generation, snapshot))
+		goto out;
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	/* Stock 7009 consumes only the low 16 bits of the wire descriptor ID. */
+	if (wma_wonder_offchan.next_desc >= U16_MAX) {
+		wma_wonder_offchan.descriptor_exhausted++;
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		status = QDF_STATUS_E_NOSUPPORT;
+		goto out;
+	}
+	if (wma_wonder_offchan.registered) {
+		status = wma_wonder_offchan.wmi_handle == wma->wmi_handle &&
+			wma_wonder_offchan.wma_context == wma &&
+			wma_wonder_offchan.accepting ?
+			QDF_STATUS_SUCCESS : QDF_STATUS_E_BUSY;
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		goto out;
+	}
+	if (wma_wonder_offchan.in_flight || wma_wonder_offchan.wmi_handle) {
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		status = QDF_STATUS_E_BUSY;
+		goto out;
+	}
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	status = wmi_offchan_data_tx_completion_register(wma->wmi_handle,
+				wma_wonder_offchan_completion, WMI_RX_WORK_CTX);
+	if (QDF_IS_STATUS_ERROR(status))
+		goto out;
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	wma_wonder_offchan.wmi_handle = wma->wmi_handle;
+	wma_wonder_offchan.wma_context = wma;
+	wma_wonder_offchan.registered = true;
+	wma_wonder_offchan.accepting = true;
+	wma_wonder_offchan.stopped = false;
+	wma_wonder_offchan.epoch++;
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+out:
+	mutex_unlock(&wma_injection_ctx.helper_lock);
+	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+	return status;
+}
+
+/* WMI has no established encoding for GI/LTF, NOACK or NOSEQNO overrides. */
+static QDF_STATUS wma_wonder_offchan_encode(
+		const struct cdp_tx_injection_params *input,
+		const struct wma_injection_helper *helper,
+		uint32_t frequency, int16_t power_dbm, struct tx_send_params *output)
+{
+	uint16_t allowed_mcs;
+
+	qdf_mem_zero(output, sizeof(*output));
+	if (!input->rate_valid || !input->bandwidth_valid || input->gi_valid ||
+	    input->no_ack || input->tx_flags || input->he_ltf ||
+	    input->bw_mask != BIT(2) || !(helper->channel_bw_mask & BIT(2)) ||
+	    !helper->max_nss || helper->max_nss > 8 || !input->nss_mask ||
+	    (input->nss_mask & ~GENMASK(helper->max_nss - 1, 0)) ||
+	    (input->chanfreq && input->chanfreq != frequency) ||
+	    power_dbm < -64 || power_dbm > 63 ||
+	    (input->retries_valid && (!input->retries || input->retries > 15)))
+		return QDF_STATUS_E_NOSUPPORT;
+	switch (input->preamble) {
+	case CDP_INJECTION_OFDM:
+		allowed_mcs = GENMASK(11, 4);
+		if (input->nss_mask != 1)
+			return QDF_STATUS_E_NOSUPPORT;
+		break;
+	case CDP_INJECTION_CCK:
+		allowed_mcs = GENMASK(3, 0);
+		if (!wlan_reg_is_24ghz_ch_freq(frequency) || input->nss_mask != 1)
+			return QDF_STATUS_E_NOSUPPORT;
+		break;
+	case CDP_INJECTION_HT:
+		if (!helper->ht_supported)
+			return QDF_STATUS_E_NOSUPPORT;
+		allowed_mcs = GENMASK(7, 0);
+		break;
+	case CDP_INJECTION_VHT:
+		if (!helper->vht_supported)
+			return QDF_STATUS_E_NOSUPPORT;
+		allowed_mcs = GENMASK(8, 0);
+		break;
+	default:
+		return QDF_STATUS_E_NOSUPPORT;
+	}
+	if (!input->mcs_mask || (input->mcs_mask & ~allowed_mcs))
+		return QDF_STATUS_E_NOSUPPORT;
+	output->pwr = (uint8_t)(power_dbm * 2);
+	output->mcs_mask = input->mcs_mask;
+	output->nss_mask = input->nss_mask;
+	output->bw_mask = input->bw_mask;
+	output->preamble_type = BIT(input->preamble);
+	output->frame_type = input->is_data;
+	output->retry_limit = input->retries_valid ? input->retries : 1;
+	return QDF_STATUS_SUCCESS;
+}
+
+static QDF_STATUS wma_wonder_offchan_send(qdf_nbuf_t nbuf, uint8_t monitor_id,
+		uint32_t home_frequency, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot,
+		uint32_t frequency, uint32_t desc_id,
+		const struct cdp_tx_injection_params *tx_params,
+		bool (*begin)(void *arg, unsigned long *flags),
+		void (*end)(void *arg, unsigned long flags), void *arg)
+{
+	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+	struct wma_wonder_offchan_slot *slot = NULL;
+	struct wmi_offchan_data_tx_params cmd = { 0 };
+	struct vdev_mlme_obj *monitor_mlme;
+	tp_wma_handle wma;
+	QDF_STATUS status = QDF_STATUS_E_CANCELED;
+	unsigned long flags, guard_flags;
+	unsigned int i;
+	uint8_t reg_power;
+	uint32_t pdev_id;
+	int16_t power_dbm;
+	__le16 frame_control;
+	bool release = false;
+	bool on_home = frequency == home_frequency && !begin && !end;
+
+	if (!nbuf || !snapshot || !snapshot->cookie || !tx_params ||
+	    !desc_id || desc_id > U16_MAX ||
+	    (!on_home && (!begin || !end || frequency == home_frequency)) ||
+	    !home_frequency || !frequency ||
+	    frequency > U16_MAX || qdf_nbuf_len(nbuf) < 24 ||
+	    qdf_nbuf_len(nbuf) > U16_MAX || qdf_nbuf_is_nonlinear(nbuf) ||
+	    qdf_nbuf_get_num_frags(nbuf) != 1 ||
+	    !READ_ONCE(wma_injection_ctx.active))
+		return QDF_STATUS_E_INVAL;
+	frame_control = cpu_to_le16(get_unaligned_le16(qdf_nbuf_data(nbuf)));
+	if ((!ieee80211_is_mgmt(frame_control) && !ieee80211_is_data(frame_control)) ||
+	    tx_params->is_data != ieee80211_is_data(frame_control))
+		return QDF_STATUS_E_NOSUPPORT;
+
+	mutex_lock(&wma_injection_ctx.lifecycle_lock);
+	mutex_lock(&wma_injection_ctx.helper_lock);
+	wma = wma_injection_ctx.wma;
+	if (!wma_wonder_offchan_helper_valid(wma, monitor_id, home_frequency,
+				tx_params->interface_mac, generation, snapshot))
+		goto out;
+	if (on_home && generation) {
+		struct wlan_mlme_sta_mon_snapshot owner;
+
+		if (!wlan_mlme_sta_mon_get_snapshot(wma->psoc, monitor_id,
+						   generation, &owner) || !owner.exclusive)
+			goto out;
+	}
+	if ((!wlan_reg_is_24ghz_ch_freq(frequency) &&
+	     !wlan_reg_is_5ghz_ch_freq(frequency)) ||
+	    wlan_reg_get_bonded_channel_state_for_pwrmode(wma->pdev, frequency,
+			CH_WIDTH_20MHZ, 0, REG_CURRENT_PWR_MODE) != CHANNEL_STATE_ENABLE) {
+		status = QDF_STATUS_E_NOSUPPORT;
+		goto out;
+	}
+	reg_power = wlan_reg_get_channel_reg_power_for_freq(wma->pdev, frequency);
+	if (reg_power == REG_INVALID_TXPOWER || reg_power > 127) {
+		status = QDF_STATUS_E_NOSUPPORT;
+		goto out;
+	}
+	if (helper->native) {
+		power_dbm = (int8_t)helper->start.channel.maxpower;
+	} else {
+		monitor_mlme = wlan_vdev_mlme_get_cmpt_obj(wma->interfaces[monitor_id].vdev);
+		if (!monitor_mlme)
+			goto out;
+		power_dbm = (int8_t)monitor_mlme->mgmt.generic.maxpower;
+	}
+	power_dbm = QDF_MIN(power_dbm, reg_power);
+	status = wma_wonder_offchan_encode(tx_params, helper, frequency, power_dbm,
+					 &cmd.tx_param);
+	if (QDF_IS_STATUS_ERROR(status))
+		goto out;
+	/* Stock completion encodes its raw callback's MAC-like argument + 1.
+	 * Its physical-MAC meaning is inferred; the one-based encoding is proven.
+	 * Use the exact same current WMI map as completion decoding.
+	 */
+	status = wmi_offchan_data_tx_pdev_id(wma->wmi_handle,
+			(helper->native ? helper->expected_mac_id : 0) + 1,
+			&pdev_id);
+	if (QDF_IS_STATUS_ERROR(status))
+		goto out;
+
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	if (!wma_wonder_offchan.registered || !wma_wonder_offchan.accepting ||
+	    wma_wonder_offchan.wmi_handle != wma->wmi_handle ||
+	    wma_wonder_offchan.wma_context != wma) {
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		status = QDF_STATUS_E_CANCELED;
+		goto out;
+	}
+	for (i = 0; i < WMA_WONDER_OFFCHAN_SLOTS; i++) {
+		if (!wma_wonder_offchan.slots[i].nbuf) {
+			slot = &wma_wonder_offchan.slots[i];
+			break;
+		}
+	}
+	if (!slot) {
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		status = QDF_STATUS_E_BUSY;
+		goto out;
+	}
+	if (!try_module_get(THIS_MODULE)) {
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		status = QDF_STATUS_E_CANCELED;
+		goto out;
+	}
+	slot->dma_device.dev = get_device(wma->qdf_dev->dev);
+	slot->nbuf = nbuf;
+	slot->desc_id = desc_id;
+	slot->pdev_id = pdev_id;
+	slot->publishing = true;
+	wma_wonder_offchan.in_flight++;
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	spin_lock_irqsave(&wma_injection_ctx.lock, flags);
+	wma_injection_ctx.in_flight++;
+	spin_unlock_irqrestore(&wma_injection_ctx.lock, flags);
+
+	cmd.tx_frame = nbuf;
+	cmd.frm_len = qdf_nbuf_len(nbuf);
+	cmd.vdev_id = snapshot->vdev_id;
+	cmd.desc_id = slot->desc_id;
+	/* Zero explicitly selects the established BSS channel in this command. */
+	cmd.chanfreq = on_home ? 0 : frequency;
+	cmd.pdata = qdf_nbuf_data(nbuf);
+	cmd.qdf_ctx = &slot->dma_device;
+	cmd.tx_params_valid = true;
+	/* No blocking operation is allowed after the caller's publication guard. */
+	if (on_home && generation) {
+		if (!wlan_mlme_sta_mon_tx_begin(wma->psoc, monitor_id,
+					      generation, &guard_flags)) {
+			status = QDF_STATUS_E_CANCELED;
+		} else {
+			status = wmi_offchan_data_tx_cmd_send(wma->wmi_handle, &cmd);
+			wlan_mlme_sta_mon_tx_end(guard_flags);
+		}
+	} else if (on_home) {
+		status = wmi_offchan_data_tx_cmd_send(wma->wmi_handle, &cmd);
+	} else if (!begin(arg, &guard_flags)) {
+		status = QDF_STATUS_E_CANCELED;
+	} else {
+		status = wmi_offchan_data_tx_cmd_send(wma->wmi_handle, &cmd);
+		end(arg, guard_flags);
+	}
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	slot->publishing = false;
+	if (QDF_IS_STATUS_ERROR(status) || slot->completion_seen) {
+		slot->releasing = true;
+		release = true;
+	}
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	if (release)
+		wma_wonder_offchan_release(slot, !QDF_IS_STATUS_ERROR(status));
+out:
+	mutex_unlock(&wma_injection_ctx.helper_lock);
+	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+	return status;
+}
+
+static void wma_wonder_offchan_packet_done(
+		struct wma_wonder_offchan_packet *packet, bool free_frame)
+{
+	if (free_frame) {
+		unsigned long flags;
+
+		qdf_nbuf_reset_ctxt(packet->nbuf);
+		qdf_nbuf_free(packet->nbuf);
+		atomic64_inc(&injection_send_failed);
+		spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+		wma_wonder_offchan.failed++;
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	}
+	if (packet->release)
+		packet->release(packet->arg);
+	qdf_mem_free(packet);
+	module_put(THIS_MODULE);
+}
+
+static void wma_wonder_offchan_worker(struct work_struct *work)
+{
+	struct wma_wonder_offchan_packet *packet;
+	unsigned long flags;
+	QDF_STATUS status;
+
+	(void)work;
+	for (;;) {
+		spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+		if (list_empty(&wma_wonder_offchan_queue)) {
+			spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+			break;
+		}
+		packet = list_first_entry(&wma_wonder_offchan_queue,
+					struct wma_wonder_offchan_packet, node);
+		list_del(&packet->node);
+		wma_wonder_offchan.queued--;
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		status = wma_wonder_offchan_send(packet->nbuf, packet->monitor_id,
+				packet->home_frequency, packet->generation,
+				&packet->snapshot, packet->frequency, packet->desc_id,
+				&packet->params,
+				packet->begin, packet->end, packet->arg);
+		if (!QDF_IS_STATUS_ERROR(status)) {
+			spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+			wma_wonder_offchan.sent++;
+			spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+			atomic64_inc(&injection_submitted);
+			if (packet->params.is_data)
+				atomic64_inc(&injection_data_submitted);
+		}
+		wma_wonder_offchan_packet_done(packet, QDF_IS_STATUS_ERROR(status));
+	}
+}
+
+QDF_STATUS wma_wonder_offchan_tx(qdf_nbuf_t nbuf, uint8_t monitor_id,
+		uint32_t home_frequency, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot,
+		uint32_t frequency, const struct cdp_tx_injection_params *tx_params,
+		bool (*begin)(void *arg, unsigned long *flags),
+		void (*end)(void *arg, unsigned long flags),
+		void (*release)(void *arg), void *arg)
+{
+	struct wma_wonder_offchan_packet *packet;
+	unsigned long flags;
+	QDF_STATUS status;
+	bool on_home = frequency == home_frequency && !begin && !end && !release;
+
+	if (!nbuf || !snapshot || !snapshot->cookie || !tx_params ||
+	    (!on_home && (!begin || !end || !release || frequency == home_frequency)) ||
+	    !home_frequency || !frequency || frequency > U16_MAX ||
+	    !READ_ONCE(wma_injection_ctx.active))
+		return QDF_STATUS_E_INVAL;
+	/* Reject unrepresentable metadata at the caller's nonblocking boundary. */
+	if (!tx_params->rate_valid || !tx_params->bandwidth_valid ||
+	    tx_params->gi_valid || tx_params->he_ltf || tx_params->no_ack ||
+	    tx_params->tx_flags || tx_params->bw_mask != BIT(2) ||
+	    tx_params->preamble > CDP_INJECTION_VHT)
+		return QDF_STATUS_E_NOSUPPORT;
+	packet = qdf_mem_malloc_atomic(sizeof(*packet));
+	if (!packet)
+		return QDF_STATUS_E_NOMEM;
+	qdf_mem_zero(packet, sizeof(*packet));
+	packet->nbuf = nbuf;
+	packet->monitor_id = monitor_id;
+	packet->home_frequency = home_frequency;
+	packet->generation = generation;
+	packet->snapshot = *snapshot;
+	packet->frequency = frequency;
+	packet->params = *tx_params;
+	packet->begin = begin;
+	packet->end = end;
+	packet->release = release;
+	packet->arg = arg;
+
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	if (!wma_wonder_offchan.registered || !wma_wonder_offchan.accepting) {
+		status = QDF_STATUS_E_CANCELED;
+	} else if (wma_wonder_offchan.next_desc >= U16_MAX) {
+		wma_wonder_offchan.descriptor_exhausted++;
+		status = QDF_STATUS_E_NOSUPPORT;
+	} else if (wma_wonder_offchan.queued >= WMA_WONDER_OFFCHAN_SLOTS) {
+		status = QDF_STATUS_E_BUSY;
+	} else if (!try_module_get(THIS_MODULE)) {
+		status = QDF_STATUS_E_CANCELED;
+	} else {
+		/* Reserve each low-16-bit wire ID before accepting ownership. Never
+		 * recycle an ID, including one whose queued send is later canceled.
+		 * Exhaustion is synchronous so callers can choose another transport.
+		 */
+		packet->desc_id = ++wma_wonder_offchan.next_desc;
+		list_add_tail(&packet->node, &wma_wonder_offchan_queue);
+		wma_wonder_offchan.queued++;
+		/* Serialize scheduling with stop+cancel, preventing orphaned work. */
+		schedule_work(&wma_wonder_offchan_work);
+		atomic64_inc(&injection_accepted);
+		status = QDF_STATUS_SUCCESS;
+	}
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	if (QDF_IS_STATUS_ERROR(status))
+		qdf_mem_free(packet);
+	return status;
+}
+
+static void wma_wonder_offchan_drop_queue(void)
+{
+	struct wma_wonder_offchan_packet *packet;
+	unsigned long flags;
+
+	for (;;) {
+		spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+		if (list_empty(&wma_wonder_offchan_queue)) {
+			spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+			break;
+		}
+		packet = list_first_entry(&wma_wonder_offchan_queue,
+					struct wma_wonder_offchan_packet, node);
+		list_del(&packet->node);
+		wma_wonder_offchan.queued--;
+		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		/* These queued frames were never submitted or DMA mapped. */
+		wma_wonder_offchan_packet_done(packet, true);
+	}
+}
+void wma_wonder_offchan_event_stop(void *wma_context)
+{
+	wmi_unified_t wmi = NULL;
+	unsigned long flags;
+	QDF_STATUS status;
+
+	mutex_lock(&wma_injection_ctx.lifecycle_lock);
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	if (wma_wonder_offchan.wma_context == wma_context &&
+	    wma_wonder_offchan.registered) {
+		wma_wonder_offchan.accepting = false;
+		wmi = wma_wonder_offchan.wmi_handle;
+	}
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+	/* A worker may be awaiting lifecycle_lock; never hold it during join. */
+	if (!wmi)
+		return;
+	cancel_work_sync(&wma_wonder_offchan_work);
+	wma_wonder_offchan_drop_queue();
+	if (wmi) {
+		status = wmi_offchan_data_tx_completion_unregister(wmi);
+		if (QDF_IS_STATUS_ERROR(status))
+			wma_err("Offchan completion unregister failed: %d", status);
+		else {
+			spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+			wma_wonder_offchan.stopped = true;
+			spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+		}
+	}
+}
+
+/* WMI RX workqueue has been drained after event_stop; never infer DMA return. */
+void wma_wonder_offchan_events_drained(void *wma_context)
+{
+	unsigned long flags;
+	unsigned int retained = 0;
+
+	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
+	if (wma_wonder_offchan.wma_context == wma_context &&
+	    !wma_wonder_offchan.accepting && wma_wonder_offchan.stopped) {
+		retained = wma_wonder_offchan.in_flight;
+		wma_wonder_offchan.registered = false;
+		wma_wonder_offchan.wmi_handle = NULL;
+		wma_wonder_offchan.wma_context = NULL;
+	}
+	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
+	if (retained)
+		wma_err("Retaining %u offchan DMA frames and module pins after event drain; real TX completion unavailable",
+			retained);
+}
+#endif /* FEATURE_WLAN_WONDER */
 
 static bool wma_injection_wait_for_idle(void)
 {
@@ -1979,6 +3017,15 @@ wma_injection_send(tp_wma_handle wma, qdf_nbuf_t nbuf,
 	}
 	if (!allow_setup && !helper.direct_dp)
 		return QDF_STATUS_E_AGAIN;
+	if (tx_params->rate_valid && (!helper.max_nss ||
+	    (tx_params->nss_mask & ~GENMASK(helper.max_nss - 1, 0))))
+		return QDF_STATUS_E_NOSUPPORT;
+	if (tx_params->bandwidth_valid &&
+	    (tx_params->bw_mask & ~helper.channel_bw_mask))
+		return QDF_STATUS_E_NOSUPPORT;
+	if (chanfreq >= 5925 && tx_params->rate_valid &&
+	    tx_params->preamble != CDP_INJECTION_HE_SU)
+		return QDF_STATUS_E_NOSUPPORT;
 	/* WMI management fallback cannot carry raw data/control or HTT options. */
 	if (!helper.direct_dp &&
 	    (!ieee80211_is_mgmt(frame_control) || tx_params->rate_valid ||
@@ -2265,6 +3312,9 @@ bool wma_injection_tx_begin(qdf_nbuf_t nbuf,
 	unsigned long flags;
 
 	guard->held = false;
+#ifdef FEATURE_WLAN_WONDER
+	guard->wonder_held = false;
+#endif
 	if (!cdp_nbuf_is_injection(nbuf))
 		return true;
 	slot = &wma_injection_ctx.slots[desc_id % WMA_INJECTION_SLOT_COUNT];
@@ -2282,11 +3332,27 @@ bool wma_injection_tx_begin(qdf_nbuf_t nbuf,
 		return true;
 	guard->held = wlan_mlme_sta_mon_tx_begin(psoc, monitor_vdev_id,
 						generation, &guard->flags);
+#ifdef FEATURE_WLAN_WONDER
+	if (guard->held) {
+		guard->wonder_held = wlan_injection_wonder_home_tx_begin_locked(
+				psoc, monitor_vdev_id, generation, &guard->wonder_lease);
+		if (!guard->wonder_held) {
+			wlan_mlme_sta_mon_tx_end(guard->flags);
+			guard->held = false;
+		}
+	}
+#endif
 	return guard->held;
 }
 
 void wma_injection_tx_end(struct cdp_injection_tx_guard *guard)
 {
+#ifdef FEATURE_WLAN_WONDER
+	if (guard->wonder_held) {
+		wlan_injection_wonder_home_tx_end_locked(&guard->wonder_lease);
+		guard->wonder_held = false;
+	}
+#endif
 	if (guard->held) {
 		wlan_mlme_sta_mon_tx_end(guard->flags);
 		guard->held = false;
@@ -2485,8 +3551,20 @@ wma_injection_channel_change_begin(uint8_t monitor_vdev_id,
 			status = QDF_STATUS_E_BUSY;
 		} else if (smp_load_acquire(&helper->created) &&
 			   (helper->monitor_vdev_id != monitor_vdev_id ||
-			    helper->chanfreq != chanfreq)) {
+			    helper->chanfreq != chanfreq
+#ifdef FEATURE_WLAN_WONDER
+			    || helper->wonder_owned
+#endif
+			   )) {
+			/* Wonder CLEAR retires its matcher until real helper DELETE.
+			 * Recreate it even for a width-only channel transition so its
+			 * lifetime cookie and channel limits describe the new channel.
+			 */
 			__wma_injection_destroy_helper(wma);
+#ifdef FEATURE_WLAN_WONDER
+			if (helper->wonder_owned && helper->wmi_created)
+				status = QDF_STATUS_E_TIMEOUT;
+#endif
 		}
 		mutex_unlock(&wma_injection_ctx.helper_lock);
 	}
@@ -2664,11 +3742,18 @@ void wma_injection_pre_stop_cleanup(void)
 static void wma_injection_init(tp_wma_handle wma)
 {
 	if (READ_ONCE(wma_injection_ctx.helper.native) ||
+#ifdef FEATURE_WLAN_WONDER
+	    (READ_ONCE(wma_injection_ctx.helper.wonder_owned) &&
+	     READ_ONCE(wma_injection_ctx.helper.wmi_created)) ||
+#endif
 	    READ_ONCE(wma_injection_ctx.in_flight)) {
 		wma_err("Refusing to overwrite an injection owner still awaiting completion");
 		return;
 	}
 	wma_injection_power_init(wma->psoc);
+#ifdef FEATURE_WLAN_WONDER
+	hdd_wonder_peer_firmware_started(wma->psoc);
+#endif
 	qdf_mem_zero(&wma_injection_ctx, sizeof(wma_injection_ctx));
 	spin_lock_init(&wma_injection_ctx.lock);
 	mutex_init(&wma_injection_ctx.helper_lock);

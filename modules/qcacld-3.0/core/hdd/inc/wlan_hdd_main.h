@@ -1359,6 +1359,13 @@ struct hdd_adapter {
 
 	struct net_device *dev;
 
+#ifdef FEATURE_WLAN_WONDER
+	/* Only the Wonder session may destroy or change this monitor interface. */
+	bool wonder_owned;
+	/* Timestamp of the actual firmware monitor-channel completion. */
+	u64 wonder_channel_complete_ns;
+#endif
+
 	enum QDF_OPMODE device_mode;
 
 	struct work_struct ipv4_notifier_work;

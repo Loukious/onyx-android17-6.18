@@ -734,6 +734,10 @@ QDF_STATUS (*send_mgmt_cmd)(wmi_unified_t wmi_handle,
 QDF_STATUS (*send_offchan_data_tx_cmd)(wmi_unified_t wmi_handle,
 				struct wmi_offchan_data_tx_params *param);
 
+QDF_STATUS (*extract_offchan_data_tx_compl_param)(wmi_unified_t wmi_handle,
+		void *evt_buf,
+		struct wmi_host_offchan_data_tx_compl_event *param);
+
 QDF_STATUS (*send_modem_power_state_cmd)(wmi_unified_t wmi_handle,
 		uint32_t param_value);
 
@@ -1516,10 +1520,6 @@ QDF_STATUS (*extract_swba_noa_info)(wmi_unified_t wmi_handle, void *evt_buf,
 QDF_STATUS (*extract_swba_quiet_info)(wmi_unified_t wmi_handle, void *evt_buf,
 				      uint32_t idx,
 				      wmi_host_quiet_info *quiet_info);
-
-QDF_STATUS (*extract_offchan_data_tx_compl_param)(wmi_unified_t wmi_handle,
-		void *evt_buf,
-		struct wmi_host_offchan_data_tx_compl_event *param);
 
 QDF_STATUS (*extract_pdev_tpc_config_ev_param)(wmi_unified_t wmi_handle,
 		void *evt_buf, wmi_host_pdev_tpc_config_event *param);

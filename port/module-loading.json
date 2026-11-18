@@ -76,6 +76,21 @@
         ]
       },
       "reason": "Preserve the existing released NetHunter, CAN and network filesystem load profile."
+    },
+    {
+      "name": "wonder-awdl",
+      "modules": [
+        "wonder.ko"
+      ],
+      "ship": [
+        "vendor_dlkm"
+      ],
+      "load": {
+        "vendor_dlkm": [
+          "modules.load"
+        ]
+      },
+      "reason": "Load the Wonder auxiliary driver for the Onyx native Mosey service."
     }
   ]
 }

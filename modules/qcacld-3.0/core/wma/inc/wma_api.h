@@ -43,6 +43,124 @@ typedef void *WMA_HANDLE;
 
 struct cdp_tx_injection_params;
 
+#ifdef FEATURE_WLAN_WONDER
+struct wma_wonder_helper_snapshot {
+	uint8_t vdev_id;
+	uint64_t cookie;
+};
+
+struct wma_wonder_helper_limits {
+	uint32_t frequency;
+	uint32_t phy_mode;
+	uint8_t max_nss;
+	uint8_t bandwidth_mask;
+	bool ht_supported;
+	bool vht_supported;
+	bool he_supported;
+};
+
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+/* Lock-free admission check; retained standalone helpers have no objmgr ID. */
+bool wma_wonder_standalone_helper_reserved(void);
+/* Snapshot validation may sleep; never call from firmware/event callbacks. */
+bool wma_wonder_helper_identity_valid(uint8_t monitor_id, uint8_t helper_id,
+				      uint64_t cookie);
+QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		struct wma_wonder_helper_snapshot *snapshot);
+QDF_STATUS wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot, bool set);
+QDF_STATUS wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot,
+		struct wma_wonder_helper_limits *limits);
+/* Prepare at HOME before reserving a dwell; no helper channel mutation. */
+QDF_STATUS wma_wonder_offchan_prepare(uint8_t monitor_id,
+		uint32_t home_frequency, const uint8_t *interface_mac,
+		uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot);
+/* Nonblocking bounded enqueue; success transfers frame and arg reference to
+ * WMA. Worker invokes release(arg) once after send/drop, while a sent frame
+ * stays owned by WMA until its real matching TX completion. Errors retain an
+ * unmapped caller-owned frame and arg. begin/end are nonblocking and hold the
+ * caller's live admission and dwell guards across the final worker send.
+ */
+QDF_STATUS wma_wonder_offchan_tx(qdf_nbuf_t nbuf, uint8_t monitor_id,
+		uint32_t home_frequency, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot,
+		uint32_t frequency, const struct cdp_tx_injection_params *tx_params,
+		bool (*begin)(void *arg, unsigned long *flags),
+		void (*end)(void *arg, unsigned long flags),
+		void (*release)(void *arg), void *arg);
+/* WMI work-close must stop events before flushing its RX workqueue, then call
+ * events_drained. Neither hook returns firmware DMA ownership.
+ */
+void wma_wonder_offchan_event_stop(void *wma_context);
+void wma_wonder_offchan_events_drained(void *wma_context);
+#else
+static inline bool wma_wonder_standalone_helper_reserved(void)
+{
+	return false;
+}
+
+static inline bool
+wma_wonder_helper_identity_valid(uint8_t monitor_id, uint8_t helper_id,
+				 uint64_t cookie)
+{
+	return false;
+}
+
+static inline QDF_STATUS
+wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		struct wma_wonder_helper_snapshot *snapshot)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline QDF_STATUS
+wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot, bool set)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline QDF_STATUS
+wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot,
+		struct wma_wonder_helper_limits *limits)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline QDF_STATUS
+wma_wonder_offchan_prepare(uint8_t monitor_id, uint32_t home_frequency,
+		const uint8_t *interface_mac, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline QDF_STATUS
+wma_wonder_offchan_tx(qdf_nbuf_t nbuf, uint8_t monitor_id,
+		uint32_t home_frequency, uint64_t generation,
+		const struct wma_wonder_helper_snapshot *snapshot,
+		uint32_t frequency, const struct cdp_tx_injection_params *tx_params,
+		bool (*begin)(void *arg, unsigned long *flags),
+		void (*end)(void *arg, unsigned long flags),
+		void (*release)(void *arg), void *arg)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline void wma_wonder_offchan_event_stop(void *wma_context) { }
+static inline void wma_wonder_offchan_events_drained(void *wma_context) { }
+#endif
+#endif /* FEATURE_WLAN_WONDER */
+
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 QDF_STATUS wma_injection_tx(qdf_nbuf_t nbuf, uint8_t monitor_vdev_id,
 			    const struct cdp_tx_injection_params *params);

@@ -1270,6 +1270,9 @@ struct scan_req_params {
 struct scan_start_request {
 	struct wlan_objmgr_vdev *vdev;
 	struct scan_req_params scan_req;
+	/* Host-only provenance, zeroed by wlan_scan_init_default_params(). */
+	bool sta_mon_reserved;
+	bool target_start_attempted;
 };
 
 /**

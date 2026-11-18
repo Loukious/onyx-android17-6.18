@@ -1,0 +1,937 @@
+diff --git a/qca-wifi-host-cmn/target_if/mlme/vdev_mgr/src/target_if_vdev_mgr_rx_ops.c b/qca-wifi-host-cmn/target_if/mlme/vdev_mgr/src/target_if_vdev_mgr_rx_ops.c
+index 6f983c397..e0587a50e 100644
+--- a/qca-wifi-host-cmn/target_if/mlme/vdev_mgr/src/target_if_vdev_mgr_rx_ops.c
++++ b/qca-wifi-host-cmn/target_if/mlme/vdev_mgr/src/target_if_vdev_mgr_rx_ops.c
+@@ -602,6 +602,13 @@ static int target_if_vdev_mgr_delete_response_handler(ol_scn_t scn,
+ 		return -EINVAL;
+ 	}
+ 
++	/* Raw standalone injection vdevs deliberately have no objmgr timer.
++	 * A timeout-synthesized response never passes through this event handler.
++	 */
++	if (rx_ops->raw_injection_delete_response &&
++	    rx_ops->raw_injection_delete_response(psoc, vdev_del_resp.vdev_id))
++		return 0;
++
+ 	vdev_rsp = rx_ops->psoc_get_vdev_response_timer_info(psoc,
+ 							 vdev_del_resp.vdev_id);
+ 	if (!vdev_rsp) {
+diff --git a/qca-wifi-host-cmn/umac/global_umac_dispatcher/lmac_if/inc/wlan_lmac_if_def.h b/qca-wifi-host-cmn/umac/global_umac_dispatcher/lmac_if/inc/wlan_lmac_if_def.h
+index 5d462f8d3..8dfb06cfe 100644
+--- a/qca-wifi-host-cmn/umac/global_umac_dispatcher/lmac_if/inc/wlan_lmac_if_def.h
++++ b/qca-wifi-host-cmn/umac/global_umac_dispatcher/lmac_if/inc/wlan_lmac_if_def.h
+@@ -2920,6 +2920,11 @@ struct wlan_lmac_if_mlme_rx_ops {
+ 	QDF_STATUS (*vdev_mgr_csa_received)(struct wlan_objmgr_psoc *psoc,
+ 					    uint8_t vdev_id,
+ 					    struct csa_offload_params *csa_event);
++	/* Optional raw injection owner, invoked only for genuine FW DELETE events.
++	 * Its vdev has no objmgr response timer; false preserves normal MLME flow.
++	 */
++	bool (*raw_injection_delete_response)(struct wlan_objmgr_psoc *psoc,
++					      uint8_t vdev_id);
+ };
+ 
+ #ifdef WLAN_SUPPORT_GREEN_AP
+diff --git a/qcacld-3.0/components/target_if/p2p/src/target_if_p2p.c b/qcacld-3.0/components/target_if/p2p/src/target_if_p2p.c
+index e5752207d..25966f491 100644
+--- a/qcacld-3.0/components/target_if/p2p/src/target_if_p2p.c
++++ b/qcacld-3.0/components/target_if/p2p/src/target_if_p2p.c
+@@ -28,6 +28,9 @@
+ #include "target_if_p2p_mcc_quota.h"
+ #include "init_deinit_lmac.h"
+ #include "wmi_unified_p2p_api.h"
++#ifdef FEATURE_WLAN_WONDER
++#include "wlan_hdd_wonder_peer.h"
++#endif
+ 
+ static inline struct wlan_lmac_if_p2p_rx_ops *
+ target_if_psoc_get_p2p_rx_ops(struct wlan_objmgr_psoc *psoc)
+@@ -528,6 +531,10 @@ static int target_p2p_mac_rx_filter_event_handler(ol_scn_t scn, uint8_t *data,
+ 	}
+ 	target_if_debug("vdev_id %d status %d", event_info.vdev_id,
+ 			event_info.status);
++#ifdef FEATURE_WLAN_WONDER
++	if (hdd_wonder_peer_reply(psoc, event_info.vdev_id, event_info.status))
++		return 0;
++#endif
+ 	p2p_rx_ops = target_if_psoc_get_p2p_rx_ops(psoc);
+ 	if (p2p_rx_ops && p2p_rx_ops->add_mac_addr_filter_evt_handler)
+ 		status = p2p_rx_ops->add_mac_addr_filter_evt_handler(
+diff --git a/qcacld-3.0/core/wma/inc/wma_api.h b/qcacld-3.0/core/wma/inc/wma_api.h
+index cb9902774..7d5794120 100644
+--- a/qcacld-3.0/core/wma/inc/wma_api.h
++++ b/qcacld-3.0/core/wma/inc/wma_api.h
+@@ -43,6 +43,38 @@ typedef void *WMA_HANDLE;
+ 
+ struct cdp_tx_injection_params;
+ 
++#ifdef FEATURE_WLAN_WONDER
++struct wma_wonder_helper_snapshot {
++	uint8_t vdev_id;
++	uint64_t cookie;
++};
++
++#ifdef FEATURE_FRAME_INJECTION_SUPPORT
++QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		struct wma_wonder_helper_snapshot *snapshot);
++QDF_STATUS wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot, bool set);
++#else
++static inline QDF_STATUS
++wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		struct wma_wonder_helper_snapshot *snapshot)
++{
++	return QDF_STATUS_E_NOSUPPORT;
++}
++
++static inline QDF_STATUS
++wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot, bool set)
++{
++	return QDF_STATUS_E_NOSUPPORT;
++}
++#endif
++#endif /* FEATURE_WLAN_WONDER */
++
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
+ QDF_STATUS wma_injection_tx(qdf_nbuf_t nbuf, uint8_t monitor_vdev_id,
+ 			    const struct cdp_tx_injection_params *params);
+diff --git a/qcacld-3.0/core/wma/src/wma_data.c b/qcacld-3.0/core/wma/src/wma_data.c
+index f105ecde5..5770f2b73 100644
+--- a/qcacld-3.0/core/wma/src/wma_data.c
++++ b/qcacld-3.0/core/wma/src/wma_data.c
+@@ -108,6 +108,9 @@
+ #include "sme_api.h"
+ #include "init_deinit_lmac.h"
+ #include <../../core/src/vdev_mgr_ops.h>
++#ifdef FEATURE_WLAN_WONDER
++#include "wlan_hdd_wonder_peer.h"
++#endif
+ 
+ #define WMA_INJECTION_DESC_BASE 0xf000
+ #define WMA_INJECTION_DESC_MASK 0x0fff
+@@ -217,6 +220,12 @@ struct wma_injection_helper {
+ 	uint8_t interface_mac[QDF_MAC_ADDR_SIZE];
+ 	uint8_t mac_addr[QDF_MAC_ADDR_SIZE];
+ 	uint8_t peer_addr[QDF_MAC_ADDR_SIZE];
++#ifdef FEATURE_WLAN_WONDER
++	uint64_t wonder_cookie;
++	bool wonder_owned;
++	bool wonder_delete_sent;
++	bool wonder_module_held;
++#endif
+ };
+ 
+ static struct {
+@@ -242,6 +251,47 @@ static struct {
+ 	bool coex_resume_ready;
+ } wma_injection_ctx;
+ 
++#ifdef FEATURE_WLAN_WONDER
++static atomic64_t wma_wonder_helper_cookie = ATOMIC64_INIT(0);
++
++/* Called directly from the real FW DELETE event, before objmgr timer lookup.
++ * No lifecycle/helper mutex: teardown can hold both while awaiting this event.
++ */
++static bool wma_wonder_legacy_delete_response(struct wlan_objmgr_psoc *psoc,
++					     uint8_t id)
++{
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++	tp_wma_handle wma = READ_ONCE(wma_injection_ctx.wma);
++
++	if (!wma || wma->psoc != psoc || READ_ONCE(helper->native) ||
++	    !READ_ONCE(helper->wonder_owned) ||
++	    !READ_ONCE(helper->wonder_delete_sent) ||
++	    READ_ONCE(helper->vdev_id) != id)
++		return false;
++	hdd_wonder_peer_helper_deleted(psoc, id);
++	helper->delete_confirmed = true;
++	complete_all(&helper->delete_done);
++	return true;
++}
++
++/* Caller has drained TX and owns helper_lock; CLEAR has no acknowledgement. */
++static void wma_wonder_clear_helper(tp_wma_handle wma)
++{
++	struct set_rx_mac_filter param = { 0 };
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++	QDF_STATUS status;
++
++	if (!helper->wonder_owned ||
++	    !hdd_wonder_peer_take_clear(wma->psoc, helper->vdev_id, &param))
++		return;
++	status = wmi_unified_set_mac_addr_rx_filter(wma->wmi_handle, &param);
++	hdd_wonder_peer_clear_result(wma->psoc, helper->vdev_id,
++				     qdf_status_to_os_return(status));
++}
++#else
++static inline void wma_wonder_clear_helper(tp_wma_handle wma) { }
++#endif
++
+ struct wma_injection_power_entry {
+ 	/* Identity only; every dereference uses the caller's live vdev reference. */
+ 	struct wlan_objmgr_vdev *owner;
+@@ -770,6 +820,9 @@ bool wma_injection_helper_deleted(uint8_t vdev_id)
+ 	WRITE_ONCE(helper->vdev, NULL);
+ 	helper->delete_status = QDF_STATUS_SUCCESS;
+ 	helper->delete_confirmed = true;
++#ifdef FEATURE_WLAN_WONDER
++	hdd_wonder_peer_helper_deleted(wma_injection_ctx.wma->psoc, vdev_id);
++#endif
+ 	complete_all(&helper->delete_done);
+ 	return true;
+ }
+@@ -784,6 +837,11 @@ void wma_injection_peer_map_notify(uint8_t vdev_id)
+ 
+ bool wma_injection_coex_is_quiesced(void)
+ {
++#ifdef FEATURE_WLAN_WONDER
++	if (READ_ONCE(wma_injection_ctx.helper.wonder_owned) &&
++	    READ_ONCE(wma_injection_ctx.helper.wmi_created))
++		return false;
++#endif
+ 	return !READ_ONCE(wma_injection_ctx.helper.native) &&
+ 		!READ_ONCE(wma_injection_ctx.in_flight);
+ }
+@@ -1256,6 +1314,7 @@ static bool wma_injection_destroy_native(tp_wma_handle wma)
+ 				    helper->vdev_id);
+ 		helper->flow_pool_mapped = false;
+ 	}
++	wma_wonder_clear_helper(wma);
+ 	helper->delete_requested = true;
+ 	status = sme_vdev_delete(cds_get_context(QDF_MODULE_ID_SME), vdev);
+ 	if (QDF_IS_STATUS_ERROR(status))
+@@ -1615,6 +1674,9 @@ static void __wma_injection_destroy_helper(tp_wma_handle wma)
+ 	struct peer_delete_cmd_params peer_delete = {0};
+ 	struct vdev_stop_params vdev_stop = {0};
+ 	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++#ifdef FEATURE_WLAN_WONDER
++	QDF_STATUS status;
++#endif
+ 
+ 	if (helper->native) {
+ 		if (!wma_injection_destroy_native(wma))
+@@ -1624,6 +1686,7 @@ static void __wma_injection_destroy_helper(tp_wma_handle wma)
+ 	smp_store_release(&helper->created, false);
+ 	if (!wma || !wma->wmi_handle)
+ 		return;
++	wma_wonder_clear_helper(wma);
+ 
+ 	if (helper->wmi_up) {
+ 		wmi_unified_vdev_down_send(wma->wmi_handle, helper->vdev_id);
+@@ -1645,12 +1708,41 @@ static void __wma_injection_destroy_helper(tp_wma_handle wma)
+ 	}
+ 	wma_injection_detach_dp(helper);
+ 	if (helper->wmi_created) {
+-		wmi_unified_vdev_delete_send(wma->wmi_handle, helper->vdev_id);
+-		helper->wmi_created = false;
+-		msleep(50);
++#ifdef FEATURE_WLAN_WONDER
++		if (helper->wonder_owned) {
++			if (!helper->wonder_delete_sent) {
++				reinit_completion(&helper->delete_done);
++				helper->delete_confirmed = false;
++				WRITE_ONCE(helper->wonder_delete_sent, true);
++				status = wmi_unified_vdev_delete_send(wma->wmi_handle,
++								 helper->vdev_id);
++				if (QDF_IS_STATUS_ERROR(status)) {
++					WRITE_ONCE(helper->wonder_delete_sent, false);
++					wma_err("Wonder helper DELETE submission failed: %d", status);
++					return;
++				}
++			}
++			if (!wait_for_completion_timeout(&helper->delete_done, 6 * HZ) ||
++			    !helper->delete_confirmed) {
++				wma_err("Wonder helper retained awaiting real DELETE: vdev=%u",
++					 helper->vdev_id);
++				return;
++			}
++			helper->wmi_created = false;
++		} else
++#endif
++		{
++			wmi_unified_vdev_delete_send(wma->wmi_handle, helper->vdev_id);
++			helper->wmi_created = false;
++			msleep(50);
++		}
+ 	}
+ 	wma_info("Injection helper released: monitor=%u helper=%u",
+ 		 helper->monitor_vdev_id, helper->vdev_id);
++#ifdef FEATURE_WLAN_WONDER
++	if (helper->wonder_module_held)
++		module_put(THIS_MODULE);
++#endif
+ 	qdf_mem_zero(helper, sizeof(*helper));
+ }
+ 
+@@ -1685,6 +1777,10 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
+ 						     generation);
+ 	if (helper->native)
+ 		return QDF_STATUS_E_BUSY;
++#ifdef FEATURE_WLAN_WONDER
++	if (helper->wonder_owned && helper->wmi_created && !helper->created)
++		return QDF_STATUS_E_BUSY;
++#endif
+ 
+ 	if (smp_load_acquire(&helper->created) &&
+ 	    helper->monitor_vdev_id == monitor_vdev_id &&
+@@ -1696,6 +1792,10 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
+ 		if (!wma_injection_wait_for_idle())
+ 			return QDF_STATUS_E_BUSY;
+ 		__wma_injection_destroy_helper(wma);
++#ifdef FEATURE_WLAN_WONDER
++		if (helper->wonder_owned && helper->wmi_created)
++			return QDF_STATUS_E_BUSY;
++#endif
+ 	}
+ 
+ 	if (!soc || monitor_vdev_id >= wma->max_bssid ||
+@@ -1882,6 +1982,107 @@ fail:
+ 	return status;
+ }
+ 
++#ifdef FEATURE_WLAN_WONDER
++QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		struct wma_wonder_helper_snapshot *snapshot)
++{
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++	struct wma_injection_helper_snapshot current;
++	tp_wma_handle wma;
++	QDF_STATUS status = QDF_STATUS_E_AGAIN;
++
++	if (!frequency || !interface_mac || !snapshot ||
++	    !READ_ONCE(wma_injection_ctx.active))
++		return QDF_STATUS_E_INVAL;
++	mutex_lock(&wma_injection_ctx.lifecycle_lock);
++	mutex_lock(&wma_injection_ctx.helper_lock);
++	wma = wma_injection_ctx.wma;
++	if (!wma || !wma->wmi_handle || !wma_injection_ctx.active ||
++	    wma_injection_ctx.paused || wma_injection_ctx.channel_change_paused ||
++	    monitor_id >= wma->max_bssid || !wma->interfaces[monitor_id].vdev ||
++	    wma->interfaces[monitor_id].ch_freq != frequency ||
++	    (generation && !wlan_mlme_sta_mon_token_valid(wma->psoc, monitor_id,
++							  generation)) ||
++	    (!generation && wlan_mlme_sta_mon_is_owner(wma->psoc, monitor_id)))
++		goto out;
++	if (!wmi_service_enabled(wma->wmi_handle, wmi_service_sync_delete_cmds) ||
++	    !wma->psoc->soc_cb.rx_ops) {
++		status = QDF_STATUS_E_NOSUPPORT;
++		goto out;
++	}
++	status = __wma_injection_ensure_helper(wma, monitor_id, frequency,
++					     interface_mac, generation);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto out;
++	if (!wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
++					      generation, &current) || !current.direct_dp) {
++		status = QDF_STATUS_E_AGAIN;
++		goto out;
++	}
++	if (!helper->wonder_owned) {
++		/* Native helpers already hold a module pin and real MLME lifecycle. */
++		if (!helper->native) {
++			if (!try_module_get(THIS_MODULE)) {
++				status = QDF_STATUS_E_CANCELED;
++				goto out;
++			}
++			helper->wonder_module_held = true;
++			init_completion(&helper->delete_done);
++			WRITE_ONCE(wma->psoc->soc_cb.rx_ops->mops.raw_injection_delete_response,
++				   wma_wonder_legacy_delete_response);
++		}
++		helper->wonder_cookie = atomic64_inc_return(&wma_wonder_helper_cookie);
++		if (!helper->wonder_cookie)
++			helper->wonder_cookie = atomic64_inc_return(&wma_wonder_helper_cookie);
++		WRITE_ONCE(helper->wonder_owned, true);
++	}
++	snapshot->vdev_id = current.vdev_id;
++	snapshot->cookie = helper->wonder_cookie;
++	status = QDF_STATUS_SUCCESS;
++out:
++	mutex_unlock(&wma_injection_ctx.helper_lock);
++	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
++	return status;
++}
++
++QDF_STATUS wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot, bool set)
++{
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++	struct wma_injection_helper_snapshot current;
++	struct set_rx_mac_filter param = { 0 };
++	tp_wma_handle wma;
++	QDF_STATUS status = QDF_STATUS_E_AGAIN;
++
++	if (!snapshot || !interface_mac || !READ_ONCE(wma_injection_ctx.active))
++		return QDF_STATUS_E_INVAL;
++	mutex_lock(&wma_injection_ctx.lifecycle_lock);
++	mutex_lock(&wma_injection_ctx.helper_lock);
++	wma = wma_injection_ctx.wma;
++	if (!wma || !wma->wmi_handle || !wma_injection_ctx.active ||
++	    !helper->wonder_owned || helper->wonder_cookie != snapshot->cookie ||
++	    helper->vdev_id != snapshot->vdev_id || helper->wonder_delete_sent ||
++	    !wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
++					      generation, &current) ||
++	    (set && (wma_injection_ctx.paused ||
++		     wma_injection_ctx.channel_change_paused ||
++		     (generation && !wlan_mlme_sta_mon_token_valid(wma->psoc,
++							 monitor_id, generation)))))
++		goto out;
++	param.vdev_id = snapshot->vdev_id;
++	param.freq = frequency;
++	qdf_mem_copy(param.mac, interface_mac, QDF_MAC_ADDR_SIZE);
++	param.set = set;
++	status = wmi_unified_set_mac_addr_rx_filter(wma->wmi_handle, &param);
++out:
++	mutex_unlock(&wma_injection_ctx.helper_lock);
++	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
++	return status;
++}
++#endif /* FEATURE_WLAN_WONDER */
++
+ static bool wma_injection_wait_for_idle(void)
+ {
+ 	return wait_event_timeout(wma_injection_ctx.idle_wait,
+@@ -2487,6 +2688,10 @@ wma_injection_channel_change_begin(uint8_t monitor_vdev_id,
+ 			   (helper->monitor_vdev_id != monitor_vdev_id ||
+ 			    helper->chanfreq != chanfreq)) {
+ 			__wma_injection_destroy_helper(wma);
++#ifdef FEATURE_WLAN_WONDER
++			if (helper->wonder_owned && helper->wmi_created)
++				status = QDF_STATUS_E_TIMEOUT;
++#endif
+ 		}
+ 		mutex_unlock(&wma_injection_ctx.helper_lock);
+ 	}
+@@ -2664,11 +2869,18 @@ void wma_injection_pre_stop_cleanup(void)
+ static void wma_injection_init(tp_wma_handle wma)
+ {
+ 	if (READ_ONCE(wma_injection_ctx.helper.native) ||
++#ifdef FEATURE_WLAN_WONDER
++	    (READ_ONCE(wma_injection_ctx.helper.wonder_owned) &&
++	     READ_ONCE(wma_injection_ctx.helper.wmi_created)) ||
++#endif
+ 	    READ_ONCE(wma_injection_ctx.in_flight)) {
+ 		wma_err("Refusing to overwrite an injection owner still awaiting completion");
+ 		return;
+ 	}
+ 	wma_injection_power_init(wma->psoc);
++#ifdef FEATURE_WLAN_WONDER
++	hdd_wonder_peer_firmware_started(wma->psoc);
++#endif
+ 	qdf_mem_zero(&wma_injection_ctx, sizeof(wma_injection_ctx));
+ 	spin_lock_init(&wma_injection_ctx.lock);
+ 	mutex_init(&wma_injection_ctx.helper_lock);
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h
+new file mode 100644
+index 000000000..ae599dc85
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef WLAN_HDD_WONDER_PEER_H
++#define WLAN_HDD_WONDER_PEER_H
++
++#include <linux/types.h>
++
++struct hdd_adapter;
++struct hdd_wonder_peer_state;
++struct wlan_objmgr_psoc;
++struct set_rx_mac_filter;
++
++#ifdef FEATURE_WLAN_WONDER
++#include <wondertap.h>
++
++struct hdd_wonder_peer_state *
++hdd_wonder_peer_create(struct hdd_adapter *adapter);
++int hdd_wonder_peer_prepare(struct hdd_wonder_peer_state *state,
++			    u32 frequency, u64 generation);
++/* CLEAR is submit-only. Rebinding waits for real helper deletion. */
++int hdd_wonder_peer_clear(struct hdd_wonder_peer_state *state);
++void hdd_wonder_peer_cancel(struct hdd_wonder_peer_state *state);
++void hdd_wonder_peer_destroy(struct hdd_wonder_peer_state *state);
++bool hdd_wonder_peer_ready(struct hdd_wonder_peer_state *state);
++int hdd_wonder_peer_station(struct hdd_wonder_peer_state *state,
++			    enum wondertap_station_action action,
++			    struct wondertap_station_info *info);
++
++/* Firmware callbacks never acquire the provider or operation mutex. */
++bool hdd_wonder_peer_reply(struct wlan_objmgr_psoc *psoc, u32 id, u32 status);
++bool hdd_wonder_peer_take_clear(struct wlan_objmgr_psoc *psoc, u8 id,
++			       struct set_rx_mac_filter *param);
++void hdd_wonder_peer_clear_result(struct wlan_objmgr_psoc *psoc, u8 id,
++				 int error);
++void hdd_wonder_peer_helper_deleted(struct wlan_objmgr_psoc *psoc, u8 id);
++void hdd_wonder_peer_firmware_started(struct wlan_objmgr_psoc *psoc);
++#endif
++
++#endif /* WLAN_HDD_WONDER_PEER_H */
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c
+new file mode 100644
+index 000000000..48c8a49f8
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c
+@@ -0,0 +1,457 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* AWDL peer bookkeeping and the real Onyx receive MAC matcher. */
++#include <linux/completion.h>
++#include <linux/etherdevice.h>
++#include <linux/err.h>
++#include <linux/jiffies.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <wlan_hdd_main.h>
++#include <wlan_hdd_wonder_peer.h>
++#include <wlan_vdev_mgr_tgt_if_tx_defs.h>
++#include <wma_api.h>
++
++#ifdef FEATURE_WLAN_WONDER
++
++#define HDD_WONDER_MAX_PEERS 64
++#define HDD_WONDER_MATCH_TIMEOUT msecs_to_jiffies(2000)
++
++struct hdd_wonder_peer_entry {
++	bool used;
++	struct wondertap_station_info info;
++};
++
++struct hdd_wonder_peer_state {
++	struct mutex operation_lock;
++	struct completion reply_done;
++	struct hdd_adapter *adapter;
++	struct wlan_objmgr_psoc *psoc;
++	struct hdd_wonder_peer_entry peers[HDD_WONDER_MAX_PEERS];
++	u8 bound_id;
++	u32 frequency;
++	u64 generation;
++	u64 helper_cookie;
++	int error;
++	bool stopping;
++};
++
++struct hdd_wonder_match {
++	struct wlan_objmgr_psoc *psoc;
++	struct hdd_wonder_peer_state *owner;
++	u8 mac[ETH_ALEN];
++	u32 frequency;
++	u64 helper_cookie;
++	int reply;
++	bool used;
++	bool pending;
++	bool active;
++	bool poisoned;
++	bool clear_started;
++	bool clear_submitted;
++};
++
++static DEFINE_SPINLOCK(hdd_wonder_match_lock);
++static struct hdd_wonder_match hdd_wonder_matches[WLAN_UMAC_PSOC_MAX_VDEVS];
++/* A reply has no MAC, frequency or token. Never retry an uncertain request. */
++static struct wlan_objmgr_psoc *hdd_wonder_poisoned_psoc;
++
++/* Caller holds hdd_wonder_match_lock. */
++static void hdd_wonder_match_fault(struct hdd_wonder_match *match, int error)
++{
++	match->poisoned = true;
++	match->active = false;
++	match->pending = false;
++	hdd_wonder_poisoned_psoc = match->psoc;
++	if (match->owner) {
++		if (!match->owner->error)
++			match->owner->error = error;
++		complete_all(&match->owner->reply_done);
++	}
++}
++
++struct hdd_wonder_peer_state *
++hdd_wonder_peer_create(struct hdd_adapter *adapter)
++{
++	struct hdd_wonder_peer_state *state;
++
++	if (!adapter || !adapter->hdd_ctx || !adapter->hdd_ctx->psoc ||
++	    !is_valid_ether_addr(adapter->mac_addr.bytes))
++		return ERR_PTR(-EINVAL);
++	state = kzalloc(sizeof(*state), GFP_KERNEL);
++	if (!state)
++		return ERR_PTR(-ENOMEM);
++	mutex_init(&state->operation_lock);
++	init_completion(&state->reply_done);
++	state->adapter = adapter;
++	state->psoc = adapter->hdd_ctx->psoc;
++	state->bound_id = WLAN_INVALID_VDEV_ID;
++	return state;
++}
++
++bool hdd_wonder_peer_reply(struct wlan_objmgr_psoc *psoc, u32 id, u32 status)
++{
++	struct hdd_wonder_match *match;
++	unsigned long flags;
++	bool owned = false;
++
++	if (id >= ARRAY_SIZE(hdd_wonder_matches))
++		return false;
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	match = &hdd_wonder_matches[id];
++	if (!match->used || match->psoc != psoc)
++		goto out;
++	owned = true;
++	if (!match->pending || match->poisoned || match->clear_started) {
++		hdd_wonder_match_fault(match, -EPROTO);
++		goto out;
++	}
++	match->pending = false;
++	match->reply = status;
++	/* Onyx's native P2P caller uses nonzero=accepted. The wire success is 1. */
++	if (status > 1) {
++		hdd_wonder_match_fault(match, -EPROTO);
++		goto out;
++	}
++	match->active = status == 1;
++	if (match->owner)
++		complete_all(&match->owner->reply_done);
++out:
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	return owned;
++}
++
++int hdd_wonder_peer_prepare(struct hdd_wonder_peer_state *state,
++			    u32 frequency, u64 generation)
++{
++	struct wma_wonder_helper_snapshot helper;
++	struct hdd_wonder_match *match;
++	unsigned long flags;
++	QDF_STATUS status;
++	int error;
++
++	if (!state || !frequency)
++		return -EINVAL;
++	mutex_lock(&state->operation_lock);
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	error = state->stopping ? -ESHUTDOWN : state->error;
++	if (!error && hdd_wonder_poisoned_psoc == state->psoc)
++		error = -EIO;
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	if (error)
++		goto out;
++	status = wma_wonder_helper_prepare(state->adapter->deflink->vdev_id,
++			frequency, state->adapter->mac_addr.bytes, generation, &helper);
++	error = qdf_status_to_os_return(status);
++	if (error)
++		goto out;
++	if (helper.vdev_id >= ARRAY_SIZE(hdd_wonder_matches)) {
++		error = -EINVAL;
++		goto out;
++	}
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	match = &hdd_wonder_matches[helper.vdev_id];
++	if (state->stopping || state->error ||
++	    hdd_wonder_poisoned_psoc == state->psoc) {
++		error = state->error ? state->error : -ESHUTDOWN;
++		goto unlock;
++	}
++	if (match->used) {
++		/* One SET per actual helper lifetime; repeated same-channel calls reuse it. */
++		error = match->owner == state && match->psoc == state->psoc &&
++			match->helper_cookie == helper.cookie && match->active &&
++			!match->clear_started && !match->poisoned &&
++			match->frequency == frequency ? 0 : -EBUSY;
++		goto unlock;
++	}
++	if (state->bound_id != WLAN_INVALID_VDEV_ID) {
++		error = -EBUSY;
++		goto unlock;
++	}
++	reinit_completion(&state->reply_done);
++	memset(match, 0, sizeof(*match));
++	match->used = true;
++	match->pending = true;
++	match->psoc = state->psoc;
++	match->owner = state;
++	match->frequency = frequency;
++	match->helper_cookie = helper.cookie;
++	match->reply = -EINPROGRESS;
++	ether_addr_copy(match->mac, state->adapter->mac_addr.bytes);
++	state->bound_id = helper.vdev_id;
++	state->helper_cookie = helper.cookie;
++	state->frequency = frequency;
++	state->generation = generation;
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	status = wma_wonder_helper_set_rx_mac(state->adapter->deflink->vdev_id,
++			frequency, state->adapter->mac_addr.bytes, generation, &helper, true);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		error = qdf_status_to_os_return(status);
++		spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++		if (match->used && match->owner == state &&
++		    match->helper_cookie == helper.cookie)
++			hdd_wonder_match_fault(match, error);
++		else if (!state->error)
++			state->error = error;
++		spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++		goto out;
++	}
++	if (!wait_for_completion_timeout(&state->reply_done, HDD_WONDER_MATCH_TIMEOUT)) {
++		spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++		if (match->used && match->owner == state &&
++		    match->helper_cookie == helper.cookie)
++			hdd_wonder_match_fault(match, -ETIMEDOUT);
++		else if (!state->error)
++			state->error = -ETIMEDOUT;
++		spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	}
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	if (state->stopping)
++		error = -ESHUTDOWN;
++	else if (state->error)
++		error = state->error;
++	else if (!match->used || match->owner != state || match->pending)
++		error = -EIO;
++	else
++		error = match->active ? 0 : -ECANCELED;
++unlock:
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++out:
++	mutex_unlock(&state->operation_lock);
++	return error;
++}
++
++bool hdd_wonder_peer_take_clear(struct wlan_objmgr_psoc *psoc, u8 id,
++			       struct set_rx_mac_filter *param)
++{
++	struct hdd_wonder_match *match;
++	unsigned long flags;
++	bool submit = false;
++
++	if (id >= ARRAY_SIZE(hdd_wonder_matches) || !param)
++		return false;
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	match = &hdd_wonder_matches[id];
++	if (!match->used || match->psoc != psoc || match->clear_started)
++		goto out;
++	if (match->pending)
++		hdd_wonder_match_fault(match, -ESHUTDOWN);
++	match->active = false;
++	match->clear_started = true;
++	param->vdev_id = id;
++	param->freq = match->frequency;
++	ether_addr_copy(param->mac, match->mac);
++	param->set = false;
++	submit = true;
++out:
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	return submit;
++}
++
++void hdd_wonder_peer_clear_result(struct wlan_objmgr_psoc *psoc, u8 id,
++				 int error)
++{
++	struct hdd_wonder_match *match;
++	unsigned long flags;
++
++	if (id >= ARRAY_SIZE(hdd_wonder_matches))
++		return;
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	match = &hdd_wonder_matches[id];
++	if (match->used && match->psoc == psoc) {
++		if (error)
++			hdd_wonder_match_fault(match, error);
++		else
++			match->clear_submitted = true;
++	}
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++}
++
++int hdd_wonder_peer_clear(struct hdd_wonder_peer_state *state)
++{
++	struct wma_wonder_helper_snapshot helper;
++	struct set_rx_mac_filter param = { 0 };
++	unsigned long flags;
++	QDF_STATUS status;
++	int error = 0;
++
++	if (!state)
++		return 0;
++	mutex_lock(&state->operation_lock);
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	helper.vdev_id = state->bound_id;
++	helper.cookie = state->helper_cookie;
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	if (!hdd_wonder_peer_take_clear(state->psoc, helper.vdev_id, &param))
++		goto out;
++	status = wma_wonder_helper_set_rx_mac(state->adapter->deflink->vdev_id,
++			param.freq, param.mac, state->generation, &helper, false);
++	error = qdf_status_to_os_return(status);
++	hdd_wonder_peer_clear_result(state->psoc, helper.vdev_id, error);
++out:
++	mutex_unlock(&state->operation_lock);
++	return error;
++}
++
++void hdd_wonder_peer_helper_deleted(struct wlan_objmgr_psoc *psoc, u8 id)
++{
++	struct hdd_wonder_match *match;
++	unsigned long flags;
++
++	if (id >= ARRAY_SIZE(hdd_wonder_matches))
++		return;
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	match = &hdd_wonder_matches[id];
++	if (match->used && match->psoc == psoc) {
++		if (!match->clear_submitted || match->pending)
++			hdd_wonder_match_fault(match, -EPROTO);
++		if (match->owner) {
++			match->owner->bound_id = WLAN_INVALID_VDEV_ID;
++			complete_all(&match->owner->reply_done);
++		}
++		/* Only a real firmware DELETE retires routing. Session faults stay sticky. */
++		memset(match, 0, sizeof(*match));
++	}
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++}
++
++void hdd_wonder_peer_firmware_started(struct wlan_objmgr_psoc *psoc)
++{
++	unsigned long flags;
++	int i;
++
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	for (i = 0; i < ARRAY_SIZE(hdd_wonder_matches); i++) {
++		struct hdd_wonder_match *match = &hdd_wonder_matches[i];
++
++		if (match->psoc && match->psoc != psoc)
++			continue;
++		if (match->owner) {
++			match->owner->bound_id = WLAN_INVALID_VDEV_ID;
++			match->owner->error = -ESHUTDOWN;
++			complete_all(&match->owner->reply_done);
++		}
++		memset(match, 0, sizeof(*match));
++	}
++	if (hdd_wonder_poisoned_psoc == psoc)
++		hdd_wonder_poisoned_psoc = NULL;
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++}
++
++bool hdd_wonder_peer_ready(struct hdd_wonder_peer_state *state)
++{
++	struct hdd_wonder_match *match;
++	unsigned long flags;
++	bool ready = false;
++
++	if (!state)
++		return false;
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	if (!state->stopping && !state->error &&
++	    state->bound_id < ARRAY_SIZE(hdd_wonder_matches)) {
++		match = &hdd_wonder_matches[state->bound_id];
++		ready = match->used && match->owner == state && match->active &&
++			!match->pending && !match->poisoned && !match->clear_started;
++	}
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	return ready;
++}
++
++void hdd_wonder_peer_cancel(struct hdd_wonder_peer_state *state)
++{
++	unsigned long flags;
++
++	if (!state)
++		return;
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	state->stopping = true;
++	complete_all(&state->reply_done);
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++}
++
++void hdd_wonder_peer_destroy(struct hdd_wonder_peer_state *state)
++{
++	unsigned long flags;
++	int i;
++
++	if (!state)
++		return;
++	hdd_wonder_peer_cancel(state);
++	hdd_wonder_peer_clear(state);
++	mutex_lock(&state->operation_lock);
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	for (i = 0; i < ARRAY_SIZE(hdd_wonder_matches); i++)
++		if (hdd_wonder_matches[i].owner == state)
++			hdd_wonder_matches[i].owner = NULL;
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	mutex_unlock(&state->operation_lock);
++	kfree(state);
++}
++
++int hdd_wonder_peer_station(struct hdd_wonder_peer_state *state,
++			    enum wondertap_station_action action,
++			    struct wondertap_station_info *info)
++{
++	struct hdd_wonder_peer_entry *entry = NULL, *free_entry = NULL;
++	int i, error = 0;
++
++	if (!state || !info || !is_valid_ether_addr(info->mac) ||
++	    action < WONDERTAP_STATION_STATE_NEW || action >= WONDERTAP_STATION_MAX)
++		return -EINVAL;
++	if ((action == WONDERTAP_STATION_STATE_NEW ||
++	     action == WONDERTAP_STATION_STATE_UPDATE) &&
++	    ((info->capability_mask & ~GENMASK(WONDERTAP_STATION_CAP_MAX - 1, 0)) ||
++	     info->he_capa_len > sizeof(info->he_capa)))
++		return -EINVAL;
++	mutex_lock(&state->operation_lock);
++	if (READ_ONCE(state->stopping)) {
++		error = -ESHUTDOWN;
++		goto out;
++	}
++	for (i = 0; i < ARRAY_SIZE(state->peers); i++) {
++		if (!state->peers[i].used && !free_entry)
++			free_entry = &state->peers[i];
++		if (state->peers[i].used &&
++		    ether_addr_equal(state->peers[i].info.mac, info->mac))
++			entry = &state->peers[i];
++	}
++	/* Raw injection addresses the established helper self peer. Destination
++	 * stations remain mac80211 peers; these records do not create FW peers.
++	 */
++	switch (action) {
++	case WONDERTAP_STATION_STATE_NEW:
++		if (entry) {
++			error = -EEXIST;
++			break;
++		}
++		if (!free_entry) {
++			error = -ENOSPC;
++			break;
++		}
++		free_entry->used = true;
++		free_entry->info = *info;
++		break;
++	case WONDERTAP_STATION_STATE_UPDATE:
++		if (!entry)
++			error = -ENOENT;
++		else
++			entry->info = *info;
++		break;
++	case WONDERTAP_STATION_STATE_DEL:
++		if (entry)
++			memset(entry, 0, sizeof(*entry));
++		break;
++	case WONDERTAP_STATION_STATE_QUERY:
++		if (!entry)
++			error = -ENOENT;
++		else
++			*info = entry->info;
++		break;
++	default:
++		error = -EINVAL;
++	}
++out:
++	mutex_unlock(&state->operation_lock);
++	return error;
++}
++#endif /* FEATURE_WLAN_WONDER */

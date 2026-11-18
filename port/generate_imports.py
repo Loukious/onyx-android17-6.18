@@ -77,7 +77,9 @@ def validate_source_groups(value, projects):
         raise ValueError("source_groups.groups must be a nonempty list")
     groups = {}
     for group in value["groups"]:
-        if not isinstance(group, dict) or set(group) != {"project", "prefixes", "discovery"}:
+        if (not isinstance(group, dict)
+                or not {"project", "prefixes", "discovery"} <= set(group)
+                or set(group) - {"project", "prefixes", "discovery", "destination_prefix"}):
             raise ValueError("Invalid source provenance group")
         project = group["project"]
         if project not in projects or project in groups:
@@ -86,6 +88,12 @@ def validate_source_groups(value, projects):
             raise ValueError(f"Invalid source prefixes for {project}")
         for prefix in group["prefixes"]:
             component_catalog._path(prefix)
+        if "destination_prefix" in group:
+            destination = group["destination_prefix"]
+            component_catalog._path(destination)
+            if any(prefix != destination and not prefix.startswith(destination + "/")
+                   for prefix in group["prefixes"]):
+                raise ValueError(f"Source prefixes escape destination prefix: {project}")
         _selector(group["discovery"], project)
         groups[project] = group
     overrides = {}
@@ -237,7 +245,12 @@ def _glob_selectors(catalog):
 def derive(catalog, sources, workspace, patches):
     projects = pinned_projects(sources)
     groups, overrides = validate_source_groups(catalog.get("source_groups"), projects)
-    trees = {project: _git_tree(workspace, project, projects[project]) for project in groups}
+    trees = {}
+    for project, group in groups.items():
+        tree = _git_tree(workspace, project, projects[project])
+        destination = group.get("destination_prefix")
+        trees[project] = ({destination + "/" + name: dict(record, source_path=name)
+                           for name, record in tree.items()} if destination else tree)
     preimages, created = _patch_inputs(patches)
     local = {"BUILD.bazel", "Kconfig", "kmi-symbols", "scm_defconfig", "platform_defconfig", "relay.fragment"}
     local.update(component_catalog.generated_files(catalog))
@@ -306,7 +319,11 @@ def derive(catalog, sources, workspace, patches):
             raise ValueError(f"Required source missing from pinned Git tree: {project}:{name}")
         if record["kind"] != "blob" or record["mode"] not in {"100644", "100755"}:
             raise ValueError(f"Required source is not a regular Git blob: {project}:{name}")
-        records.append({"project": project, "revision": projects[project], "path": name, "blob": record["blob"]})
+        locked = {"project": project, "revision": projects[project], "path": name,
+                  "blob": record["blob"]}
+        if "source_path" in record:
+            locked["source_path"] = record["source_path"]
+        records.append(locked)
     for project, selector in catalog["source_groups"]["rom_source_checksums"].items():
         checksummed = [record for record in records if record["project"] == project and _selected(record["path"], selector)]
         checksums = _blob_sha256s(workspace, project, [record["blob"] for record in checksummed])

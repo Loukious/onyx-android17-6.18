@@ -1,0 +1,1289 @@
+{
+  "schema_version": 1,
+  "host_validation": "PASS",
+  "validated_utc": "2026-11-17T05:25:52.286360+00:00",
+  "scope": "Offline software contracts, current module compilation and complete source replay",
+  "base_commit": "945bc4499192bd44aa3c44e43529428a843428ba",
+  "branch": "feat/onyx-wonder-awdl",
+  "worktree": "/home/loukious/Android/onyx-wonder-20261116",
+  "normal_offchannel_sta_supported": false,
+  "probe": {
+    "module_parameter": "wonder_sta_offchan_probe",
+    "default": false,
+    "scope": "Explicit 20 MHz STA dwell probes; unsupported packet controls rejected",
+    "sta_hbs_dbs_capabilities_advertised": false
+  },
+  "tests": {
+    "dwell": {
+      "status": "PASS",
+      "assertions": 703,
+      "cases": 13,
+      "negative_controls": [
+        "reserve_authorizes",
+        "ignore_owner",
+        "ignore_event_scan_id",
+        "cancel_releases_pending",
+        "entry_refreshes_deadline",
+        "ignore_deadline",
+        "missing_revocation_latch",
+        "scan_overwrites_home",
+        "not_submitted_after_firmware_entry",
+        "frequency_conflict_retains_authorization"
+      ],
+      "sanitizers": [
+        "ASan",
+        "UBSan"
+      ],
+      "source_sha256": {
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_dwell.c": "6174424d50ce126c1a258bbfd9eb8c27c348fb538f70edad30295ab393f8010b",
+        "qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_dwell.h": "0db67c888fd8bfc662121effa3130552373b55890f2f4aa5977149eb6577eb82"
+      },
+      "limits": [
+        "Complete production state core and header execute; only Linux types/includes are adapted for host compilation.",
+        "All 24 STARTED/FOREIGN/EXIT/terminal callback orders, stale attribution, deadlines, cancellation and invalidation are tested.",
+        "Caller serialization and callback-context lifetime are contracts, not concurrent kernel or radio validation.",
+        "Target timestamps are optional local ordering observations, not TSF/QTIMER or proof of RF entry timing.",
+        "Revocation intentionally latches until terminal; scan re-entry needs a new reservation.",
+        "Negative controls change temporary translation units only, never production files."
+      ],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wonder-dwell-host.json",
+        "sha256": "a78a3479ff271ccf0cf05919fb5315e9d7921b39d4c806e2e0f36cb8abbacb39"
+      }
+    },
+    "coex": {
+      "status": "PASS",
+      "assertions": 1126,
+      "cases": 12,
+      "negative_controls": [
+        "old_token_authorized",
+        "old_tuple_same_deadline_authorized",
+        "home_ready_while_pending",
+        "old_expiry_cancels_current_early",
+        "remaining_duration_underflows",
+        "generic_foreign_rx_authorized",
+        "rx_dwell_lock_not_released",
+        "queued_token_not_pinned",
+        "synthetic_completion_retires_firmware",
+        "normal_foreign_channel_probe_ungated",
+        "shared_ap_foreign_channel_allowed"
+      ],
+      "sanitizers": [
+        "ASan",
+        "UBSan"
+      ],
+      "source_sha256": {
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_dwell.c": "6174424d50ce126c1a258bbfd9eb8c27c348fb538f70edad30295ab393f8010b",
+        "qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_dwell.h": "0db67c888fd8bfc662121effa3130552373b55890f2f4aa5977149eb6577eb82",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_coex.c": "d2e0887e4d908d3e863216d01c64e465ef4e3387c1f72d13e9174afebabb82d4",
+        "qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_coex.h": "62703edd25a42deac6af8537d18fabe323cad44b2d2d3f1d10627eec26f57e37",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c": "c2e6460535c293ccc6e04438e0a109d1cda56cc06937bee8b0bbf526ada8f232",
+        "qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h": "0a08b13dbb806d3c98f1581ca613b08b4a460a977992911594d3f49dbd842eed",
+        "qca-wifi-host-cmn/umac/scan/dispatcher/inc/wlan_scan_public_structs.h": "ce8cd328acb56115aa3007db5346ca1b65bd3f0a09ab355f1e74b29305e0abc2",
+        "qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h": "a62b19408f461553b9534ec4114dfc26358dfafb94486a1142eb6da1232b730b",
+        "wonder/include/wondertap.h": "0dd5bc7ade3f5fbaaf69d734dc05c1921d573d5756479b91942f552745c2450f"
+      },
+      "limits": [
+        "Complete production dwell/coex sources and headers execute; provider packet publication wrappers are extracted from production.",
+        "MLME routing/admission, object manager, scan request services, scheduler and module pins are explicit host mocks; actual MLME scan routing has separate injection fixture coverage.",
+        "Host pthread admission and dwell locks check publication serialization against an EXIT event; this is not a kernel race or radio test.",
+        "The actual RX netdev callback gate executes while publication locks are held; provider teardown revocation before gate removal is checked against source wiring.",
+        "Actual foreign-channel preflight requires explicit probe opt-in, STA ownership and regulatory 20 MHz approval; denied preflight does not reserve scans or rewrite HOME.",
+        "Packets queued for an old same-frequency tuple, failed/expired scans, HOME and unknown-frequency publication, and teardown context pins are checked.",
+        "Firmware timing, scan-manager internals, WMI/DMA transfer ownership and device behavior are excluded.",
+        "Negative controls modify temporary translation units only."
+      ],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wonder-coex-host.json",
+        "sha256": "db3a832277990d44faab711492c8622590630161819e456ef2f8f406f62cc159"
+      }
+    },
+    "shared_injection_rx": {
+      "status": "PASS",
+      "assertions": 2505,
+      "cases": 0,
+      "negative_controls": 6,
+      "sanitizers": "ASan+UBSan",
+      "source_sha256": {
+        "qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c": "717ba918d10adc504df0661f82fdd71b31ff59554c89861b43fff785b708be17",
+        "qcacld-3.0/core/hdd/inc/wlan_hdd_main.h": "673f12bbb706f8aadaeef0700f0dce6234a1beb12a830ef4b511de65cf31a510",
+        "qcacld-3.0/core/wma/src/wma_data.c": "4283d31329512ab2f3bc4527935ca41ad0af5363fff262fdce6ab99ab7ac3d6d",
+        "qcacld-3.0/core/wma/inc/wma_api.h": "03ebaac03f87320e07df10c253681e67237be53b40592637c92fb15bb96ab53d",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c": "c2e6460535c293ccc6e04438e0a109d1cda56cc06937bee8b0bbf526ada8f232",
+        "qca-wifi-host-cmn/dp/wifi3.0/dp_tx.c": "5c4752194558fbc7bfa7dab4fc3ef65c08ea1ae5c8735b4aa2820db47e598b30",
+        "qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h": "a62b19408f461553b9534ec4114dfc26358dfafb94486a1142eb6da1232b730b",
+        "qca-wifi-host-cmn/umac/regulatory/dispatcher/inc/reg_services_public_struct.h": "3c467db6023bc2e95c521b2a91255deed910103ad3d628a411aee0a961838fe8",
+        "fw-api/fw/htt.h": "7e2b7d0f5391d601d6b58f0cf2b2b71e768bd2ea7e3580e9a1d2be706e55751d",
+        "qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c": "32ff4f6818dc48de4b69646446cd61a31d3203253e683491ed830293bb874866",
+        "qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h": "0a08b13dbb806d3c98f1581ca613b08b4a460a977992911594d3f49dbd842eed",
+        "qcacld-3.0/components/mlme/core/inc/wlan_mlme_main.h": "fdef094e26e8a4a5f4ca0b0a31de9bcf50c76c7d4352fe9d3909389c5f207c55",
+        "qca-wifi-host-cmn/umac/scan/dispatcher/inc/wlan_scan_public_structs.h": "ce8cd328acb56115aa3007db5346ca1b65bd3f0a09ab355f1e74b29305e0abc2",
+        "qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_rx_mon.c": "4d37ce1a24a21ac0e3c2c68536fb21fe33f782ce2a970a5b0159ee70e5efcfbb",
+        "qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h": "56ded36b23127126c6707f28f4cac8c8b998207764cd9baffb86fbfa08ddbbb9",
+        "qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c": "2b3af1cca4e27eacdd1a80decf8f0b87babec8a13c98a780eaec5577c372d931",
+        "qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c": "c6797d865f15f8dc3cf1f0366358de2fd6311cdb916210ffbc18f4d3446a326b",
+        "qcacld-3.0/components/dp/dispatcher/inc/wlan_dp_public_struct.h": "aaf5c92cc4d7ef186ac9624207fb7d8071e2cb92779aca6ab0acad1b7fb31097",
+        "qcacld-3.0/os_if/dp/src/os_if_dp_txrx.c": "f55b635027fd7b5025701ddf83b59b6b5efb7c4289d544d888daa762c96bcc7d"
+      },
+      "limits": [
+        "Uses actual cfg80211 radiotap iterator, frame parser and HTT encoder.",
+        "Actual WMA queue, refill, lookup, completion/release, init, stop and coex-resume functions use mocked scheduling/DP.",
+        "Actual MLME READY, ownership, snapshot and generation checks cover restart and failed-drain admission.",
+        "Actual triple-owner controller checks cover malformed ownership, both owners management, companion invalidation/CSA and leases through native drain; HDD/radio admission is excluded.",
+        "Actual private WMA power cache, layout and admission functions cover zero/negative limits, failed/overlapping sends, regulatory changes, overrides and vdev reuse with mocked regulatory and object services.",
+        "Actual native helper START continuation and UP gate reject missing/failed/stale TPC programming; WMI sends and vdev state-machine delivery are mocked.",
+        "Helper MAC selection and snapshot identity use actual WMA functions; firmware address handling needs device testing.",
+        "Actual Wonder helper preparation/identity and channel-change guards cover same-frequency width transitions and DELETE timeout with mocked helper creation/deletion and module pins; HDD matcher CLEAR is excluded.",
+        "Actual provider vdev admission and standalone helper reservation remain blocked after provider teardown until helper deletion drains; vdev creation itself is mocked.",
+        "Actual DP measured-frequency capture and final coex publication helpers cover exact PPDU identity, HOME fallback exclusion, stale owner/binding rejection, and balanced admission held through the callback; the owner lease implementation and RX rings/DMA are mocked.",
+        "Actual HDD ownership predicate, monitor push selector and OSIF network delivery defer Wonder consumption until admission/RCU/monitor locks release; normal monitors retain immediate NAPI/BH delivery. Network consumers and backlog are mocked; a compiled negative control detects recursive Wonder consumption under its held lease.",
+        "Native helper creation/STOP/DELETE, HDD channel setup, SKBs, DMA and synchronization primitives are mocks or excluded; firmware, races, ACKs and WPS require device testing."
+      ],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wlan-injection-rx-host.json",
+        "sha256": "a7d744ee2b039eede652a1d2147cbbcfbe2d9a5ea9dbcb613436af1f90f1670e"
+      }
+    },
+    "transport_control_rx": {
+      "status": "PASS",
+      "assertions": 24771,
+      "cases": 0,
+      "negative_controls": 6,
+      "sanitizers": "ASan+UBSan",
+      "source_sha256": {
+        "qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c": "717ba918d10adc504df0661f82fdd71b31ff59554c89861b43fff785b708be17",
+        "qcacld-3.0/core/hdd/inc/wlan_hdd_main.h": "673f12bbb706f8aadaeef0700f0dce6234a1beb12a830ef4b511de65cf31a510",
+        "qcacld-3.0/core/wma/src/wma_data.c": "4283d31329512ab2f3bc4527935ca41ad0af5363fff262fdce6ab99ab7ac3d6d",
+        "qcacld-3.0/core/wma/inc/wma_api.h": "03ebaac03f87320e07df10c253681e67237be53b40592637c92fb15bb96ab53d",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c": "c2e6460535c293ccc6e04438e0a109d1cda56cc06937bee8b0bbf526ada8f232",
+        "qca-wifi-host-cmn/dp/wifi3.0/dp_tx.c": "5c4752194558fbc7bfa7dab4fc3ef65c08ea1ae5c8735b4aa2820db47e598b30",
+        "qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h": "a62b19408f461553b9534ec4114dfc26358dfafb94486a1142eb6da1232b730b",
+        "qca-wifi-host-cmn/umac/regulatory/dispatcher/inc/reg_services_public_struct.h": "3c467db6023bc2e95c521b2a91255deed910103ad3d628a411aee0a961838fe8",
+        "fw-api/fw/htt.h": "7e2b7d0f5391d601d6b58f0cf2b2b71e768bd2ea7e3580e9a1d2be706e55751d",
+        "qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c": "32ff4f6818dc48de4b69646446cd61a31d3203253e683491ed830293bb874866",
+        "qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h": "0a08b13dbb806d3c98f1581ca613b08b4a460a977992911594d3f49dbd842eed",
+        "qcacld-3.0/components/mlme/core/inc/wlan_mlme_main.h": "fdef094e26e8a4a5f4ca0b0a31de9bcf50c76c7d4352fe9d3909389c5f207c55",
+        "qca-wifi-host-cmn/umac/scan/dispatcher/inc/wlan_scan_public_structs.h": "ce8cd328acb56115aa3007db5346ca1b65bd3f0a09ab355f1e74b29305e0abc2",
+        "qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_rx_mon.c": "4d37ce1a24a21ac0e3c2c68536fb21fe33f782ce2a970a5b0159ee70e5efcfbb",
+        "qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h": "56ded36b23127126c6707f28f4cac8c8b998207764cd9baffb86fbfa08ddbbb9",
+        "qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c": "2b3af1cca4e27eacdd1a80decf8f0b87babec8a13c98a780eaec5577c372d931",
+        "qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c": "c6797d865f15f8dc3cf1f0366358de2fd6311cdb916210ffbc18f4d3446a326b",
+        "qcacld-3.0/components/dp/dispatcher/inc/wlan_dp_public_struct.h": "aaf5c92cc4d7ef186ac9624207fb7d8071e2cb92779aca6ab0acad1b7fb31097",
+        "qcacld-3.0/os_if/dp/src/os_if_dp_txrx.c": "f55b635027fd7b5025701ddf83b59b6b5efb7c4289d544d888daa762c96bcc7d",
+        "wonder/include/wondertap_monitor.h": "5bb3ec1c80db35e85115974e23ee42cd4a01c3ac6e92b67230968cc317870c19",
+        "wonder/include/wondertap.h": "0dd5bc7ade3f5fbaaf69d734dc05c1921d573d5756479b91942f552745c2450f",
+        "wonder/wondertap.c": "e9ffdcfd1f1966f8ecbe1f1ae43aed473d206dedd45be1826976aba24e894d66",
+        "wonder/wondertap_internal.h": "4c44cbcc520b77eb86fd62a9eff31f7e13175172a053502743eb2b1c32bb9c35"
+      },
+      "limits": [
+        "Uses actual cfg80211 radiotap iterator, frame parser and HTT encoder.",
+        "Actual WMA queue, refill, lookup, completion/release, init, stop and coex-resume functions use mocked scheduling/DP.",
+        "Actual MLME READY, ownership, snapshot and generation checks cover restart and failed-drain admission.",
+        "Actual triple-owner controller checks cover malformed ownership, both owners management, companion invalidation/CSA and leases through native drain; HDD/radio admission is excluded.",
+        "Actual private WMA power cache, layout and admission functions cover zero/negative limits, failed/overlapping sends, regulatory changes, overrides and vdev reuse with mocked regulatory and object services.",
+        "Actual native helper START continuation and UP gate reject missing/failed/stale TPC programming; WMI sends and vdev state-machine delivery are mocked.",
+        "Helper MAC selection and snapshot identity use actual WMA functions; firmware address handling needs device testing.",
+        "Actual Wonder helper preparation/identity and channel-change guards cover same-frequency width transitions and DELETE timeout with mocked helper creation/deletion and module pins; HDD matcher CLEAR is excluded.",
+        "Actual provider vdev admission and standalone helper reservation remain blocked after provider teardown until helper deletion drains; vdev creation itself is mocked.",
+        "Actual DP measured-frequency capture and final coex publication helpers cover exact PPDU identity, HOME fallback exclusion, stale owner/binding rejection, and balanced admission held through the callback; the owner lease implementation and RX rings/DMA are mocked.",
+        "Actual HDD ownership predicate, monitor push selector and OSIF network delivery defer Wonder consumption until admission/RCU/monitor locks release; normal monitors retain immediate NAPI/BH delivery. Network consumers and backlog are mocked; a compiled negative control detects recursive Wonder consumption under its held lease.",
+        "Native helper creation/STOP/DELETE, HDD channel setup, SKBs, DMA and synchronization primitives are mocks or excluded; firmware, races, ACKs and WPS require device testing.",
+        "Firmware channel transitions, RX delivery and Apple transfers are untested.",
+        "Control/PM tests execute production functions with explicit mocked clocks, provider callbacks, locks and netdev state; actual TSF continuity and kernel PM require device validation.",
+        "SKB operations use allocation-bounded head/fragment/clone mocks with failure injection.",
+        "Filtering, mac80211 delivery, stats and synchronization are mocked; actual kernel SKBs, firmware RX and Apple transfers require device testing."
+      ],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wonder-transport-final-04.json",
+        "sha256": "15b31a632759bffa3ee6b76fe74c319381ac5f2a11999fc29a02731c2c31aad0"
+      }
+    },
+    "scan": {
+      "status": "PASS",
+      "assertions": 2243,
+      "cases": 0,
+      "negative_controls": [
+        "cancel_claims_never_submitted_after_target_attempt",
+        "omit_target_attempt_provenance",
+        "synthetic_completion_claims_firmware",
+        "omit_target_observer_before_scm",
+        "reserved_request_invalidates_own_generation",
+        "duplicate_admission_retires_accepted_reservation",
+        "omit_activation_channel_guard",
+        "reserved_tuple_mismatch_bypasses_activation",
+        "serialization_rejection_returns_success"
+      ],
+      "sanitizers": [
+        "address",
+        "undefined"
+      ],
+      "source_sha256": {
+        "qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c": "32ff4f6818dc48de4b69646446cd61a31d3203253e683491ed830293bb874866",
+        "qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h": "0a08b13dbb806d3c98f1581ca613b08b4a460a977992911594d3f49dbd842eed",
+        "qcacld-3.0/components/mlme/core/inc/wlan_mlme_main.h": "fdef094e26e8a4a5f4ca0b0a31de9bcf50c76c7d4352fe9d3909389c5f207c55",
+        "qca-wifi-host-cmn/umac/scan/dispatcher/src/wlan_scan_api.c": "57132d3ad46361cbac8a9d8d12af6f09c220876208380d4b6ca82bcdebad3cd1",
+        "qca-wifi-host-cmn/umac/scan/core/src/wlan_scan_manager.c": "485314efd50b07454e685f0616b4f9aa6e00c7744ba266157cb25f0cb8e48ffc",
+        "qca-wifi-host-cmn/target_if/scan/src/target_if_scan.c": "da11858ab994e335f3383736bc7a4939ca21f3200b2ea652780dd496115bbd6d",
+        "qca-wifi-host-cmn/umac/scan/dispatcher/inc/wlan_scan_public_structs.h": "ce8cd328acb56115aa3007db5346ca1b65bd3f0a09ab355f1e74b29305e0abc2"
+      },
+      "limits": [],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-preapple-20261117/wonder-scan-validation.json",
+        "sha256": "604e3d021393046342d82373339f7a57a22b036c324d80c6a18fd60e8ce90ceb"
+      }
+    },
+    "wmi": {
+      "status": "PASS",
+      "assertions": {
+        "dma32": 2098,
+        "dma37": 2122,
+        "dma32_big_endian": 2098,
+        "dma37_big_endian": 2122
+      },
+      "cases": 0,
+      "negative_controls": [
+        "ignore_map_error",
+        "omit_failure_unmap",
+        "omit_default_metadata",
+        "omit_tlv_validation",
+        "omit_service_gate"
+      ],
+      "sanitizers": [
+        "address",
+        "undefined"
+      ],
+      "source_sha256": {
+        "qca-wifi-host-cmn/wmi/src/wmi_unified_tlv.c": "57b2b8661cfe8693ed6bec7ba3bd1440e5896667a20b31cf3773642f3b371d9d",
+        "qca-wifi-host-cmn/wmi/src/wmi_unified_api.c": "8f042e390d8b3f05713fd2e3ca274b531e02dc6e6f16ed66bbc0588004681fbf",
+        "qca-wifi-host-cmn/wmi/inc/wmi_unified_param.h": "dea70a23e437a10d21b50d9ef6fe0dbe54f79e7ceeb7ef5e8ccbc79101323b90",
+        "qca-wifi-host-cmn/wmi/inc/wmi_unified_priv.h": "63d455a032acd919c5ecda311c2dccbf919bb6c49890182bbd64bd3ba22bcb47",
+        "qca-wifi-host-cmn/wmi/inc/wmi_unified_api.h": "38a82cf49a7412f96abf3939c74965aea8a91602a645bda09223e37bc453943a",
+        "fw-api/fw/wmi_unified.h": "27e052df342ccc0624f7ef4cd5a0f78f19ec281ab82fe5fced951f7ace068f5e",
+        "fw-api/fw/wmi_tlv_defs.h": "c2eae89bd50c2e35a52dc321adc99ac04191e9245a4c7e31d849ffb9b8bdc48e",
+        "fw-api/fw/wmi_tlv_helper.h": "26d58ce135aee55d4ec7af14b8fc3ced1b1a7ff6419c062aa54bfdae2e04ddee"
+      },
+      "limits": [],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-preapple-20261117/wmi-offchan-validation.json",
+        "sha256": "636c3f93975e5c1815a05899ff37121ac835e7535d7f6c27f7cd9535589cbd08"
+      }
+    },
+    "wma": {
+      "status": "PASS",
+      "assertions": 790,
+      "cases": 0,
+      "negative_controls": [
+        "bypass_final_authorization",
+        "retire_before_send_return",
+        "ignore_completion_pdev",
+        "leak_unsent_drops",
+        "reuse_owner_with_pending_dma"
+      ],
+      "sanitizers": [
+        "address",
+        "undefined"
+      ],
+      "source_sha256": {
+        "qcacld-3.0/core/wma/src/wma_data.c": "4283d31329512ab2f3bc4527935ca41ad0af5363fff262fdce6ab99ab7ac3d6d",
+        "qcacld-3.0/core/wma/inc/wma_api.h": "03ebaac03f87320e07df10c253681e67237be53b40592637c92fb15bb96ab53d",
+        "qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h": "a62b19408f461553b9534ec4114dfc26358dfafb94486a1142eb6da1232b730b",
+        "qca-wifi-host-cmn/wmi/inc/wmi_unified_param.h": "dea70a23e437a10d21b50d9ef6fe0dbe54f79e7ceeb7ef5e8ccbc79101323b90"
+      },
+      "limits": [],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-preapple-20261117/wma-offchan-validation.json",
+        "sha256": "7c09ae49586b9acca61da743413f119bfd2c8496918af72890ee931d72e112cd"
+      }
+    },
+    "scheduler": {
+      "status": "PASS",
+      "assertions": 177,
+      "cases": 28,
+      "negative_controls": [
+        "no_helper_cookie_recheck",
+        "no_clock_identity_recheck",
+        "no_epoch_continuity_guard",
+        "host_monotonic_for_suspend",
+        "old_clock_after_switch",
+        "missing_recorded_bandwidth",
+        "host_based_slot_end",
+        "unbounded_slot_duration",
+        "retry_recomputes_slot_bounds",
+        "missing_pending_expiry",
+        "retry_timer_past_slot_end",
+        "expired_completion_is_published",
+        "clock_loss_drops_pending_expiry_timer"
+      ],
+      "sanitizers": [
+        "ASan",
+        "UBSan"
+      ],
+      "source_sha256": {
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c": "c07d8edc7d4e291d7bedc8934233ca575e24d54cad7fae8f67469e01781349e0",
+        "qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_sched.h": "b3b9e6a4096c223434a87dc682bfaf33a741e85dca0f843d30e8c3397f23d55b",
+        "qcacld-3.0/core/wma/src/wma_wonder_tsf.c": "5bb0a993ee8e0796b690c86c1fb295a02a68ae850a34bd6471ce9822e8d1844b",
+        "qcacld-3.0/core/wma/inc/wma_wonder_tsf.h": "10e7320e87cd42256e536e56c84582644af3752da1a739f8890b0ee01815f168",
+        "wonder/include/wondertap.h": "0dd5bc7ade3f5fbaaf69d734dc05c1921d573d5756479b91942f552745c2450f",
+        "qcacld-3.0/core/mac/inc/sir_api.h": "30c82f7b913e6d9cfc7fa055fb65ec1188bbde2ae1f29410781336d5821f1d89"
+      },
+      "limits": [
+        "Complete production scheduler and WMA capture/event functions execute with real API declarations.",
+        "Firmware captures and helper identity service replies are bounded mock inputs; no radio or phone is accessed.",
+        "Kernel work queues, timers, synchronization and vdev operation guards are synchronous recording shims; concurrent kernel/RTNL behavior is not established.",
+        "Negative controls modify temporary translation units only, never repository source.",
+        "Firmware capture latency, PPDU counter identity, suspend hardware behavior and AirDrop transfers need device validation."
+      ],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-continuation-20261116/wonder-sched-slot-deadline-host-20261117-03.json",
+        "sha256": "c25011a99e712cbf4c16730c36787e15adc782ff20b399c1925b12d7df54fd31"
+      }
+    },
+    "airtime": {
+      "status": "PASS",
+      "assertions": 111,
+      "cases": 0,
+      "negative_controls": [
+        "FES_duration_instead_of_PHY_PPDU_duration",
+        "missing_PPDU_deduplication",
+        "missing_COMMON_reporting_mask"
+      ],
+      "sanitizers": "ASan+UBSan",
+      "source_sha256": {
+        "qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.c": "17710f1e93c6a76d5d741f634459361040a0e571d5ad40b88137e5216393b41c",
+        "qca-wifi-host-cmn/dp/wifi3.0/dp_htt.c": "4bb0c513a403e33703fbbf461d241d6fd2383a23c2e6b29770cee214fc9cfaf2",
+        "qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h": "56ded36b23127126c6707f28f4cac8c8b998207764cd9baffb86fbfa08ddbbb9",
+        "qca-wifi-host-cmn/dp/wifi3.0/dp_htt.h": "b72306832e03b066ca297f3c0d7e20749782ce7bd83c780a556cf5b820508ea4",
+        "fw-api/fw/htt.h": "7e2b7d0f5391d601d6b58f0cf2b2b71e768bd2ea7e3580e9a1d2be706e55751d",
+        "fw-api/fw/htt_ppdu_stats.h": "9a956529867dae0fb98f20f44d380a8c47349e90979733e96af5f3ad546d9a9c"
+      },
+      "limits": [
+        "HTT submission and buffers are mocked; host tests do not validate firmware reporting.",
+        "RX status ring TLV collection and real MAC TSF clock agreement require device testing."
+      ],
+      "receipt": {
+        "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wonder-airtime-final-04.json",
+        "sha256": "0ef7130377f03c445048d60cd9fd1b09f11e5876b1eddd0ad837a31745b2824e"
+      }
+    }
+  },
+  "assertion_counts_overlap": "Transport reuses injection/RX contracts; do not sum suite counts.",
+  "builds": {
+    "wonder": {
+      "status": "PASS",
+      "module": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/build-wonder-final-01/wonder/wonder.ko",
+      "module_sha256": "557fef90bc42c295077d58d539a9c53642b154c0d56cffe4f613e6c0092d1984",
+      "kernel_release": "6.18.63-android17-6-maybe-dirty-4k",
+      "module_verification": [
+        {
+          "module": "wonder.ko",
+          "sha256": "557fef90bc42c295077d58d539a9c53642b154c0d56cffe4f613e6c0092d1984",
+          "vermagic": "6.18.63-android17-6-maybe-dirty-4k SMP preempt mod_unload modversions aarch64",
+          "imports_checked": 122,
+          "depends": "cfg80211,mac80211",
+          "aliases": [
+            "auxiliary:qca_cld3_wcn7750.wondertap",
+            "auxiliary:bcmdhd4390.wondertap",
+            "auxiliary:iwlmld.wondertap"
+          ]
+        }
+      ],
+      "changed_after_snapshot": [],
+      "source_input_count": 22
+    },
+    "qcacld": {
+      "status": "PASS",
+      "module": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/build-qcacld-final-04/qcacld/qca_cld3_wcn7750.ko",
+      "sha256": "e34c68900dc1e4ea1d7e7ad6742d592088a322e455b30025430ed56b10f9e021",
+      "kernel_release": "6.18.63-android17-6-maybe-dirty-4k",
+      "translation_units": 820,
+      "symvers_sha256": "3eb0a7812b8a1c46909e391529235d2b6d2a2d0675b4585ba57b1551b64eb0e8",
+      "module_verification": [
+        {
+          "module": "qca_cld3_wcn7750.ko",
+          "sha256": "e34c68900dc1e4ea1d7e7ad6742d592088a322e455b30025430ed56b10f9e021",
+          "vermagic": "6.18.63-android17-6-maybe-dirty-4k SMP preempt mod_unload modversions aarch64",
+          "imports_checked": 566,
+          "depends": "cfg80211,cnss_utils,cnss_nl,cnss_prealloc,qcom_iommu_util,sched-walt,qcom_va_minidump,onyx_relay,hwid,rproc_qcom_common,qmi_helpers,icnss2",
+          "aliases": []
+        }
+      ],
+      "wonder_provider_objects": [
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder.o",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_coex.o",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_dwell.o",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.o",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.o",
+        "qcacld-3.0/core/wma/src/wma_wonder_tsf.o"
+      ],
+      "changed_after_snapshot": [],
+      "source_input_count": 2177
+    }
+  },
+  "source_replay": {
+    "status": "PASS",
+    "modules": "/home/loukious/Android/onyx-wonder-20261116/modules",
+    "staged": "/tmp/onyx-wonder-coex-lock-workspace-20261117-04/onyx",
+    "files": 4977,
+    "comparison": "Complete path set, Git file mode/type, bytes and symlink targets",
+    "excluded": [
+      ".staged-files.json"
+    ],
+    "mismatches": [],
+    "inventory_sha256": "821f8cffbe95f4f7624a2f8cf163bfadbe38408a6c69799d6786468032ba75a1",
+    "staged_receipt_sha256": "821f8cffbe95f4f7624a2f8cf163bfadbe38408a6c69799d6786468032ba75a1",
+    "recipe_sha256": {
+      "components.json": "7aebfaf6a1b9e259a905b3bd4a3bfae5ba3d8217785de5fce0e0d4d59aa5b4e5",
+      "sources.json": "f527fc4b63cc0a67e7d107cead17d62638f0d00fcfe0408825b53cc71e705eb3",
+      "imports.json": "430063187daa62e1dddbb808cad7148fa88ad2e69666d12ab757a45c67b66e9a",
+      "catalog.py": "82ebf97456a988f171e603f37972c97c29fd72c76a71b75b15af89de389c1816",
+      "stage.py": "17078983459824b041f4e2d65668bfa1bd1f2c78e53561ccc6301a6fbd503bd3",
+      "generate_imports.py": "12f3d9d474efae0b1db5d838aebc74369ae5ce941cf520a3e735af2b6c0014a5"
+    },
+    "patch_sha256": {
+      "0001-pinctrl-update-linux-6.18-interfaces.patch": "f1cc04b12c71c9b9bfe649975785f7a8e3cc63f4871607776c0602f180cdd953",
+      "0002-scm-update-linux-6.18-interfaces.patch": "47b4a439493383a4edb01e85f3139f8d306660aa82754d9f7073b4852b2d1645",
+      "0003-hwid-add-module-description.patch": "4efa7edc8026c652d3914d70b59ca2548bc487d6004f5224e8241e984319bc02",
+      "0004-port-power-and-irq-interfaces.patch": "3daffd166361de495166eeb7eabdf6254c6c4e380630a696c84dd503dfa44af1",
+      "0005-port-shared-memory-and-pmic-interfaces.patch": "2cb9c6a3d5c6a8d5c540caa8a9e3b4bbdf189388ef78ab421123a8028e125410",
+      "0006-port-regulator-interfaces.patch": "8e6b1ad90e97695a5916610d08509cae95a7d71767fde8abeeacd4702c92cb30",
+      "0007-port-clock-interfaces.patch": "c6561cd6ecfffbfd027281f9a6245f2c150e60eafa6d795f547a663185f933e4",
+      "0008-port-interconnect-interfaces.patch": "050c6db7609cd3f9264b590578cf3e612a44edb3e0225eccf2e7389ac673f022",
+      "0009-port-storage-phy-and-pmic-support.patch": "2bada790ee9c505ac0cf35db44aa80baeda32c6dcdd0ac6520ef805668d9f076",
+      "0010-port-ufs-host-and-inline-crypto.patch": "be7d9b3b46679ac1765718eb19006c09d8befb0602ce5ff2134f823328a33e25",
+      "0011-port-gunyah-services.patch": "0e8d0a86f9d48b0ebdad65ecd373dd6ef9539793b11659ad495db121ca276813",
+      "0012-port-secure-vm-loader.patch": "5fa4ac6c4e813bf3cf11d709fab5c00f7aeefba21e7b5c1f6c3bbe870f73bc0c",
+      "0013-port-iommu-support.patch": "835c1c513b4e4a8dd72b0ffe6fe0c79aed9f144c8e7093f77d15d35bcde364f0",
+      "0014-port-smmu-controller.patch": "08e5ada96635227244f7ff551c4c0bef379fc13a9551c96c74271b8e3567c6f2",
+      "0015-port-cache-and-interrupt-routing.patch": "ef19d7809dfc6ab36f739f0dd16e09b22831a27e571f59a6704fa77d0b6e7ab4",
+      "0016-port-aoss-mailboxes.patch": "ce021f5ca748259c1675fac292db78d92c4c5fa405d340369b55a120fe81e7aa",
+      "0017-port-memory-buffer-sharing.patch": "80b553e842d593e00c74c25aa012d94075686cc24d29afb3859a887aeb6c3ef8",
+      "0018-port-dma-heaps.patch": "d96880701737fb78b024bcc7dca4866dcf7e79e056c0c5eea2dc5b1cb3cd2ba4",
+      "0019-port-cpucp-scmi.patch": "f16e2ac6d0bf9a56e123f6fd202a0741ca337c8201f6ccdcd79dec5345634111",
+      "0020-port-dcvs.patch": "7bab19cc629f6015e98e3bb1802a6a2c7bd13e31407a7186da9399c41869e9d0",
+      "0021-port-pmu-library.patch": "d1f29556a6f95731d555e1f5c24fa8984173b46a14332dce2d219a4ad889bd08",
+      "0022-port-cpu-frequency-control.patch": "e0e829f6394586a987cf64abe9e8f39528106ba15f9a2b5f463ef073947daa59",
+      "0023-port-qfprom-cells.patch": "0219fce12038a6e7f3db3e17bfcd8da7339bb753f26288079a073a94d8e0a687",
+      "0024-port-debug-symbol-service.patch": "85747ef0f79639ff19c15650a8c9b8d0ef5a0656a0ed9797888ed8ebe21d3aa4",
+      "0025-port-minidump-and-boot-logs.patch": "d9faa8b4508447ee7130efe59b75b874b658c052e8f1f51fc6dc59a88af15b94",
+      "0026-port-gunyah-watchdog.patch": "fd14d1ae12af3dafcc356e61886a4d44150152ce5da824a9a7d2d1f0e0ee0d8e",
+      "0027-port-cpu-and-thermal-hooks.patch": "0fbec3060c256d80ec2acb0902f52c430aebf28c77610cf2ccda7d6feab81483",
+      "0028-port-tsens-temperature-sensors.patch": "affa9d47041a6b07f2cfca2fcf992801de3698f5b12447a757b28d178c5984b6",
+      "0029-port-pmic-battery-monitor.patch": "a645eb072cec61d1236aa842fe1ad755362bdf7b371fe5f30adb16f9656ea74d",
+      "0030-port-battery-state-of-charge.patch": "49c4151745541d534e580b24f835c1c5b5a11fc032f2f1965c7735af1a4c8b37",
+      "0031-port-pmic-temperature-alarm.patch": "d6852a50f4a0e6be68709929bddb9e5ad0987a26f9a2d7508151f2fde7967dc1",
+      "0032-port-pmic-gpio-and-adc-scaling.patch": "22f3ae3ad9485f61041c64b3c991264bc6b7e4a850ee157f780a1a4fc5ed390b",
+      "0033-port-pmic-adc-and-threshold-monitor.patch": "535ee1f3b681721c036aff7e3cf484057b5fd122e054f37c587523b06bee1a37",
+      "0034-port-crash-capture-and-download-mode.patch": "476d606ad2a1313c816b2d3525e3d65db9d29deeb252a442a28f2269e2749661",
+      "0035-port-xiaomi-boot-diagnostics.patch": "f90f5592c96b3afcd50b20471ee5dca8de24248a239348b7f59de5daf2d26231",
+      "0036-port-walt-scheduler.patch": "c75282760bd865ef3cc03ad5c2c5aaf6ae46f6ad900043421088a764129afe1d",
+      "0037-port-cpu-thermal-cooling.patch": "bde749eeddddb118d7a2d4835d4c3f5cf079fd9ed844fa930611a4cc8f8a527a",
+      "0038-port-usb-phy-and-repeater.patch": "3d4134b903e20b63f9fb4f1c21ae157f1cb25724a0ae41befd64e7d4bfda5c07",
+      "0039-port-geni-gpi-buses.patch": "0f7153f7308f6e7ca8d8ec7c5f11513f3b886510705e287c872b186251ed8068",
+      "0040-port-remote-services.patch": "108dc0ce875b5af4d75af2b34aa8f61bf82b6749fedbb894c544a2046ab5235f",
+      "0041-port-charging-infrastructure.patch": "85faa6efdb670b6d9113e0a9cbb379d377b58bac2c5d62319d2f5d00e5429acd",
+      "0042-port-geni-uart.patch": "e0d4678eb735de652187ba968132e4a3f5a5c1db965828010b20c814437671b1",
+      "0043-port-wcd-usb-switch.patch": "046e4a3ebd66c18f030dacddd6d91dc98ab07e81586c26920caf312569667eb4",
+      "0044-port-remote-processors.patch": "6398aa5ea9410c8059c3a3b93274be2aec72864dcd59cbbe75b314835b1924ae",
+      "0045-drain-mca-log-callbacks.patch": "7d0a8afa6beeaf8359097689ffa5cc492c32c73228faba068f6f77f5538a66b8",
+      "0046-port-charging-platform-and-ics.patch": "45cde1d0af476d3b6cebb84455730c63f74d639de6b1a3a596cdfaeffa443dd9",
+      "0047-port-usb-auxiliary-drivers.patch": "1483644c1a8d97ebae0161d2462b972d64ec278b1eb9d293af847f37446a6dc4",
+      "0048-declare-charging-protocol-interfaces.patch": "67dd0ffd930cb1a8009edef1a4fff40805e458663da9906104b675d39cfd2e90",
+      "0049-port-charging-protocols.patch": "22f82b57b706b88c2b904130c310cbe1238f5270e866aee6aa61d35375264818",
+      "0050-port-msm-performance-statistics.patch": "03ed72d2313e7aa5bc19dc23df7f8350da315e28c60f846049b3d2da811a57e0",
+      "0051-port-panel-powerkey-fingerprint.patch": "7db16aba00b6dd8fc27201644a55ec2d89cc27c0501b943687e7e9c9baba811b",
+      "0052-protect-named-votes-and-declare-fg-panel-interfaces.patch": "7490724695367f97de955bcaddc57a9cc5af20e17fe2b9909041591b9cd7ef8b",
+      "0053-port-battery-and-panel-business.patch": "ccd7530d8eb66a860d49ddc99588daaf1b3c09f8cc81ddcad9b14c78a6ba5985",
+      "0054-port-dwc3-controller.patch": "fa3818fa20c7d5cf527e5e2dc65120ec385dd6770eb81afaf26bf69874e86d82",
+      "0055-harden-voter-publication-and-smart-interfaces.patch": "d635386e0533bbee41d6b407e3dcf22bf72f7d74c7a76298054b249ec0bbe745",
+      "0056-port-smartcharge-soc-and-telemetry.patch": "678e2c8e70f4a7a0b0fb837d42dcbd4e470c06643aa12745d3ed9ab126b9a924",
+      "0057-port-onyx-gpu-and-synchronization.patch": "7ea3c23373c1eb4170587dfabb649a4559520f72669e03341215118e8b3f4291",
+      "0058-port-nxp-nfc-transport-and-file-lifetime.patch": "8c6acbb9d1dbc70dfdcaa62958a848c7479d8d4d65fd8c0ee74a29c2d0e887cc",
+      "0059-port-usb-gadget-character-and-functionfs-drivers.patch": "4d6ea95a1243d310ee4ab16cbc6ba1cff4cc3023e37ca184d1b6a81423765a50",
+      "0060-port-typec-altmode-and-audio-switch.patch": "14001b86d66bb014809600eeafd2badb3a1f3b7c554b366787417938d9ac5a72",
+      "0061-port-virtual-address-minidump.patch": "60d8f18b444585faa6c11cd26d0ae00ece16a3ead0e8b06f96642a037f557039",
+      "0062-publish-immutable-smmu-heap-callbacks.patch": "e28964a0019efe93e468227564054057778962ad73602fb20349b285a53428ad",
+      "0063-port-si-core-secure-services.patch": "26be494094c88d94c212371c36f052996386596eea586279722d2b44cc5e5f3e",
+      "0064-port-display-support-providers.patch": "2ed7f9ca25d3399f7925810357dcfaf7f0fe9c567b5e3048dd4c6694f55fa7cd",
+      "0065-port-onyx-drm-display.patch": "93e4e46f49d9f5659c4a18046498d6de780afd58a1ade12fefbb5bdc5f2c2607",
+      "0066-protect-named-fg-voter-operations.patch": "0c3bdf02cce6df5e73ef1d0192d4e4bf7af56e59329936354fd539c19926cc81",
+      "0067-port-onyx-fuel-gauge-strategy.patch": "bdcf287896569b117e8e86098e7306fa502f30519f099166afc80822aa17bdd6",
+      "0068-port-verified-basp-transport.patch": "4bc3198f2acefb2826892b314b4790f65debabb7e4fbbb547565aef37ed0ce64",
+      "0069-drain-charging-interface-and-rerun-named-elections.patch": "00ab2a3f13d3cbdaa3546e5da6de0d2da09fd9721fc79a053389d99259006166",
+      "0070-port-jeita-and-wired-quick-charge.patch": "bbe119df0b503091efac62551138c80c97d2c66a01ed4715aacc8472dc4e848c",
+      "0071-port-audio-foundation.patch": "96f44de81318ba82862769468b0a902e53dd9ecd481ff7f8595882a8fc6dd940",
+      "0072-port-onyx-nt36532-touch.patch": "8c6ea3f0c03387f4731e6c293869112a2a70dcbb7e17f571ae986afe19a89b80",
+      "0073-port-audio-notifier-lifetimes.patch": "8fccabcf5729ae1da819e9c559b1ec0e00d20b86bc9aa57d1b6d531171c052a8",
+      "0074-port-audio-gpr.patch": "cf6e246f48b98c744137abaa6c075b7853ccba6c5ead80d01b404ea47458a3fc",
+      "0075-port-buck-charging-strategy.patch": "353136a4f7de2a480aaa28cd8c0d5945ca07b425c6089434d4b82c135c02fe40",
+      "0076-port-wlan-callback-pools.patch": "f32444e4014dc4fa2021097d696a0f4cb3a129330a3df1ed9e1b117ffce78159",
+      "0077-port-charger-protection.patch": "c70b35483eab62eee5eddbbcf8676b0cf6f6166d66965fecd0009abe8d56b1eb",
+      "0078-port-pcie-mhi-providers.patch": "0ec35a36a20dc4e839b17f2bd1183b4195223a7d76bcdc68c3c661b42bec6968",
+      "0079-port-audio-spf-clock-ownership.patch": "370f23bf33119edf9028820cbd952b93f08d04ec99a92a81ef6b63d3870f3df9",
+      "0080-port-charger-business.patch": "c18779e823187c40f2c7104aa2dac5b4e2748b44924ff1c580694741ff09178d",
+      "0081-port-adsp-loader.patch": "61aa7895bf8eabe71d985156439f571ebaabe961a405d637d1ef58b85a75f20e",
+      "0082-port-battery-mismatch-monitor.patch": "262a651b24fae578f7794a0e73046603ddc409a85a468ddb61ccd535c32acaf2",
+      "0083-port-pd-authentication-interface.patch": "5ddb1b98cfda44ce218fcfcfc25f9baa3e170724f75e63bbc93e7b48813540b5",
+      "0084-port-charging-thermal-policy.patch": "ec31509a0ef64121fdf13739bcb300e1ffe11a149a546967ab251e695f181810",
+      "0085-port-wlan-qmi-file-lifetimes.patch": "b528d9fbe1246293d756d5081f511be6a88a62583b5694ac215d89f4c0cb9266",
+      "0086-port-gsi-qdss-usb-functions.patch": "5102a746f9a89e0b4ba35d3c5fe1f9922f53593ab462557213376aeec95e1a4c",
+      "0087-port-audio-buffer-ownership.patch": "93c83780b0a6f4613487ded05f32d102eb63ad2cae932a635adb224e88df8ef2",
+      "0088-port-charging-path-control.patch": "bfa730589e7f07807395eaf2010886ef0ceef92cb36db2e2109fe24a7d1ef610",
+      "0089-port-wlan-utilities-and-smem-mailbox.patch": "2fce1286d1c17a4767b87327c17c4d31f27b29de775455cd2ae74a436e76f945",
+      "0090-port-native-audio-packets.patch": "1fb0b919a335f19d8c897487dd28371ca348b7b5d88ea779e89ccbd9f3a0895e",
+      "0091-port-awinic-haptic-lifetimes.patch": "f53c9d9469433f3feac24925e4e43a37e109657313ff176402d97da9a9a7faca",
+      "0093-port-native-audio-resource-manager.patch": "81bd3c6f58e8d918c8be4ff289c0a609392eba9538ae349ca158bdac7f3dd6f2",
+      "0094-port-native-ipa-transport.patch": "a89424533ee5a612ab1d37eaa461adcdde7b3b99493063dbe369080b4e64b513",
+      "0095-port-native-soundwire-provider.patch": "08dceca16a05f26a36598ae350376dbfbea01647a9285012a5d95976cd053edb",
+      "0096-port-native-bluetooth-power.patch": "ef74d272a039b9796aa549f8701e6298f50753045f0747265df124a9107f1fa6",
+      "0097-port-native-cnss2-platform.patch": "2a9d120edc94d37ee6c346799b6a4d1a546d05b7be93fc0c73558595f83b3d72",
+      "0098-port-native-icnss2-platform.patch": "4c17981c9800170654c24e72a9231d771fca0f7bd79ea42e6b78cbbfa476e638",
+      "0099-port-native-soundwire-controller.patch": "bac9e95f88fded202efa2138b53bc4b97bc53d2e9328907818d2c3b80f38777f",
+      "0100-port-native-rmnet-core-control.patch": "cd1d0208020579a7ee884743ecc5b438eaf091f0ad7a552ffaca32b575a63f3e",
+      "0101-port-native-bluetooth-codec-soundwire.patch": "d066d42ee5dd6d9cb2a71b50abd2462ecbbb4d88c00c3d94a2b9754db6b8a91c",
+      "0102-port-native-kernel-relay.patch": "2c2f387dd25083d0da88b4917f4aee5374bf0ff9c6c0a8662785964b7a6d703b",
+      "0103-port-native-wcn7750-wlan.patch": "ebce4f985a338d024c1bd0532b07b5e56afd407bc622125ec1416e01fc148e78",
+      "0104-port-native-wcd-core.patch": "9bf0c596ecbe4decec30e0ab0de239ac268cf9a43b573e57ec2e664762aeb002",
+      "0105-manage-clock-provider-lifetimes.patch": "03827712cce6e0b66faec9ce563e45c836967934d48aeec783a519ac54350f1f",
+      "0106-port-native-lpass-bt-parent.patch": "679a81c78abad8cb1e40c1c0812f9674fa7d450417d9166da6ddf9214c4deec6",
+      "0107-port-native-typec-audio-notifier.patch": "4ece3bf5c021c26e42ee21099874a689d8db16018183548be0e90246d73d379b",
+      "0108-port-native-slimbus-ngd-bluetooth.patch": "7e35d774de24f23fabadb2561920d2321650fe1f3ccf27640765785a6ff98a5f",
+      "0109-port-native-lpass-cdc.patch": "56f738423d8c0efcaeea80e0eb78ee57eb57c6577d183c23a5f42feebe4e3a4a",
+      "0110-port-native-camera-flash-led.patch": "b5b761e7a4e27ead72da792244ea01caabb3e6aae98b8e0e03855d078b50c5f2",
+      "0111-port-native-video-codec.patch": "ba4f735abf6095b528742f58a50d45a14f7321267f8d526be1389b55624bba59",
+      "0112-port-native-fastrpc.patch": "9aa9a81dd434a30ef27beebf62b046a8b8d6b87a21e2d67881dec67f4459eaa5",
+      "0113-port-native-camera-auxiliary.patch": "a747f97a27c57c7dbb48ab8d0f211c9c37c6abdd5f2e37e864d7712e6c82d1bf",
+      "0114-port-native-lpass-va-macro.patch": "9a322cb5e7ce91416e379a88dab8504a525bf280da4b0d4a4a45cb69dd829fe2",
+      "0115-port-native-rng-drivers.patch": "4e355b0fcb0981a800277296f53d95ae129dd72e23b1b1acb90fb2f35f3837bd",
+      "0116-port-native-eva-accelerator.patch": "7573b6adffd8cc660dcaf1388270e7c52dbce6fb375d9282edc4bf37488915bc",
+      "0117-port-native-lpass-tx-macro.patch": "b802424859043e542cfe732c2c24d06c5e9df0e6f847ed81a8433afaf7bfff50",
+      "0118-port-native-thermal-endpoints.patch": "c83ab61e33b72978638a4608a0805b7b2170554108f3b368c1e62e3f9c2568f7",
+      "0119-port-native-main-camera.patch": "7db482a3063a4bca5308703c956db7ded3d93328399053401c657f09be50c10e",
+      "0120-port-native-lpass-rx-macro.patch": "7f7b32db824291f31906dc0e8931e68827780cec6fb1c3edff43dfb87729978d",
+      "0121-port-native-wcd9xxx-mbhc-support.patch": "e340bada3a763be145d1966a7fe81d0e44a2ec1cf6d265e2a3fe2901a6f9e5ea",
+      "0122-port-native-lpass-wsa-macros.patch": "2adc637cf0eda03ae76a0bf9154a29284c6996ab17b1362fe30cff0fb69ef5ec",
+      "0123-port-native-rmnet-extensions.patch": "5e3378822cf32d1ca30192c3bcf92510360001876fae66f62b535e702fa5efc2",
+      "0124-drain-soundwire-slave-irq-domains.patch": "a737935518988cd81542c7f3ee9376e18aec67a11295dfba5c7028d24cb19e2e",
+      "0125-withdraw-external-display-codec-ops.patch": "8b2cb8387bf38cd25d33b9cab8a2613d98f6819291af50cbfe665b1c5612b5f4",
+      "0126-free-unpublished-snd-event-clients.patch": "059aab36d740baab66940c6f5ba251a8fb8956c9fcfa8cd55abb3ad0f83693b5",
+      "0127-port-native-wsa883x-wsa884x-codecs.patch": "c7d42a248f5ece47ce0160a87a4f7ec0c0a56c4b748767a833ae5968b421bcb9",
+      "0128-port-native-wcd93xx-codecs.patch": "f645a1931264eed47132e818003f4844b5e9dc48f113073ad0309ac2a5335948",
+      "0129-port-native-audio-endpoints.patch": "e9be04a1773c7ae51e4cf7b29fee6319fdb1635039dd9c57e783cf423678936c",
+      "0130-port-native-sun-machine-audio.patch": "1200317148b03c99cf7580a06b9de1fc3e454f82d8ecc2dab2e35a52939f2e31",
+      "0131-port-native-aw-sia-amplifiers.patch": "08a8ebd280785a1b7f3ed5ec9c2c4732fc617562eb0c5f74bc66d5c9640dc262",
+      "0132-port-niobe-ufs-phy-and-probe-errors.patch": "3cd2a0391cd56f8a0aea68f8b8ab6eb2de42c89ebc75faaa723c6941b436d368",
+      "0133-port-tlmm-vm-irq-domain.patch": "e4fb1262d5d2c3014b05280ee7fbc84d5f55f17d746a952f1ca5ead158603293",
+      "0134-port-native-qti-fixed-regulator.patch": "f8b4a7c92349c1aced1f7106423010e6ca0c029b6f2a7d6c933540fc703dffaf",
+      "0135-port-native-glink-adc.patch": "54d014f1f11ccea029cafd4305488543cab3ac03a425d754e5e0e1b45b9faf55",
+      "0136-port-native-qrtr-transports.patch": "9dd43831fcfb0ccf7438bef2211a2a45818d4d7e76477acfed391ffa1ec75e94",
+      "0137-fix-smmu-lookup-during-iommu-registration.patch": "308a4a159d092c46c4b2e5c5261ee13d20086422e3533b474d320b1411ae5f4e",
+      "0138-defer-gpu-cooling-until-supplier-bound.patch": "cb00293e88bdeacc31039814df745c51593cab7566bb42b219815fbdcf521a10",
+      "0139-add-opt-in-boot-probe-watchdog-checkpoints.patch": "3c020215cfa61d9fb27c8941bda174629265d0954124fdca360c5d41baf907ed",
+      "0140-map-qualcomm-duplicate-funnels-to-real-registers.patch": "5b6651fdf3dd6354d76b39fb693f7bc1b7102710c9c2db55de7dc9a799f1b684",
+      "0141-reconstruct-and-validate-gpi-ring-pointers.patch": "7ee4dd20ebe47e133fa4693b282128cd5acf7b017290a37c7a188a4462b785b4",
+      "0142-preserve-walt-runtime-across-delayed-task-migration.patch": "ad617c74d722c0f747d1a32cfc2030a26e7fea2aa2c8a03fb945b2b040b078fd",
+      "0143-detect-first-walt-group-migration-underflow.patch": "d0d63007185a67aabba6cb8f68b776db9696ca44fc4829849ba615ac47dcd2c8",
+      "0144-destroy-wlan-page-pools-in-sleepable-context.patch": "97602b91651875a799ad79ff5df81feb5c84f610c3e50bbbcfe4eb2d59ccdd31",
+      "0145-port-modem-remote-storage-shared-memory.patch": "025da66825978b85d1e827c0f43e5094545e2067332111b7a7b0945c2103f5e0",
+      "0146-fix-live-boot-video-queues-and-sparse-audio-ports.patch": "270bb98324f5eb27161750b3f131374d2de2cb2ec1b356154efc19c15d070623",
+      "0147-read-only-required-fuel-gauge-identity-fields.patch": "e7b8534b09c2b2d0af4cb8777240f02879f66f04ebf5b693058cc10496c70731",
+      "0148-support-hardware-uart-fifo-depth-and-log-fp-ioctls.patch": "7787e10ed1dc6fe3a65c8d67cb82dee8876a4681fb2529ac3c2fe234d03e54fc",
+      "0149-preserve-idempotent-fingerprint-irq-disable.patch": "a6037e8dbf5c1ba3c5a2c7d083057d403b46e4c72ab29bfca34afd66ea8e7b7d",
+      "0150-request-fingerprint-irq-on-legacy-hal-enable.patch": "4816607cf41300bcf12e2a31eca3b77b363326053bb32a0b37dac9ffb9ad31d4",
+      "0151-preserve-camera-request-manager-entity-type.patch": "a7adb4ccc6643aa7a4f18c3defaa00cffb069a3030220a33f6ce6d6b7ef1c7ad",
+      "0152-bound-display-ept-sleep-within-remaining-time.patch": "b0c52228f4a9550776bfa1f95281aa265ce6beb754030949b2e437162aa9859e",
+      "0153-use-managed-display-bridge-reference-lifetime.patch": "2cd6ec5324420099f14ce696a95cbd452c0bed0cf6b398bd3552654f1cab5229",
+      "0154-restore-native-ddr-and-llcc-bandwidth-monitors.patch": "022fea626cc4148711fa140b93df7505dec421d610d35466aabaa906b9aaa19d",
+      "0155-defer-buck-policy-until-pmic-provider-ready.patch": "2c59b186815143b7fd1fdc52bc81e7e2e684101a679a9a3f9b3ca978b6c1300c",
+      "0156-use-private-display-and-eva-fault-handler-lifetimes.patch": "ae6e3350382ed5705694f778d0883f4ac8824bc87bbaf169eee42fbf908daabd",
+      "0157-use-presence-queries-for-valued-device-tree-properties.patch": "1f8da65dff50e0d6907408b35ec1abcace346efe3af25342e2bbc3208ae0d956",
+      "0158-preserve-optional-audio-hardware-vote-device.patch": "b41872ff59d568eed3e799c325140cad426058e31dda698e797a8667a7231cad",
+      "0159-unmute-analog-microphone-streams.patch": "6d188526689d15d389978b5446808f52d01451ef203e10c57990f0dc9c46d040",
+      "0160-restore-native-silicon-integrated-vibrator.patch": "c4b6051281c7b9e5cd92bf23ab361192f0f70dec0c1e90650a22eeba67bddb0d",
+      "0161-use-presence-queries-for-usb-supplier-properties.patch": "8292724b97b2aa762d795761d33f5e3603d1192f1ebe9a900150415dfcfc71c7",
+      "0162-observe-initial-charging-path-without-changing-gates.patch": "11cc3f3482341ff7e2eebb5606f8060daddb7748ade119798fe154c9f7d36e9f",
+      "0163-map-cached-display-carveout-without-shmem-file.patch": "3f11d3248a4ddc765aed38aac1950431ae05bd5afb43c813280afb261d484b46",
+      "0164-select-display-vram-after-kms-address-space-init.patch": "89303e017f6e752ea2edd6577f56bfd9f8fb8a1c72eb4c7103e2ecff4b8b9f1c",
+      "0165-start-vendor-kthread-workers-after-initialization.patch": "fb7973a09122dc1615fbfaba55b499a8e8e298b0f37f198c5b0f38fc6b767598",
+      "0166-account-only-adci-accept-protocol-waits-as-idle.patch": "159f287ec908c45462292180248bde163e2b256b389a69b58090050af5c5e744",
+      "0167-preserve-optional-battery-monitor-fg-type-default.patch": "3bba1957aa4d48cc9cb2deb4fec9d58807f05a12711885e426ec3ea45867839f",
+      "0168-restore-only-framebuffer-backed-display-clients.patch": "cec9e078cf2b89cc8c497085a1af8a3eff2c0a9fd1f24618c36b3bf0af7b0ee8",
+      "0169-retain-shared-wan-napi-until-netdev-removal.patch": "d4e24e4afa6ba6ba6b8af73ab8d211c9e5197ed7e6f124a0082b985c81299a9a",
+      "0170-dispatch-only-supplied-wlan-data-stall-settings.patch": "8db81965336cd7293be827a52a9b465f864840cf6d61d648610eec477a072281",
+      "0171-serialize-soundwire-bulk-transfers-once.patch": "b670b7dbb445a02a181ca8eb71faf95bcde0a5cc0d174ca02b39cdaa73e1b2db",
+      "0172-allocate-unique-eva-instance-debugfs-ids.patch": "2ae6e38948c75b1e5e81e17e1bb81ff06e56fe1eca0ccaabffcf3edc6f657a95",
+      "0173-release-wan-producer-tx-napi-in-pipe-teardown.patch": "c4aa212f19fb40a0d4f009b5f70ed5565a310e8ec25f0332af708ded093cff66",
+      "0174-fix-bluetooth-power-ownership.patch": "13ab2c7095711384c15ee03c2e9743b0a245ee44c86d2831baa967edd1a81e1f",
+      "0175-fix-coresight-platform-remove-clock-balance.patch": "3e902feebfc63d3aac372749843340e68d0cfbe19a62048167a29181e5b942de",
+      "0176-quiet-synx-zero-timeout-polls.patch": "cd5241ee7d3e63c306143c563c90888b457889e375fc61605599c4f3676bfe57",
+      "0177-classify-duplicate-camera-sof.patch": "d4e942825339c688a913f0e671b41e772a8d9823165550af5d9cd0c990a826bd",
+      "0178-handle-optional-wlan-cooling.patch": "b18ce9a51bc21c4f5cf71cc70dd69c455c99a2366fe754ae7b023effa631ebcc",
+      "0179-quiet-wlan-power-config-noop.patch": "7e1381a5bf72d06ed7b9e66cbfc75dfce77c226afd5c0ba87283e633d8260706",
+      "0180-port-mi-thermal-interface.patch": "dfc0518464d091b125871630445d8fd95a275528efb7179642a4df3338bec7c1",
+      "0181-port-active-device-services.patch": "d0938112f2864367cb8badf45e3af0ba7ea92d8ce2c13448d288ba5a98fcfbf5",
+      "0182-port-platform-providers.patch": "be4abb033d2919c14d80ca40fc3c77cc7d6aad6a1932f92827225596e704e018",
+      "0183-fix-scmi-native-trace-charging-policy.patch": "a5ba3b84c804595d870517edf57a7fce875de7225e8f095d80ccb4eeb1e33f1c",
+      "0184-port-csr-streaming-trace-controls-and-kernel-findings.patch": "54c8199737a521063cb82485e4eef97de3ca1e8566dd5a9c8fc2b11b4f642e45",
+      "0185-port-active-vbat-overvoltage-monitor.patch": "55213511052d584bd46e0d3f99efa4d6e5fd9b7f48c150b9b41cc7c2f72c030e",
+      "0186-port-active-memlat.patch": "6e949c3ec7b92d91c53485f13d2b873a68012b4f3de2bd27b43389765ad0870a",
+      "0187-port-active-coresight-cti.patch": "bc20ff188888cfdc3963e8d8053677242f551269f59c287db713661a39da4345",
+      "0188-port-active-mca-qcom-sysfs.patch": "ff1a19fe9eb456388f935693715cd366e71bb033164abfd512e0d9a3523595cc",
+      "0189-port-boot-diagnostics.patch": "5b5193e45a78d02e9a4090930463cf9ba2f8678057f9bf12af1bba2d01a91a8f",
+      "0190-port-disabled-mca-ibat-ocp-monitor.patch": "ddc4b3ed28b76912bc368dc1d5b04e35217c21adad9c83b7d596ffb675698365",
+      "0191-port-disabled-mca-business-misc.patch": "4ae150b3e69587460279fa60d145210e48056ece014c61040c555914aab144c9",
+      "0192-port-coresight-qmi-firmware-control.patch": "f1162b848f2112d84d0b8e8aeead0becc3db76fa8621920f8f64e0ce306db875",
+      "0193-port-bounded-coresight-tgu.patch": "abeb1938be53842889fd05a727353e35b2c088499a85b127a8fcf66a791fb46e",
+      "0194-port-coresight-dummy-and-remote-sources.patch": "84e4ad0d097ceb91c105ee7208ca257fbd4441b693684d5bf82f773366eed903",
+      "0197-port-native-scmi-statistics.patch": "6fe8026763c7e759451d5e57e0387d79c76048f74726f0c3b7df0c722d7701a7",
+      "0198-port-native-cpucp-log.patch": "44afedda21f57c94a6c45cc6e95ff70a8bb20b5cb0d5d702fc97f1884c976995",
+      "0199-port-native-c1dcvs-controls.patch": "e6bb71ae0dbdfd1c050b94c9815d68c7b3c701ca025b87503bc7954ee44b18f1",
+      "0200-port-native-dynpf-controls.patch": "32f615a42c6972f1e4f52e456dfa742a974319e79ea9b333cd5dfbb5ef7f6243",
+      "0201-port-native-cpucp-fast.patch": "dac42e9bc172a5599b52ec5752b8ed98acb38dd07d9380e67a0463a440799a8d",
+      "0208-fix-provider-translation-unit-headers.patch": "68f6ccc60258f4a3fa576d44b2b83978e1dc483e43dd384c19800f3880c5b96d",
+      "0209-port-subsystem-sources-to-sysfs-api.patch": "90444537553aae983cce7e737fcd74a49f6864f67f9aeb7da5de0ffa5cc4069b",
+      "0210-port-native-glink-packet-provider.patch": "f9fd595fea0479a93f52958df308dd452525ffb2353031730978ba0538cde7fa",
+      "0211-avoid-ibat-current-macro-collision.patch": "17e9df70e76efc4ea2c173bcda14c40556f48a290160b62cfe106dfbec29d363",
+      "0212-fix-wlan-wdev-wiphy-lock.patch": "81479fd4a6fb2c7e378259086bb9826512bd76c44e7d0a167446703e36c4cab4",
+      "0213-port-native-cpuss-v4-statistics.patch": "f5721ca399f2b95dd64b3ec48b2d1b60de8046345738c67b847b4ca89e5a7429",
+      "0214-port-native-cpuss-statistics.patch": "78c3d8ec3caccd08e9e18cad966524384ceb5cbe260562ec286495bfda78f125",
+      "0215-use-dt-selected-cpuss-config-mmio.patch": "44b1eb65daa1b67f4369cf460016c6587315612a88e07c0e898da39dbccce99c",
+      "0217-port-lineage-qcom-lpm-to-6.18.patch": "1f36b81032ee9a06b15b2aae75c59ecebd8a596ef6ef01dfe272c34e9e6f9939",
+      "0218-port-gunyah-resource-manager-booster.patch": "96915cc215ae06b6a434676bc437172eec7f2ce23bda422a87dcbfb126872759",
+      "0219-port-native-tme-qmp-client.patch": "708bf258aeccdc9fcc31c8961b2573a991636394da63c9eb107bcc3cdabe8238",
+      "0220-drain-native-tme-mailbox.patch": "c3f74e44758ebf10a8575985755551e2a33b1e92dccea9f040db88aae82d0a30",
+      "0221-port-native-gunyah-panic-notifier.patch": "36899ed8cbcd909af67f088a1060bd58fbac23783a15774b8148036ad3af9560",
+      "0222-drain-gunyah-doorbell-rx.patch": "2d3c322784c657d14b0a4a8f5386e05fb2d16c4caf723db3dff4049c72552702",
+      "0223-bound-gunyah-panic-polling.patch": "e8709eb1f7e2e19b7bbb5e270a60a6927d9900a742fde273845023ad91fd9be4",
+      "0224-port-native-qcom-edac.patch": "af32867164fab11dcc5444bbc97ec7de4d0f850aec94536e385194ff767bd5c9",
+      "0225-drain-llcc-edac-child-before-parent.patch": "c3d8d957cbeb315ddebc39e119be7c57623b3405daeaec92bd773ea5570dbd7d",
+      "0226-port-native-cpufreq-hardware-debug.patch": "8b2b6eb83c8cf9b50ebb86710853c517484b25e4d7303147eac241d661384781",
+      "0227-port-native-charger-logging-reply-lifetime.patch": "4cf3f63235229e9f952467aba538109e69e83dd69f3e6b45bb78e3f5a133f314",
+      "0228-port-native-sysmon-subsystem-statistics.patch": "2b10842e8ca30464e29f3aec60219269256ac59fb3f345f4ad0f9eac8904f29f",
+      "0229-port-native-system-power-violator-diagnostics.patch": "7af13366ccf61c30264cce0244fc0560ea5174316f89eecd9797c4f7bc2e2f64",
+      "0230-port-native-i2c-pmic-and-debug-lifetime.patch": "b005ce5a33a4842381f2fac08aec81d8ca8c17255b448831cac33ea4049eb9c6",
+      "0231-port-native-battery-diagnostics-and-keyed-reply-lifetime.patch": "94b4a0c4808acabc79b830f516b1acb8d62b514c65f9158d841e491c4790409f",
+      "0232-port-native-hung-task-task-storage-and-lifetime.patch": "5241f3bd2dcbede6b6cb04e3e3e4fb1845fb614cd7b95d3d37083ac67655b2b4",
+      "0233-port-native-iommu-diagnostics-lifetime-and-map-cleanup.patch": "7d5f10f6c9e2c622e7edadfc606ce884389f4f4bf671944342d355b340a9426a",
+      "0234-preserve-native-qbg-when-votables-unavailable.patch": "3a7e73ad2a10b6e99aec9626c735f056b9ec4f6063aa562b507fefdc59d81718",
+      "0235-port-native-gunyah-hvc-backend-lifetime.patch": "f50381fd6595712a10454c4672ba93ab1a53d8c7abeb26e274e4ed98955af2b2",
+      "0236-match-stock-onyx-battery-aggregation-request.patch": "b2c86fffbd92fbf2f0d7a4301d3a85bea71f934a3dc3bc13c4c096be58795a83",
+      "0237-port-native-block-backed-mtd-archive.patch": "60cd340ad6e810691761f998c16c13669436478f4e5bfd1e1fee33ce7696b0ad",
+      "0238-port-native-mtd-reboot-record-lifetime.patch": "8d2caefb7320a675fba4b0b368f95b2860af1f8eb39ce6dc0aa0bd2080cc2bbb",
+      "0239-drain-threaded-power-key-archive-notifiers.patch": "5778e5da5cee5944ee6cc0dd04790a3f16fbbeaa20f1f9233f136ecdd18d9aa8",
+      "0243-fix-shared-amplifier-gpio-retries-and-managed-links.patch": "0d34bcdd7aea3279c9db7da12ca0a8e6eddf3187a85517751a8fa344fe13cde2",
+      "0244-fix-thermal-voter-lifetime-during-shutdown.patch": "d777de1fab4c3a67c98d80d7391fa32e531d8a0f9cd29c18d6ae4d80d9ccef99",
+      "0245-fix-hung-task-readiness-during-parallel-loading.patch": "c29b3108dcc3696597716fcc484c1c0a5646c4601027bfd2cd992d046c7b713d",
+      "0246-fix-monitor-data-injection-and-radiotap-tx-options.patch": "c3e9892e918ed8ebc596c8a895d58d7859da61931bff756513ba64f60dfb5379",
+      "0247-preserve-monitor-teardown-ordering.patch": "6f10a47e428bd297cc30077819fa4b9ce83e1762043cd5d957898c38c22d4ea9",
+      "0248-reject-stale-rxdma-buffer-cookies.patch": "aeb2351b65d8e076b225f9295fc6d51f8fa06a40cc6967029e15921231980a62",
+      "0249-free-monitor-buffers-through-descriptor-owner.patch": "d7338c254022202cc0f1f9d36c26569101b7a3915763c482c45d67332f0afdcd",
+      "0250-retain-page-pools-until-rx-borrowers-return.patch": "cda0ff4057eb9e55e39c89c6e45f003b30880b5b7586e6ed797c8c3ba5c3822e",
+      "0251-add-opt-in-sta-monitor-coexistence.patch": "73e915490b3d85e3a5846c379a404be8aa079428621cf1fbe4dc94f4c7b88ee8",
+      "0252-add-opt-in-ap-monitor-coexistence.patch": "47f41c6a36e7a9a15a8d6bcf54298143dcf65030bad008572cdacef1bf241dff",
+      "0253-add-opt-in-sta-ap-monitor-coexistence.patch": "d99ff9556a94cb5b5da646a88136edb08cded2d57f32d6932e682524aae676fc",
+      "0254-add-stock-airmon-monitor-compatibility.patch": "0e41850b9db8b76808cff8fec569b8a692e951bbac3c10a4961924f9fc882b67",
+      "0255-preserve-monitor-filter-tlv-offsets.patch": "70dc86995152bd57b6f93d2cb4a1c094dcd20fb335ceafc1ec0e3acd25a22721",
+      "0256-add-monitor-wext-channel-compatibility.patch": "53f329be76cdbb73bbaddeda079b9f42993b723adbbcd09cfd44c8ade5d8e94b",
+      "0257-allow-compatible-shared-monitor-channels.patch": "fc75c1a22a3379f858f458c17528738e78c387813d23b93b59b3f790ecca419c",
+      "0258-reset-shared-monitor-pause-on-arm.patch": "9af281cc435bdbc4ab22d9e457ebfff8429853b510c4d42729f8ac8b7ebd9c61",
+      "0259-geni-use-upstream-hw-param-2.patch": "0626599b44634dc9a7065e3971ca294d956170d134c925861c9ee4eb5cc5c6da",
+      "0260-bind-wonder-to-onyx-auxiliary-provider.patch": "f30d54001ca1ce1c595732b9f422428e44e04b435ef213fa42fe17224423e7ee",
+      "0261-add-onyx-wonder-monitor-provider.patch": "5f978c2a4ac9a6b021d57ecbd3aeb0e87dd3fe398af084c4fa4c7106f89e3d9d",
+      "0262-adapt-wonder-transport-for-onyx-monitor.patch": "730ab63e0f5584101ffac3b87548bed3f935ef81030366527bfdcf7c4cecec8a",
+      "0263-add-onyx-wonder-peer-rx-matcher.patch": "36fe0fe9cf2c4aef0090bd8a12b4262f58e3801a5dfe0eab5c0ee56003160f50",
+      "0264-extend-onyx-wonder-fixed-rate-transport.patch": "7f7c685d8facbfae2ac4abad925f6280ccb07272ad41f6a3133b009d401280ba",
+      "0265-gate-wonder-transport-and-enforce-helper-limits.patch": "a7bef046cbf11d17b38682616bcf2cec9892b077550cdf8745d62df5f8c90042",
+      "0266-complete-wonder-scheduling-pm-and-ppdu-accounting.patch": "ed4a79f70b0484c53418c4066bd2d46c0a75298496edb825807d0684109391d5",
+      "0267-add-gated-wonder-offchannel-dwell-probes.patch": "93986d4979231010f41944ff2b59ba0086f18bcbd94c5850088649ef99940ae1",
+      "0270-align-functionfs-logging-with-6.18.63.patch": "610617f1d62b6a81a47d0920a790e4611d004740166e7fa1f5ceaec077566e94",
+      "0271-account-qualcomm-unmaps-in-iotlb-gather.patch": "195f2dddcb3738b997650b8147b217834b50ce83651295bec0c1b63d68f9dc94"
+    }
+  },
+  "incremental_patch": {
+    "path": "/home/loukious/Android/onyx-wonder-20261116/port/patches/0267-add-gated-wonder-offchannel-dwell-probes.patch",
+    "sha256": "93986d4979231010f41944ff2b59ba0086f18bcbd94c5850088649ef99940ae1",
+    "changed_files": 29
+  },
+  "preservation": {
+    "status": "PASS",
+    "preserved_stages": [
+      {
+        "path": "/tmp/onyx-wonder-lock-workspace-20261116/onyx",
+        "files": 4973,
+        "content_matches_preserved_receipt": true,
+        "receipt_sha256": "7849c327ca9a39282da2b9ff8e4d37947e7277e3bd32316fb60e3cdf99e1d90d"
+      },
+      {
+        "path": "/tmp/onyx-wonder-coex-lock-workspace-20261117/onyx",
+        "files": 4977,
+        "content_matches_preserved_receipt": true,
+        "receipt_sha256": "4733fb0f76cec1362929f7c888f8a8bd63077fe8183175741ba5783a89313ded"
+      },
+      {
+        "path": "/tmp/onyx-wonder-coex-lock-workspace-20261117-02/onyx",
+        "files": 4977,
+        "content_matches_preserved_receipt": true,
+        "receipt_sha256": "c1beffd898580cf14d98d7d0e7e57e6009662ccfa58eda4138e59a96cf3049f4"
+      },
+      {
+        "path": "/tmp/onyx-wonder-coex-lock-workspace-20261117-03/onyx",
+        "files": 4977,
+        "content_matches_preserved_receipt": true,
+        "receipt_sha256": "b6a3e54389832f995932b2edb784c0a501e387ce247f93988e820414ff01aba6"
+      }
+    ],
+    "patch0262_sha256": "730ab63e0f5584101ffac3b87548bed3f935ef81030366527bfdcf7c4cecec8a",
+    "patch0267_sha256": "93986d4979231010f41944ff2b59ba0086f18bcbd94c5850088649ef99940ae1",
+    "final_qcacld_build_sources_checked": 2177,
+    "changed_since_final_qcacld_build": [],
+    "wonder_sources_checked": 22,
+    "changed_since_wonder_build": [],
+    "inventory_sha256": "821f8cffbe95f4f7624a2f8cf163bfadbe38408a6c69799d6786468032ba75a1",
+    "replay_sha256": "3a39f91c2388e062b475d0c21ea2a4f4354113f9a4f3c83fc3c0d2b940a6fc17",
+    "final_imports_sha256": "430063187daa62e1dddbb808cad7148fa88ad2e69666d12ab757a45c67b66e9a"
+  },
+  "export_impact": {
+    "scope": "Direct original Kleaf Onyx target .ko artifacts; qca exporter excluded; other artifact trees and device modules excluded",
+    "baseline_export_count": 993,
+    "new_export_count": 993,
+    "changed_crc_count": 355,
+    "external_modules_inspected": 399,
+    "qcacld_consumers": [],
+    "changed_crc_consumers": [],
+    "errors": [],
+    "new_sha256": "3eb0a7812b8a1c46909e391529235d2b6d2a2d0675b4585ba57b1551b64eb0e8"
+  },
+  "native_wireless_reuse": {
+    "status": "PASS",
+    "source_repo": "/home/loukious/Android/onyx-wonder-20261116/common/net",
+    "receipt": "/tmp/onyx-wonder-native-build-20261116/native-report.json",
+    "receipt_sha256": "8991dc8aa55490278c74cbeb69c801bf5fc1276f06c772901116ab17cbf6e5bf",
+    "reuse_scope": "Original native build source identities plus actual module and symbol-version identities; matching Kleaf kernel identity is checked by each module runner",
+    "checked_sources": 137,
+    "providers": [
+      {
+        "name": "cfg80211",
+        "module_sha256": "24298abb66017620f87572d7d601d0479f3e23cbf827b66ca1e52908a60c33ef",
+        "symvers_sha256": "eb38c2880787063737bc8e0da8389bf91b981428ed41f8fa234bc6568c834857"
+      },
+      {
+        "name": "mac80211",
+        "module_sha256": "0167bd8b5c5e8960d7562a42cd4f47f804aef40fe9bf1577de8c2e596a725011",
+        "symvers_sha256": "28be18d2b93f074c05e9331f8bb8b03316a950f70efac7c77fcc9f4972848cd7"
+      }
+    ],
+    "mismatches": [],
+    "earlier_check_limit": "native-dependency-reuse.json inspected Kleaf workspace sources instead of the original common/net build input; preserved as failed check"
+  },
+  "mosey_native": {
+    "status": "passed",
+    "scope": "Offline source build and instrumented host tests; no Google blob or Android target execution, installation, deployment or device command",
+    "host_validation": {
+      "assertions": 56149,
+      "concurrent_start_calls": 4000,
+      "target_execution": false,
+      "asan": true,
+      "ubsan": true,
+      "cases": [
+        "disabled/non1 environment and unrelated symbol pass-through",
+        "LIBC dlsym-version lookup failure",
+        "exact argument/radio/config handling",
+        "empty protobuf",
+        "null and size-overflow rejection",
+        "allocation failure",
+        "missing original-start safety",
+        "8 concurrent lookup/start threads",
+        "launcher process environment/argv retention and first/second setenv/exec failures"
+      ]
+    },
+    "limits": [
+      "Android links use installed NDK28.2 / API35 compatibility stubs; this is not a full Evolution/Soong product build.",
+      "The host harness includes exact production C files with mocks for Android logging, dlsym resolution, allocation and exec; it does not test Bionic runtime or SELinux transitions.",
+      "AT_SECURE, capabilities, loaded preload, module integration, Binder startup and RF behavior require a later authorized device capture.",
+      "No channel schedule, TSF, station or feature command support is added to the current native FFI."
+    ]
+  },
+  "collector": {
+    "status": "PASS",
+    "validated_utc": "2026-11-17T00:33:07.062222+00:00",
+    "tests": 16,
+    "scope": "Offline byte-preserving collector fixtures; no device collection performed",
+    "returncode": 0,
+    "source_sha256": {
+      "port/validation/collect_mosey.py": "9da9bb1b1bc4a6461a6fdfbe5e9d375c585666e2ee7eea9bc107bca5363a5153",
+      "port/tests/test_collect_mosey.py": "a56c7495e51c79e66679cbbf8df34b9bdc22991a51c662f96f239aa0a55d5164"
+    },
+    "stderr_sha256": "f5faa6d4210668051af1e1aa950c6d1267fd7ba43fadaee830160a2274d7c6b1",
+    "native_validation_unchanged": "/home/loukious/Android/onyx-wonder-continuation-20261116/mosey-offline-validation/run-20261117-02/native-validation.json"
+  },
+  "product_source_validation": {
+    "status": "PASS",
+    "scope": "Current-source product/init/context checks only; no full Soong image, target execution or deployment",
+    "source_stable_during_validation": true,
+    "sources": [
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/mosey/Android.bp",
+        "bytes": 563,
+        "sha256": "dba67e6f2c932edc27420399f4c33fca8e9f4c97d55e1922793cb5faac06c069"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/mosey/product.mk",
+        "bytes": 326,
+        "sha256": "cb5bb2d093de3bed01ad96eb6d45f1c59ff20dcdd49d31336256869856ac64eb"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/mosey/onyx-mosey.rc",
+        "bytes": 357,
+        "sha256": "a46b60ce31c8aea66817ddcad586a3206ed79f7fe6cae83430faefada8bf8176"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/mosey/launcher.c",
+        "bytes": 1186,
+        "sha256": "cae25733b012ff8971126c6e571cd8817acc7ed317083dd52f94bffb78121904"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/mosey/config.c",
+        "bytes": 2339,
+        "sha256": "21ea457d010d890c34ae5683bf1b6aa87ba5fd6a9d32af5310ae2d5ca77602c4"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/mosey/config.map",
+        "bytes": 54,
+        "sha256": "4e878838ce3060381984d41bb68dce778052dddbedc81cefff138a2f441fa08e"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/mosey/sepolicy/mosey.te",
+        "bytes": 551,
+        "sha256": "1ce538091444a2be4c9fdeae5ce4a5bc15e9bace9ed30385f88c16971b276cb5"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/mosey/sepolicy/file_contexts",
+        "bytes": 88,
+        "sha256": "1643466bfc2d051fbb727bf84889469e4e8a907a02d82016bee07727d65b8434"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/BoardConfigExtra.mk",
+        "bytes": 752,
+        "sha256": "93bcfe291cd70f13c42659f05b28806e5105b8e4a51325507e1264449af72101"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/extra/product.mk",
+        "bytes": 3268,
+        "sha256": "4f6a61e9dbec1236f37b24ebf7df37f780c7b970f79205d3a82e5e2c78ac70c7"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/lineage/config/common.mk",
+        "bytes": 11443,
+        "sha256": "3b56e32098f66ab249d4dbff4d13b2d474392baf8f81674489821ecf22ceb091"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/gms-mosey/mosey/Android.bp",
+        "bytes": 1995,
+        "sha256": "2ecda5be6bfc54fe05f824aa0f7abe3789689d93f8e05cffd8a306352467c764"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/gms-mosey/mosey/mosey-vendor.mk",
+        "bytes": 774,
+        "sha256": "57c269b0be39854394b75b0af8255927fd8d76c9b8d609fcaed5755d887c2164"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/gms-mosey/mosey/etc/init/mosey.rc",
+        "bytes": 168,
+        "sha256": "4c4bf2ae46a316c127d496ae601a0d48421ddab2a92b657ad2c828d8d0541b53"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/device/lineage/sepolicy/mosey/system_ext/public/mosey.te",
+        "bytes": 196,
+        "sha256": "cd67af85fcbcfd08e55975bb1139423e6cb7ced3bb826172d2acb8ec683dc7f7"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/device/lineage/sepolicy/mosey/system_ext/private/mosey.te",
+        "bytes": 1300,
+        "sha256": "b8000ae079efa432a70c34277575b6f390394c412f8028cc9c66418a5ce3d977"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/device/lineage/sepolicy/mosey/system_ext/private/file_contexts",
+        "bytes": 81,
+        "sha256": "bde0af155a5433af678b3cbd3178725368396112ba472c8096314108c5ad7e63"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/device/lineage/sepolicy/common/sepolicy.mk",
+        "bytes": 1110,
+        "sha256": "7d1e73164b35e7cf52b7ad01e261483d9e9d85df4e2db6ccc6f7ce9b8c2499d6"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/device/xiaomi/onyx/BoardConfig.mk",
+        "bytes": 7900,
+        "sha256": "5145df1446b6d99609e594f3cf3aacf7045eb0767714ad442bb534dc2d633859"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/device/xiaomi/onyx/lineage_onyx.mk",
+        "bytes": 1138,
+        "sha256": "ac0b84360bd069cc5cf0f8347688adf195cab9e61b2c70e3e7f4c93b5ce07a60"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/device/xiaomi/onyx/device.mk",
+        "bytes": 21383,
+        "sha256": "d112b57b3fde3b057fc21c4820462ce6bf39d2f47bfe7f22d081c399c674c4ad"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/build/make/core/config.mk",
+        "bytes": 65129,
+        "sha256": "e22fb12feffdef40a6572a995a86211520003705fa6100efa7d29f57f8232bae"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/lineage/config/BoardConfigLineage.mk",
+        "bytes": 895,
+        "sha256": "0cfb10b2f8c7239662c90b91c95aac035861f74b007e96dee452ae5cb4b18716"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/vendor/lineage/config/BoardConfigSoong.mk",
+        "bytes": 2207,
+        "sha256": "bb5c84cf0ab8db7b0844c9cc31ecd6a019d1d531a24b0c1ef753674616f3d33f"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/hardware/qcom-caf/common/BoardConfigQcom.mk",
+        "bytes": 18383,
+        "sha256": "8eaceec1ed9109e5312f3eed2934ac78743badb427b980a31f58356dfeef0314"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/kernel/platform/kernel-6.18/port/rom/BoardConfig.mk",
+        "bytes": 3192,
+        "sha256": "c66400e4d199349fa929e1accd8910adac386b025e75b72786693894538ee5f5"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/kernel/platform/kernel-6.18/port/rom/module-layout.json",
+        "bytes": 42048,
+        "sha256": "f5593dc32e1356c2872520169b6f58a8ab38ca470cdc1fe88514984a02d8136b"
+      },
+      {
+        "path": "/home/loukious/Android/onyx-wonder-20261116/port/rom/module-layout.json",
+        "bytes": 42097,
+        "sha256": "81af04a5bfee33c2b77d5cabb5736980e526d5a05773608cea55cc340151c1ca"
+      },
+      {
+        "path": "/home/loukious/Android/onyx-wonder-20261116/port/rom/module-config/vendor_dlkm/modules.options",
+        "bytes": 93,
+        "sha256": "22eeb64dd070cee7efa18d0e9d42fbefd49872330f08e5647cd49d02a441acba"
+      }
+    ],
+    "tools": [
+      {
+        "path": "/home/loukious/Android/custom-rom/out/host/linux-x86/bin/host_init_verifier",
+        "bytes": 3514992,
+        "sha256": "6315f13d6e27a183a6ef203bc1657c7417ba3e1a0d26884245473934b757588a"
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/out/host/linux-x86/bin/checkfc",
+        "bytes": 1210104,
+        "sha256": "1cb3e413a95c3a169203fdd9bb27b83a38025bc2516733bd683c89063ab287bf"
+      }
+    ],
+    "runner": {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/product-source-validation/validate_product_source.py",
+      "bytes": 7847,
+      "sha256": "1ca3f3953d68c8058f510d382d48ce6bb8fadae9561377616b49c27d7f7f1ae3"
+    },
+    "commands": {
+      "combined-init": {
+        "argv": [
+          "/home/loukious/Android/custom-rom/out/host/linux-x86/bin/host_init_verifier",
+          "--out_system_ext=/tmp/onyx-mosey-product-source-w1hnewcp/system_ext"
+        ],
+        "returncode": 0,
+        "stdout": {
+          "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/product-source-validation/combined-init.stdout.txt",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stderr": {
+          "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/product-source-validation/combined-init.stderr.txt",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "launcher-file-contexts": {
+        "argv": [
+          "/home/loukious/Android/custom-rom/out/host/linux-x86/bin/checkfc",
+          "-t",
+          "/home/loukious/Android/custom-rom/vendor/extra/mosey/sepolicy/file_contexts",
+          "/home/loukious/Android/onyx-wonder-coex-dev-20261117/product-source-validation/launcher-file-contexts-test.txt"
+        ],
+        "returncode": 0,
+        "stdout": {
+          "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/product-source-validation/launcher-file-contexts.stdout.txt",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stderr": {
+          "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/product-source-validation/launcher-file-contexts.stderr.txt",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    },
+    "checks": {
+      "extra_product_precedes_mosey_conditional": true,
+      "extra_inherits_mosey_fragment": true,
+      "mosey_enabled_normal_blob_selected": true,
+      "adapter_namespace_and_both_packages": true,
+      "override_rc_install_path": true,
+      "both_modules_system_ext_arm64": true,
+      "board_includes_policy_extension": true,
+      "intended_qcwcn_wifi_namespaces_configured_by_lineage": true,
+      "current_native_sources_match_prior_passing_receipt": true,
+      "current_kernel_layout_contains_wonder": true,
+      "probe_not_enabled_by_shipping_options": true
+    },
+    "prior_native_receipt": "/home/loukious/Android/onyx-wonder-continuation-20261116/mosey-offline-validation/run-20261117-02/native-validation.json",
+    "existing_product_artifacts": [
+      {
+        "path": "/home/loukious/Android/custom-rom/out/target/product/onyx/system_ext/bin/onyx_mosey_launcher",
+        "exists": false
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/out/target/product/onyx/system_ext/lib64/libmosey_onyx_config.so",
+        "exists": false
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/out/target/product/onyx/system_ext/etc/init/onyx-mosey.rc",
+        "exists": false
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/out/target/product/onyx/system_ext/bin/mosey_server",
+        "exists": false
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/out/target/product/onyx/system_ext/lib64/libmosey_daemon_ffi.so",
+        "exists": false
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/out/target/product/onyx/system_ext/etc/init/mosey.rc",
+        "exists": false
+      },
+      {
+        "path": "/home/loukious/Android/custom-rom/out/target/product/onyx/vendor_dlkm/lib/modules/wonder.ko",
+        "exists": false
+      }
+    ],
+    "rom_kernel_layout_contains_wonder": false,
+    "gate": "Existing ROM kernel checkout and image are older than this Wonder implementation. A matched product package requires source synchronization and package verification before deployment.",
+    "limits": [
+      "host_init_verifier parses the real bundled service and override together; it does not execute Android init.",
+      "checkfc checks real launcher path labels; this does not prove runtime SELinux transition or AT_SECURE behavior.",
+      "Passing source/NDK checks do not establish packaged Soong artifact identities or matching kernel/module images."
+    ]
+  },
+  "firmware": {
+    "original_report": "/home/loukious/Android/onyx-wonder-firmware-coex-20261117/report.md",
+    "original_report_sha256": "9121a5dcf45740b9697c0ed97d12903a894f09d0a56df6282f30464ea8baeef5",
+    "followup_report": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/firmware-tx-semantics/report.md",
+    "followup_report_sha256": "f0b6581af29ae8561989a583a204ef8112a50893043d68551de942f85a9a80da",
+    "followup_provenance_sha256": "5f1bf181abcbfc7360028495262b9f8d23f732e094a905e3c98c55d748aac386",
+    "analysis_elf_sha256": "82f138be6386c1e39de8f4ca31d1279265a9eb75dec18e105b4f3f94becc0f2e",
+    "original_evidence_consistency_status": "PASS",
+    "followup_evidence_type": "Offline shell/LLVM byte-bound analysis; not REA Evidence or RF observation",
+    "unknowns": [
+      "Final sequence preservation on RF",
+      "GI/LTF default and hardware mapping",
+      "Arbitrary unicast NOACK",
+      "Monitor scan admission and measured channel occupancy"
+    ]
+  },
+  "raw_probe": {
+    "status": "PASS",
+    "scope": "Instrumented host wire/control fixtures and dry-run only; Android artifact linked but never executed or deployed",
+    "host_validation": {
+      "assertions": 585,
+      "cases": 23,
+      "forbidden_io_calls": 0,
+      "sanitizers": [
+        "ASan",
+        "UBSan"
+      ]
+    },
+    "negative_controls": [
+      "radiotap_tx_flags",
+      "bandwidth_width",
+      "bandwidth_enum",
+      "stats_complete_schema",
+      "stats_duplicate_field",
+      "stale_entry",
+      "second_lease_identity",
+      "second_read_expiry",
+      "scan_retirement",
+      "eagain_abort",
+      "resolver_ack_drain",
+      "kernel_sender",
+      "short_send",
+      "dry_run_state_read",
+      "family_attributes_trailing"
+    ],
+    "artifacts": {
+      "host_fixture": {
+        "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/raw-probe-validation/final-03/raw-probe-harness",
+        "size": 466744,
+        "sha256": "6b0762cb433887e1773708e417d3c39617762f75805dcbd9a2fab6ea36dab26a"
+      },
+      "standalone_host": {
+        "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/raw-probe-validation/final-03/raw-probe-host",
+        "size": 214352,
+        "sha256": "19c203ddc3011e3e122ba79fea04e3c443d15f3ed67f9cf72fdea25e935d7430"
+      },
+      "android_probe": {
+        "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/raw-probe-validation/final-03/wonder_offchan_probe",
+        "size": 23496,
+        "sha256": "da014a63b2cbfcd115fa76dd5d86608f10658ebc276e62b060a13e1efa91297c",
+        "class": "ELF64",
+        "endianness": "little",
+        "machine": "AArch64",
+        "type": "ET_DYN",
+        "load_segments": [
+          {
+            "flags": 4,
+            "alignment": 16384,
+            "file_offset": 0,
+            "virtual_address": 0
+          },
+          {
+            "flags": 5,
+            "alignment": 16384,
+            "file_offset": 7296,
+            "virtual_address": 23680
+          },
+          {
+            "flags": 6,
+            "alignment": 16384,
+            "file_offset": 16896,
+            "virtual_address": 49664
+          },
+          {
+            "flags": 6,
+            "alignment": 16384,
+            "file_offset": 18112,
+            "virtual_address": 67264
+          }
+        ],
+        "interpreter": "/system/bin/linker64"
+      }
+    },
+    "limits": [
+      "Host mocks verify userspace ordering and wire encoding, not nl80211/WMI acceptance on an Android target.",
+      "Android uses installed NDK28.2/API35 compatibility headers and libraries; this is not a full ROM product build.",
+      "No radio socket, Android target binary, device command, firmware patch, deployment, APK, or RF transmission is executed.",
+      "Socket acceptance remains submission evidence; RF behavior and receiver correlation require later authorized device tests."
+    ],
+    "receipt": {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/raw-probe-validation/final-03/raw-probe-validation.json",
+      "sha256": "afc7a25a747958db30576837697fe891ec34a4c504478ee1ce589810d3da8233"
+    }
+  },
+  "aggregate_builder": {
+    "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/aggregate.py",
+    "sha256": "d3f494cafbb4d7e019f002324e84b2db0fde5e47b84aa7af66e718dc4655b938"
+  },
+  "verified_current_input_count": 2367,
+  "receipts": [
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wonder-dwell-host.json",
+      "sha256": "a78a3479ff271ccf0cf05919fb5315e9d7921b39d4c806e2e0f36cb8abbacb39"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wonder-coex-host.json",
+      "sha256": "db3a832277990d44faab711492c8622590630161819e456ef2f8f406f62cc159"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wlan-injection-rx-host.json",
+      "sha256": "a7d744ee2b039eede652a1d2147cbbcfbe2d9a5ea9dbcb613436af1f90f1670e"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wonder-transport-final-04.json",
+      "sha256": "15b31a632759bffa3ee6b76fe74c319381ac5f2a11999fc29a02731c2c31aad0"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-preapple-20261117/wonder-scan-validation.json",
+      "sha256": "604e3d021393046342d82373339f7a57a22b036c324d80c6a18fd60e8ce90ceb"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-preapple-20261117/wmi-offchan-validation.json",
+      "sha256": "636c3f93975e5c1815a05899ff37121ac835e7535d7f6c27f7cd9535589cbd08"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-preapple-20261117/wma-offchan-validation.json",
+      "sha256": "7c09ae49586b9acca61da743413f119bfd2c8496918af72890ee931d72e112cd"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-continuation-20261116/wonder-sched-slot-deadline-host-20261117-03.json",
+      "sha256": "c25011a99e712cbf4c16730c36787e15adc782ff20b399c1925b12d7df54fd31"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/wonder-airtime-final-04.json",
+      "sha256": "0ef7130377f03c445048d60cd9fd1b09f11e5876b1eddd0ad837a31745b2824e"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/build-wonder-final-01/report.json",
+      "sha256": "96d4e4e3dd9b3b0eaaf51a6b5ae7bc58053ae5f96a8062dcb86c6f238a4d6975"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/build-qcacld-final-04/qcacld-report.json",
+      "sha256": "d82c1cb574c06712ca1f6636f5677906c6a906a55394b17d849fa47a23d6cd75"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/source-replay-final-04.json",
+      "sha256": "3a39f91c2388e062b475d0c21ea2a4f4354113f9a4f3c83fc3c0d2b940a6fc17"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/incremental-patch.json",
+      "sha256": "8e2d3aa075a4c068ffd04a8f832163824173441d0ba32c0da4bf73ab6c1bdb1f"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/preservation-final-04.json",
+      "sha256": "51183b0a07dcac6aa7b00bb0093a51b32a052b70235aadc000a78e49bac3f050"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/qcacld-external-consumers.json",
+      "sha256": "4dca8d9f0347bb4e691e0eeb3d3b96ab4267429a702524c88f04ebde802e2b6d"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/native-dependency-reuse-final.json",
+      "sha256": "e2e6c511fc381c66cbe2692ce774710f03236a9f817644e8dae4b2a92e1d6f8d"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-continuation-20261116/mosey-offline-validation/run-20261117-02/native-validation.json",
+      "sha256": "a560ecb20e7304741fcacdc23ddd6a72c2e7dfe380f9b906f20094f672af76f0"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/mosey-collector-host.json",
+      "sha256": "26f46f803caf9afd8f35c141a5fe32c333f8651a947dfb515bfd6cce5c488885"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/product-source-validation/product-source-validation.json",
+      "sha256": "fb4994b9a746b7e0f86788a10e20a0a499b45ff7b8a3430b13aa54fe8ceb36b2"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-coex-dev-20261117/raw-probe-validation/final-03/raw-probe-validation.json",
+      "sha256": "afc7a25a747958db30576837697fe891ec34a4c504478ee1ce589810d3da8233"
+    },
+    {
+      "path": "/home/loukious/Android/onyx-wonder-firmware-coex-20261117/evidence-validation.json",
+      "sha256": "cdc03ceab138b4d8cd6088756b3701fdd42cdf2ce0fac5a9516149b72223f656"
+    }
+  ],
+  "radio_validation": "UNTESTED",
+  "apple_transfers": "UNTESTED",
+  "device_changes": false,
+  "published": false,
+  "remaining": {
+    "product_packaging": "Full matching ROM/Soong build and packaged policy/layout validation not established by isolated module/NDK builds.",
+    "onyx_and_controlled_receiver": [
+      "Live firmware identity and service123",
+      "Monitor scan eligibility, actual dwell timing and HOME continuity",
+      "Permitted raw probe TX/completion and measured-frequency RX/ACK routing",
+      "Sequence/GI/LTF/NOACK semantics required before enabling normal Wonder off-channel traffic",
+      "TSF continuity, cancel/restart/suspend and recovery behavior"
+    ],
+    "apple_peer": [
+      "AWDL discovery and negotiation",
+      "Transfers in both directions with matching hashes"
+    ]
+  }
+}

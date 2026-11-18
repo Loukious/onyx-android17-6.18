@@ -7,3 +7,5 @@ port/wlan-test/wifipumpkin3/*.patch -text -whitespace
 port/validation/**/candidate/** -text -whitespace
 port/validation/**/*.patch -text -whitespace
 common/** -text
+# Preserve the locked upstream Wonder Kconfig's final blank line.
+modules/wonder/Kconfig whitespace=-blank-at-eof

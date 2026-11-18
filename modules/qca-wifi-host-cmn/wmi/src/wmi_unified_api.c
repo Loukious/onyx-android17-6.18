@@ -676,11 +676,85 @@ QDF_STATUS
 wmi_offchan_data_tx_cmd_send(wmi_unified_t wmi_handle,
 			     struct wmi_offchan_data_tx_params *param)
 {
+	if (!wmi_handle || !wmi_handle->ops || !param)
+		return QDF_STATUS_E_INVAL;
+
 	if (wmi_handle->ops->send_offchan_data_tx_cmd)
 		return wmi_handle->ops->send_offchan_data_tx_cmd(wmi_handle,
 				  param);
 
 	return QDF_STATUS_E_FAILURE;
+}
+
+QDF_STATUS wmi_offchan_data_tx_pdev_id(wmi_unified_t wmi_handle,
+		uint32_t target_pdev_id, uint32_t *host_pdev_id)
+{
+	uint32_t id;
+
+	if (!host_pdev_id)
+		return QDF_STATUS_E_INVAL;
+	*host_pdev_id = WMI_HOST_PDEV_ID_INVALID;
+	if (!wmi_handle || !wmi_handle->ops ||
+	    target_pdev_id < 1 || target_pdev_id > 3)
+		return QDF_STATUS_E_INVAL;
+	if (!wmi_handle->ops->convert_target_pdev_id_to_host)
+		return QDF_STATUS_E_NOSUPPORT;
+	id = wmi_handle->ops->convert_target_pdev_id_to_host(wmi_handle,
+							  target_pdev_id);
+	if (id == WMI_HOST_PDEV_ID_INVALID)
+		return QDF_STATUS_E_INVAL;
+	*host_pdev_id = id;
+	return QDF_STATUS_SUCCESS;
+}
+
+QDF_STATUS wmi_extract_offchan_data_tx_compl_param(
+		wmi_unified_t wmi_handle, void *evt_buf,
+		struct wmi_host_offchan_data_tx_compl_event *param)
+{
+	QDF_STATUS status;
+
+	if (!param)
+		return QDF_STATUS_E_INVAL;
+
+	qdf_mem_zero(param, sizeof(*param));
+	if (!wmi_handle || !wmi_handle->ops || !evt_buf)
+		return QDF_STATUS_E_INVAL;
+
+	if (!wmi_handle->ops->extract_offchan_data_tx_compl_param)
+		return QDF_STATUS_E_NOSUPPORT;
+
+	status = wmi_handle->ops->extract_offchan_data_tx_compl_param(
+			wmi_handle, evt_buf, param);
+	if (QDF_IS_STATUS_ERROR(status))
+		qdf_mem_zero(param, sizeof(*param));
+
+	return status;
+}
+
+QDF_STATUS wmi_offchan_data_tx_completion_register(
+		wmi_unified_t wmi_handle,
+		wmi_unified_event_handler handler_func, uint8_t rx_ctx)
+{
+	if (!wmi_handle || !wmi_handle->ops || !handler_func)
+		return QDF_STATUS_E_INVAL;
+
+	if (!wmi_handle->ops->extract_offchan_data_tx_compl_param ||
+	    !wmi_handle->ops->convert_target_pdev_id_to_host ||
+	    !wmi_service_enabled(wmi_handle, wmi_service_offchan_tx_wmi))
+		return QDF_STATUS_E_NOSUPPORT;
+
+	return wmi_unified_register_event_handler(wmi_handle,
+			wmi_offchan_data_tx_completion_event, handler_func,
+			rx_ctx);
+}
+
+QDF_STATUS wmi_offchan_data_tx_completion_unregister(wmi_unified_t wmi_handle)
+{
+	if (!wmi_handle)
+		return QDF_STATUS_E_INVAL;
+
+	return wmi_unified_unregister_event_handler(wmi_handle,
+			wmi_offchan_data_tx_completion_event);
 }
 
 QDF_STATUS wmi_unified_modem_power_state(wmi_unified_t wmi_handle,

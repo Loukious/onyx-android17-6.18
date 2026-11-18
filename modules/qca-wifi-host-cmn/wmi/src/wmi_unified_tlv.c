@@ -5374,71 +5374,148 @@ static QDF_STATUS send_offchan_data_tx_cmd_tlv(wmi_unified_t wmi_handle,
 	wmi_offchan_data_tx_send_cmd_fixed_param *cmd;
 	int32_t cmd_len;
 	uint64_t dma_addr;
-	void *qdf_ctx = param->qdf_ctx;
 	uint8_t *bufp;
-	int32_t bufp_len = (param->frm_len < mgmt_tx_dl_frm_len) ?
-					param->frm_len : mgmt_tx_dl_frm_len;
-	QDF_STATUS status = QDF_STATUS_SUCCESS;
+	int32_t bufp_len;
+	QDF_STATUS status;
 
+	if (!wmi_handle || !param || !param->tx_frame || !param->pdata ||
+	    !param->qdf_ctx || !param->frm_len || param->desc_id > 0xffff ||
+	    qdf_nbuf_is_nonlinear(param->tx_frame) ||
+	    qdf_nbuf_get_num_frags(param->tx_frame) != 1 ||
+	    param->frm_len > qdf_nbuf_len(param->tx_frame))
+		return QDF_STATUS_E_INVAL;
+
+	bufp_len = (param->frm_len < mgmt_tx_dl_frm_len) ?
+			param->frm_len : mgmt_tx_dl_frm_len;
 	cmd_len = sizeof(wmi_offchan_data_tx_send_cmd_fixed_param) +
 		  WMI_TLV_HDR_SIZE +
-		  roundup(bufp_len, sizeof(uint32_t));
-
-	buf = wmi_buf_alloc(wmi_handle, sizeof(wmi_tx_send_params) + cmd_len);
+		  roundup(bufp_len, sizeof(uint32_t)) +
+		  sizeof(wmi_tx_send_params);
+	buf = wmi_buf_alloc(wmi_handle, cmd_len);
 	if (!buf)
 		return QDF_STATUS_E_NOMEM;
 
-	cmd = (wmi_offchan_data_tx_send_cmd_fixed_param *) wmi_buf_data(buf);
-	bufp = (uint8_t *) cmd;
+	cmd = (wmi_offchan_data_tx_send_cmd_fixed_param *)wmi_buf_data(buf);
+	qdf_mem_zero(cmd, cmd_len);
+	bufp = (uint8_t *)cmd;
 	WMITLV_SET_HDR(&cmd->tlv_header,
-		WMITLV_TAG_STRUC_wmi_offchan_data_tx_send_cmd_fixed_param,
-		WMITLV_GET_STRUCT_TLVLEN
-		(wmi_offchan_data_tx_send_cmd_fixed_param));
-
+		      WMITLV_TAG_STRUC_wmi_offchan_data_tx_send_cmd_fixed_param,
+		      WMITLV_GET_STRUCT_TLVLEN(
+			      wmi_offchan_data_tx_send_cmd_fixed_param));
 	cmd->vdev_id = param->vdev_id;
-
 	cmd->desc_id = param->desc_id;
 	cmd->chanfreq = param->chanfreq;
-	bufp += sizeof(wmi_offchan_data_tx_send_cmd_fixed_param);
-	WMITLV_SET_HDR(bufp, WMITLV_TAG_ARRAY_BYTE, roundup(bufp_len,
-							    sizeof(uint32_t)));
+	bufp += sizeof(*cmd);
+	WMITLV_SET_HDR(bufp, WMITLV_TAG_ARRAY_BYTE,
+		      roundup(bufp_len, sizeof(uint32_t)));
 	bufp += WMI_TLV_HDR_SIZE;
+	/* Swap only the aligned, zero-padded command copy on big-endian hosts. */
 	qdf_mem_copy(bufp, param->pdata, bufp_len);
-	qdf_nbuf_map_single(qdf_ctx, param->tx_frame, QDF_DMA_TO_DEVICE);
+	WMI_HOST_IF_MSG_COPY_CHAR_ARRAY(bufp, bufp, bufp_len);
+
+	status = qdf_nbuf_map_single(param->qdf_ctx, param->tx_frame,
+				     QDF_DMA_TO_DEVICE);
+	if (QDF_IS_STATUS_ERROR(status)) {
+		wmi_err("offchan frame map failed");
+		goto free_buf;
+	}
+
 	dma_addr = qdf_nbuf_get_frag_paddr(param->tx_frame, 0);
-	cmd->paddr_lo = (uint32_t)(dma_addr & 0xffffffff);
 #if defined(HTT_PADDR64)
+	if (dma_addr >> 37) {
+		status = QDF_STATUS_E_INVAL;
+		goto unmap_tx_frame;
+	}
 	cmd->paddr_hi = (uint32_t)((dma_addr >> 32) & 0x1F);
+#else
+	if (dma_addr >> 32) {
+		status = QDF_STATUS_E_INVAL;
+		goto unmap_tx_frame;
+	}
 #endif
+	cmd->paddr_lo = (uint32_t)(dma_addr & 0xffffffff);
 	cmd->frame_len = param->frm_len;
 	cmd->buf_len = bufp_len;
 	cmd->tx_params_valid = param->tx_params_valid;
 
 	wmi_mgmt_cmd_record(wmi_handle, WMI_OFFCHAN_DATA_TX_SEND_CMDID,
-			bufp, cmd->vdev_id, cmd->chanfreq);
-
+			    bufp, cmd->vdev_id, cmd->chanfreq);
 	bufp += roundup(bufp_len, sizeof(uint32_t));
 	if (param->tx_params_valid) {
 		status = populate_tx_send_params(bufp, param->tx_param);
-		if (status != QDF_STATUS_SUCCESS) {
+		if (QDF_IS_STATUS_ERROR(status)) {
 			wmi_err("Populate TX send params failed");
-			goto err1;
+			goto unmap_tx_frame;
 		}
-		cmd_len += sizeof(wmi_tx_send_params);
+	} else {
+		/* The fixed TX-params TLV is required even without overrides. */
+		WMITLV_SET_HDR(&((wmi_tx_send_params *)bufp)->tlv_header,
+			      WMITLV_TAG_STRUC_wmi_tx_send_params,
+			      WMITLV_GET_STRUCT_TLVLEN(wmi_tx_send_params));
 	}
 
 	wmi_mtrace(WMI_OFFCHAN_DATA_TX_SEND_CMDID, cmd->vdev_id, 0);
-	if (wmi_unified_cmd_send(wmi_handle, buf, cmd_len,
-				WMI_OFFCHAN_DATA_TX_SEND_CMDID)) {
+	status = wmi_unified_cmd_send(wmi_handle, buf, cmd_len,
+				    WMI_OFFCHAN_DATA_TX_SEND_CMDID);
+	if (QDF_IS_STATUS_ERROR(status)) {
 		wmi_err("Failed to offchan data Tx");
-		goto err1;
+		goto unmap_tx_frame;
 	}
 
 	return QDF_STATUS_SUCCESS;
 
-err1:
+unmap_tx_frame:
+	qdf_nbuf_unmap_single(param->qdf_ctx, param->tx_frame,
+				     QDF_DMA_TO_DEVICE);
+free_buf:
 	wmi_buf_free(buf);
-	return QDF_STATUS_E_FAILURE;
+	return status;
+}
+
+/**
+ * extract_offchan_data_tx_compl_param_tlv() - decode processed completion TLVs
+ * @wmi_handle: WMI handle
+ * @evt_buf: processed completion event TLVs
+ * @param: host completion output
+ *
+ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
+ */
+static QDF_STATUS extract_offchan_data_tx_compl_param_tlv(
+		wmi_unified_t wmi_handle, void *evt_buf,
+		struct wmi_host_offchan_data_tx_compl_event *param)
+{
+	WMI_OFFCHAN_DATA_TX_COMPLETION_EVENTID_param_tlvs *param_buf = evt_buf;
+	wmi_offchan_data_tx_compl_event_fixed_param *evt;
+	uint32_t pdev_id;
+	QDF_STATUS status;
+
+	if (!param)
+		return QDF_STATUS_E_INVAL;
+
+	qdf_mem_zero(param, sizeof(*param));
+	if (!wmi_handle || !wmi_handle->ops || !param_buf ||
+	    !param_buf->fixed_param)
+		return QDF_STATUS_E_INVAL;
+
+	if (!wmi_handle->ops->convert_target_pdev_id_to_host)
+		return QDF_STATUS_E_NOSUPPORT;
+
+	evt = param_buf->fixed_param;
+	if (WMITLV_GET_TLVTAG(evt->tlv_header) !=
+	    WMITLV_TAG_STRUC_wmi_offchan_data_tx_compl_event_fixed_param ||
+	    WMITLV_GET_TLVLEN(evt->tlv_header) !=
+	    WMITLV_GET_STRUCT_TLVLEN(wmi_offchan_data_tx_compl_event_fixed_param))
+		return QDF_STATUS_E_INVAL;
+
+	status = wmi_offchan_data_tx_pdev_id(wmi_handle, evt->pdev_id, &pdev_id);
+	if (QDF_IS_STATUS_ERROR(status))
+		return status;
+
+	param->desc_id = evt->desc_id;
+	param->status = evt->status;
+	param->pdev_id = pdev_id;
+
+	return QDF_STATUS_SUCCESS;
 }
 
 /**
@@ -23054,6 +23131,8 @@ struct wmi_ops tlv_ops =  {
 	.send_scan_chan_list_cmd = send_scan_chan_list_cmd_tlv,
 	.send_mgmt_cmd = send_mgmt_cmd_tlv,
 	.send_offchan_data_tx_cmd = send_offchan_data_tx_cmd_tlv,
+	.extract_offchan_data_tx_compl_param =
+				extract_offchan_data_tx_compl_param_tlv,
 	.send_modem_power_state_cmd = send_modem_power_state_cmd_tlv,
 	.send_set_sta_ps_mode_cmd = send_set_sta_ps_mode_cmd_tlv,
 	.send_idle_roam_monitor_cmd = send_idle_roam_monitor_cmd_tlv,

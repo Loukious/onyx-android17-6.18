@@ -8,10 +8,19 @@ The [6.18.63 runtime regression](port/kernel-runtime-regression.md) documents
 the IPA/modem crashes, the IOMMU and FunctionFS corrections, and the Fixed4
 boot, USB and network validation.
 
-The current Onyx recipe uses Linux **6.18.38** with **400 platform modules**,
+Experimental [Onyx Wonder/AWDL bring-up](port/wonder-awdl.md) connects Google's
+6.18 Wonder core to the existing Qualcomm injection and monitor paths. The
+expanded transport, scheduler and PPDU host regressions pass, and Wonder plus
+the complete QCACLD driver compile against matching 6.18.63 inputs. A default-off
+20 MHz STA dwell probe adds firmware-event channel ownership and bounded raw TX;
+normal off-channel STA coexistence remains unsupported. Onyx and a controlled
+receiver must establish radio behavior before Apple interoperability testing.
+
+The current Onyx recipe uses Linux **6.18.63** with **390 vendor modules** and
+**11 native wireless modules**,
 **37 additional native GKI modules** for CAN, USB adapters and network facilities,
 and **16 wireless firmware files** with their redistribution notices and matching
-ATH source. The module snapshot reproduces **5,193 files** from pinned imports
+ATH source. The module snapshot reproduces **4,978 files** from pinned imports
 and reviewed patches. See [NetHunter and CAN support](https://github.com/Loukious/onyx-android17-6.18/blob/android17-6.18-lts/port/nethunter-can.md).
 
 The last device-validated checkpoint, source `c683c79`, used **391 platform
@@ -51,7 +60,7 @@ On the source branch:
 - `common/` contains the complete pinned upstream GKI with the required common
   fixes applied. CI independently recreates and verifies every source file,
   executable bit and symlink before building.
-- `modules/` contains all 5,193 materialized, modified source/build files used
+- `modules/` contains all 4,978 materialized, modified source/build files used
   by the module port, including WLAN, IPA, Bluetooth, graphics, audio, camera,
   charging, PMIC/SPMI, clocks, USB and the remaining device driver groups.
 - `port/imports.json` records the exact original repositories, commits and Git
@@ -102,7 +111,7 @@ Runner cleanup must leave at least 55 GiB free before source sync; bounded
 swap allocation fails visibly if space is unavailable. No persistent secrets
 are needed. Repository Actions must be allowed to create pull requests.
 
-Every build includes GKI, all 400 platform modules, the native GKI archive,
+Every build includes GKI, all 390 vendor and 11 native wireless modules, the native GKI archive,
 KernelSU Next dev's exact source archive, both device-tree variants, wireless firmware
 with licenses/source, import CRC verification, input hashes and logs. Download
 the complete GKI/module archive and `SHA256SUMS` from the build artifacts or release.

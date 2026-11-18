@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Check catalog-declared native exports against their actual ELF flags and CRCs."""
+"""Check native exports and vendor imports against actual ELF flags and CRCs."""
 
 import hashlib
 from pathlib import Path
 import struct
 
 from catalog import load_catalog, native_modules, native_required_exports
-from verify_modules import elf_sections
+from verify_modules import elf_sections, versioned_imports
 
 KSYM_FLAG_GPL_ONLY = 1
 KSYM_FLAG_PROTECTED = 2
@@ -126,3 +126,83 @@ def verify_native_exports(module, output, symvers, catalog=None):
         checked.append({"symbol": name, "crc": f"0x{record['crc']:08x}", "flags": record["flags"]})
     return {"provider": provider, "sha256": hashlib.sha256(Path(module).read_bytes()).hexdigest(),
             "required_exports": checked}
+
+
+def verify_native_imports(modules, native_outputs, symvers, catalog=None):
+    """Require every vendor-to-native import to use the declared public ABI.
+
+    A matching Module.symvers CRC does not encode MODULE_SIG_PROTECT. Inspect
+    the provider's export flags as well, including imports omitted from the
+    catalog's required_exports list. These vendor DDK modules must not depend
+    on protected exports that only a trusted signed consumer can resolve.
+    """
+    catalog = load_catalog() if catalog is None else catalog
+    components = {entry["output"]: entry for entry in catalog["components"]
+                  if entry["kind"] == "native_common"}
+    if not set(components) <= set(native_outputs):
+        raise ValueError("Native import admission is missing catalog providers")
+    owners = {output.removesuffix(".ko"): output for output in components}
+    exports, native_hashes = {}, {}
+    for output in sorted(components):
+        module = Path(native_outputs[output])
+        native_hashes[output] = hashlib.sha256(module.read_bytes()).hexdigest()
+        sections = elf_sections(module)
+        if "__ksymtab" not in sections:
+            if any(name in sections for name in
+                   ("__kflagstab", "__kcrctab", ".rela__ksymtab")):
+                raise ValueError(f"incomplete native export table: {output}")
+            continue
+        for name, record in export_table(module).items():
+            if name in exports:
+                raise ValueError(f"duplicate actual native export: {name}")
+            exports[name] = (output, record)
+
+    providers = {}
+    for path in symvers:
+        for line in Path(path).read_text().splitlines():
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            crc, name, owner = int(fields[0], 16), fields[1], fields[2]
+            if name not in exports and owner not in owners:
+                continue
+            if (not 0 <= crc <= 0xffffffff or
+                    (name in providers and providers[name] != (crc, owner))):
+                raise ValueError(f"conflicting native import provider: {name}")
+            providers[name] = (crc, owner)
+
+    checked, violations = [], []
+    for module in modules:
+        module = Path(module)
+        imports = []
+        for name, crc in sorted(versioned_imports(module).items()):
+            symvers_record = providers.get(name)
+            if name not in exports and symvers_record is None:
+                continue
+            if name not in exports:
+                violations.append(f"{module.name}: {name}: missing actual native export")
+                continue
+            output, record = exports[name]
+            problems = []
+            if record["flags"] & KSYM_FLAG_PROTECTED:
+                problems.append("protected native export")
+            if name not in components[output].get("required_exports", []):
+                problems.append("undeclared native vendor ABI")
+            if crc != record["crc"]:
+                problems.append("native export CRC mismatch")
+            if symvers_record != (record["crc"], output.removesuffix(".ko")):
+                problems.append("native export CRC or Common provider mismatch")
+            if problems:
+                violations.append(f"{module.name}: {name}: " + ", ".join(problems))
+            else:
+                imports.append({"symbol": name, "provider": output.removesuffix(".ko"),
+                                "crc": f"0x{crc:08x}", "flags": record["flags"]})
+        checked.append({"module": module.name,
+                        "sha256": hashlib.sha256(module.read_bytes()).hexdigest(),
+                        "native_imports": imports})
+    if violations:
+        raise ValueError("Vendor native import admission failed:\n" + "\n".join(violations))
+    return {"status": "PASS", "native_provider_count": len(components),
+            "vendor_module_count": len(checked),
+            "native_import_count": sum(len(entry["native_imports"]) for entry in checked),
+            "native_provider_sha256": native_hashes, "modules": checked}

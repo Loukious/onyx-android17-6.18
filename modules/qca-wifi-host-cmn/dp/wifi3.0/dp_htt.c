@@ -63,6 +63,14 @@
 #define HTT_MASK_UPPER_TIMESTAMP 0xFFFFFFFF00000000
 #define HTT_BKP_STATS_MAX_QUEUE_DEPTH 16
 
+#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT) && \
+	defined(WDI_EVENT_ENABLE)
+/* HTT submission is atomic-context safe. Serialize ownership, the current
+ * base request, and command ordering across all stats consumers.
+ */
+static DEFINE_SPINLOCK(dp_wonder_airtime_config_lock);
+#endif
+
 #ifdef HTT_HTC_NO_RECYCLER_ALLOC
 static inline qdf_nbuf_t dp_htt_htc_msg_alloc(qdf_device_t osdev,
 					      qdf_size_t size,
@@ -4434,6 +4442,11 @@ void dp_htt_t2h_msg_handler(void *context, HTC_PACKET *pkt)
 
 	case HTT_T2H_MSG_TYPE_PPDU_STATS_IND:
 		{
+#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT) && \
+	defined(WDI_EVENT_ENABLE)
+			/* Onyx has neither SON enhanced stats nor packet logging. */
+			dp_mon_wonder_tx_ppdu(soc, msg_word, htt_t2h_msg);
+#endif
 			free_buf =
 				dp_monitor_ppdu_stats_ind_handler(soc,
 								  msg_word,
@@ -5315,7 +5328,7 @@ QDF_STATUS dp_h2t_3tuple_config_send(struct dp_pdev *pdev,
  * HTT_H2T_MSG_TYPE_PPDU_STATS_CFG in htt.h file
  * */
 #if defined(WDI_EVENT_ENABLE)
-QDF_STATUS dp_h2t_cfg_stats_msg_send(struct dp_pdev *pdev,
+static QDF_STATUS dp_h2t_cfg_stats_msg_send_locked(struct dp_pdev *pdev,
 		uint32_t stats_type_upload_mask, uint8_t mac_id)
 {
 	struct htt_soc *soc = pdev->soc->htt_handle;
@@ -5324,6 +5337,14 @@ QDF_STATUS dp_h2t_cfg_stats_msg_send(struct dp_pdev *pdev,
 	uint32_t *msg_word;
 	uint8_t pdev_mask;
 	QDF_STATUS status;
+#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT)
+	uint32_t requested_mask = stats_type_upload_mask;
+	struct dp_mon_pdev *mon_pdev = pdev->monitor_pdev;
+
+	if (mon_pdev && mac_id == pdev->pdev_id &&
+	    READ_ONCE(mon_pdev->wonder_airtime_enabled))
+		stats_type_upload_mask |= 1U << HTT_PPDU_STATS_COMMON_TLV;
+#endif
 
 	msg = dp_htt_htc_msg_alloc(
 			soc->osdev,
@@ -5393,9 +5414,73 @@ QDF_STATUS dp_h2t_cfg_stats_msg_send(struct dp_pdev *pdev,
 		qdf_nbuf_free(msg);
 		htt_htc_pkt_free(soc, pkt);
 	}
+#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT)
+	else if (mon_pdev && mac_id == pdev->pdev_id) {
+		/* Record current base requests, including changes made while owned. */
+		WRITE_ONCE(mon_pdev->wonder_airtime_base_mask, requested_mask);
+	}
+#endif
 
 	return status;
 }
+
+QDF_STATUS dp_h2t_cfg_stats_msg_send(struct dp_pdev *pdev,
+		uint32_t stats_type_upload_mask, uint8_t mac_id)
+{
+#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT)
+	QDF_STATUS status;
+
+	spin_lock_bh(&dp_wonder_airtime_config_lock);
+	status = dp_h2t_cfg_stats_msg_send_locked(pdev, stats_type_upload_mask,
+						 mac_id);
+	spin_unlock_bh(&dp_wonder_airtime_config_lock);
+	return status;
+#else
+	return dp_h2t_cfg_stats_msg_send_locked(pdev, stats_type_upload_mask, mac_id);
+#endif
+}
+
+#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT)
+QDF_STATUS dp_htt_wonder_set_airtime(struct dp_pdev *pdev, uint8_t monitor_id,
+				     bool enabled)
+{
+	struct dp_mon_pdev *mon_pdev = pdev->monitor_pdev;
+	QDF_STATUS status;
+
+	spin_lock_bh(&dp_wonder_airtime_config_lock);
+	if (mon_pdev->wonder_airtime_enabled) {
+		if (mon_pdev->wonder_airtime_vdev_id != monitor_id) {
+			status = QDF_STATUS_E_BUSY;
+			goto unlock;
+		}
+		if (enabled) {
+			status = QDF_STATUS_SUCCESS;
+			goto unlock;
+		}
+	} else if (!enabled) {
+		status = QDF_STATUS_SUCCESS;
+		goto unlock;
+	}
+	qdf_spin_lock_bh(&mon_pdev->ppdu_stats_lock);
+	mon_pdev->wonder_airtime_vdev_id = monitor_id;
+	if (enabled)
+		qdf_mem_zero(mon_pdev->wonder_airtime_last,
+			     sizeof(mon_pdev->wonder_airtime_last));
+	WRITE_ONCE(mon_pdev->wonder_airtime_enabled, enabled);
+	qdf_spin_unlock_bh(&mon_pdev->ppdu_stats_lock);
+	status = dp_h2t_cfg_stats_msg_send_locked(pdev,
+			mon_pdev->wonder_airtime_base_mask, pdev->pdev_id);
+	if (QDF_IS_STATUS_ERROR(status) && enabled) {
+		qdf_spin_lock_bh(&mon_pdev->ppdu_stats_lock);
+		WRITE_ONCE(mon_pdev->wonder_airtime_enabled, false);
+		qdf_spin_unlock_bh(&mon_pdev->ppdu_stats_lock);
+	}
+	/* Failed disable reports a firmware restore error but releases ownership. */
+unlock:
+	spin_unlock_bh(&dp_wonder_airtime_config_lock);
+	return status;
+}
+#endif
 
 qdf_export_symbol(dp_h2t_cfg_stats_msg_send);
 #endif

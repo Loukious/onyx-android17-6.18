@@ -65,6 +65,7 @@
 #include "wlan_ipa_ucfg_api.h"
 #include "wlan_hdd_stats.h"
 #include "wlan_hdd_main.h"
+#include "wlan_hdd_wonder.h"
 
 #ifdef TX_MULTIQ_PER_AC
 #if defined(QCA_LL_TX_FLOW_CONTROL_V2) || defined(QCA_LL_PDEV_TX_FLOW_CONTROL)
@@ -542,14 +543,15 @@ static int hdd_injection_mcs(const uint8_t *mcs,
 
 	if (params->rate_valid)
 		return -EINVAL;
-	/* The injection helper advertises one spatial stream. */
-	if (!(known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) || mcs[2] > 7 ||
+	if (!(known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) || mcs[2] > 15 ||
 	    known & ~(IEEE80211_RADIOTAP_MCS_HAVE_BW |
 		      IEEE80211_RADIOTAP_MCS_HAVE_MCS |
 		      IEEE80211_RADIOTAP_MCS_HAVE_GI |
 		      IEEE80211_RADIOTAP_MCS_HAVE_FMT |
 		      IEEE80211_RADIOTAP_MCS_HAVE_FEC |
 		      IEEE80211_RADIOTAP_MCS_HAVE_STBC))
+		return -EOPNOTSUPP;
+	if (flags & ~(IEEE80211_RADIOTAP_MCS_BW_MASK | IEEE80211_RADIOTAP_MCS_SGI))
 		return -EOPNOTSUPP;
 	if (((known & IEEE80211_RADIOTAP_MCS_HAVE_FMT) &&
 	     (flags & IEEE80211_RADIOTAP_MCS_FMT_GF)) ||
@@ -564,8 +566,9 @@ static int hdd_injection_mcs(const uint8_t *mcs,
 		return -EOPNOTSUPP;
 
 	params->rate_valid = true;
-	params->mcs_mask = BIT(mcs[2]);
-	params->nss_mask = 1;
+	/* HTT carries per-stream MCS separately from NSS, not combined HT indices. */
+	params->mcs_mask = BIT(mcs[2] % 8);
+	params->nss_mask = BIT(mcs[2] / 8);
 	params->preamble = CDP_INJECTION_HT;
 	if (known & IEEE80211_RADIOTAP_MCS_HAVE_BW) {
 		params->bandwidth_valid = true;
@@ -577,6 +580,90 @@ static int hdd_injection_mcs(const uint8_t *mcs,
 		params->guard_interval =
 			!(flags & IEEE80211_RADIOTAP_MCS_SGI);
 	}
+	return 0;
+}
+
+static int hdd_injection_vht(const uint8_t *vht,
+			     struct cdp_tx_injection_params *params)
+{
+	u16 known = get_unaligned_le16(vht);
+	u8 mcs = vht[4] >> 4, nss = vht[4] & 0xf;
+	u8 bw;
+
+	if (params->rate_valid)
+		return -EINVAL;
+	if ((known & ~(IEEE80211_RADIOTAP_VHT_KNOWN_GI |
+		       IEEE80211_RADIOTAP_VHT_KNOWN_BANDWIDTH)) ||
+	    !(known & IEEE80211_RADIOTAP_VHT_KNOWN_BANDWIDTH) ||
+	    (vht[2] & ~IEEE80211_RADIOTAP_VHT_FLAG_SGI) ||
+	    vht[5] || vht[6] || vht[7] || vht[8] || vht[9] ||
+	    get_unaligned_le16(vht + 10) || nss < 1 || nss > 2 || mcs > 9)
+		return -EOPNOTSUPP;
+	/* Only full-channel SU bandwidths, not sideband or MU encodings. */
+	switch (vht[3]) {
+	case 0: bw = 2; break;
+	case 1: bw = 3; break;
+	case 4: bw = 4; break;
+	default: return -EOPNOTSUPP;
+	}
+	if (bw == 2 && mcs == 9)
+		return -EOPNOTSUPP;
+	params->rate_valid = true;
+	params->preamble = CDP_INJECTION_VHT;
+	params->mcs_mask = BIT(mcs);
+	params->nss_mask = BIT(nss - 1);
+	params->bandwidth_valid = true;
+	params->bw_mask = BIT(bw);
+	if (known & IEEE80211_RADIOTAP_VHT_KNOWN_GI) {
+		params->gi_valid = true;
+		params->guard_interval = !(vht[2] & IEEE80211_RADIOTAP_VHT_FLAG_SGI);
+	}
+	return 0;
+}
+
+static int hdd_injection_he(const uint8_t *he,
+			    struct cdp_tx_injection_params *params)
+{
+	u16 d1 = get_unaligned_le16(he), d2 = get_unaligned_le16(he + 2);
+	u16 d3 = get_unaligned_le16(he + 4), d4 = get_unaligned_le16(he + 6);
+	u16 d5 = get_unaligned_le16(he + 8), d6 = get_unaligned_le16(he + 10);
+	u8 mcs = (d3 & IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS) >> 8;
+	u8 nss = d6 & IEEE80211_RADIOTAP_HE_DATA6_NSTS;
+	u8 bw = d5 & IEEE80211_RADIOTAP_HE_DATA5_DATA_BW_RU_ALLOC;
+	u8 gi = (d5 & IEEE80211_RADIOTAP_HE_DATA5_GI) >> 4;
+	u8 ltf = (d5 & IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE) >> 6;
+	u16 required = IEEE80211_RADIOTAP_HE_DATA1_DATA_MCS_KNOWN |
+		       IEEE80211_RADIOTAP_HE_DATA1_BW_RU_ALLOC_KNOWN;
+
+	if (params->rate_valid)
+		return -EINVAL;
+	/* HTT supports HE SU MCS/NSS/BW/GI/LTF, not MU/RU, STBC, DCM or
+	 * explicit coding, beamforming, colour and spatial-reuse selections.
+	 */
+	if ((d1 & required) != required || (d1 & ~required) ||
+	    (d2 & ~IEEE80211_RADIOTAP_HE_DATA2_GI_KNOWN) ||
+	    (d3 & ~IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS) || d4 ||
+	    (d5 & ~(IEEE80211_RADIOTAP_HE_DATA5_DATA_BW_RU_ALLOC |
+		    IEEE80211_RADIOTAP_HE_DATA5_GI |
+		    IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE)) ||
+	    (d6 & ~IEEE80211_RADIOTAP_HE_DATA6_NSTS) ||
+	    mcs > 11 || nss < 1 || nss > 2 || bw > 2 || gi > 2 ||
+	    (!(d2 & IEEE80211_RADIOTAP_HE_DATA2_GI_KNOWN) && gi))
+		return -EOPNOTSUPP;
+	/* Default is 0.8 us/2x. 1.6 us requires 2x; 3.2 us requires 4x. */
+	if (!ltf)
+		ltf = gi == 2 ? 3 : 2;
+	if ((gi == 0 && ltf == 3) || (gi == 1 && ltf != 2) || (gi == 2 && ltf != 3))
+		return -EOPNOTSUPP;
+	params->rate_valid = true;
+	params->preamble = CDP_INJECTION_HE_SU;
+	params->mcs_mask = BIT(mcs);
+	params->nss_mask = BIT(nss - 1);
+	params->bandwidth_valid = true;
+	params->bw_mask = BIT(bw + 2);
+	params->gi_valid = true;
+	params->guard_interval = gi + 1;
+	params->he_ltf = ltf - 1;
 	return 0;
 }
 
@@ -598,12 +685,46 @@ static int hdd_injection_radiotap_present(const uint8_t *data, uint16_t len)
 		allowed = BIT(IEEE80211_RADIOTAP_EXT) |
 			  BIT(IEEE80211_RADIOTAP_RADIOTAP_NAMESPACE);
 		if (standard)
-			allowed |= GENMASK(IEEE80211_RADIOTAP_VHT, 0) & ~BIT(18);
+			allowed |= (GENMASK(IEEE80211_RADIOTAP_VHT, 0) & ~BIT(18)) |
+				   BIT(IEEE80211_RADIOTAP_HE);
 		if (present & ~allowed)
 			return -EOPNOTSUPP;
 		standard = present & BIT(IEEE80211_RADIOTAP_RADIOTAP_NAMESPACE);
 		offset += sizeof(uint32_t);
 	} while (present & BIT(IEEE80211_RADIOTAP_EXT));
+	return 0;
+}
+
+static int
+hdd_injection_radiotap_next(struct ieee80211_radiotap_iterator *iter)
+{
+	unsigned long offset;
+	int ret;
+
+	ret = ieee80211_radiotap_iterator_next(iter);
+	if (ret != -ENOENT || !iter->is_radiotap_ns ||
+	    iter->_arg_index != IEEE80211_RADIOTAP_HE ||
+	    !(iter->_bitmap_shifter & 1))
+		return ret;
+
+	/*
+	 * The pinned cfg80211 iterator stops before HE because its standard
+	 * size table ends at VHT. Supply only the fixed HE field it stopped
+	 * at, then let it process every later bitmap and namespace normally.
+	 * Radiotap alignment is relative to the header, not the skb address.
+	 */
+	offset = iter->_arg - (uint8_t *)iter->_rtheader;
+	offset = ALIGN(offset, 2);
+	if (offset > iter->_max_length ||
+	    sizeof(struct ieee80211_radiotap_he) > iter->_max_length - offset)
+		return -EINVAL;
+
+	iter->this_arg = (uint8_t *)iter->_rtheader + offset;
+	iter->this_arg_index = IEEE80211_RADIOTAP_HE;
+	iter->this_arg_size = sizeof(struct ieee80211_radiotap_he);
+	iter->_arg = iter->this_arg + iter->this_arg_size;
+	iter->_bitmap_shifter >>= 1;
+	iter->_arg_index++;
 	return 0;
 }
 
@@ -629,7 +750,7 @@ static int hdd_parse_injection_radiotap(struct sk_buff *skb,
 	if (ret)
 		return ret;
 
-	while (!(ret = ieee80211_radiotap_iterator_next(&iter))) {
+	while (!(ret = hdd_injection_radiotap_next(&iter))) {
 		if (!iter.is_radiotap_ns)
 			return -EOPNOTSUPP;
 		switch (iter.this_arg_index) {
@@ -647,6 +768,16 @@ static int hdd_parse_injection_radiotap(struct sk_buff *skb,
 			break;
 		case IEEE80211_RADIOTAP_MCS:
 			ret = hdd_injection_mcs(iter.this_arg, params);
+			if (ret)
+				return ret;
+			break;
+		case IEEE80211_RADIOTAP_VHT:
+			ret = hdd_injection_vht(iter.this_arg, params);
+			if (ret)
+				return ret;
+			break;
+		case IEEE80211_RADIOTAP_HE:
+			ret = hdd_injection_he(iter.this_arg, params);
 			if (ret)
 				return ret;
 			break;
@@ -800,6 +931,11 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 		kfree_skb(skb);
 		return;
 	}
+#ifdef FEATURE_WLAN_WONDER
+	if (READ_ONCE(adapter->wonder_owned) &&
+	    !hdd_wonder_transport_ready(adapter))
+		goto drop;
+#endif
 
 	if (skb_is_gso(skb)) {
 		ret = -EOPNOTSUPP;
@@ -834,8 +970,14 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 	skb->mark = 0;
 	skb_reset_mac_header(skb);
 
-	status = wma_injection_tx((qdf_nbuf_t)skb,
-				  adapter->deflink->vdev_id, &params);
+#ifdef FEATURE_WLAN_WONDER
+	if (READ_ONCE(adapter->wonder_owned)) {
+		ret = hdd_wonder_injection_tx(adapter, skb, &params);
+		status = ret ? QDF_STATUS_E_AGAIN : QDF_STATUS_SUCCESS;
+	} else
+#endif
+		status = wma_injection_tx((qdf_nbuf_t)skb,
+					  adapter->deflink->vdev_id, &params);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		hdd_dp_warn_rl("monitor tx: injection failed vdev %u status %d",
 			       adapter->deflink->vdev_id, status);

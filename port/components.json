@@ -37,7 +37,8 @@
       ":rproc_qcom_common",
       ":qmi_helpers",
       ":icnss2",
-      ":onyx_relay"
+      ":onyx_relay",
+      ":wonder_headers"
     ],
     "ipclite_deps": [
       ":gpu_stack_headers",
@@ -595,7 +596,8 @@
       "-include",
       "$(location qcacld-3.0/configs/default_config.h)",
       "-include",
-      "$(location :qcom/opensource/dataipa/config/dataipa_vendor.h)"
+      "$(location :qcom/opensource/dataipa/config/dataipa_vendor.h)",
+      "-DFEATURE_WLAN_WONDER"
     ]
   },
   "native_configs": {
@@ -655,7 +657,8 @@
     "ATH9K_WOW": "n",
     "ATH9K_RFKILL": "n",
     "ATH9K_CHANNEL_CONTEXT": "n",
-    "ATH9K_HWRNG": "n"
+    "ATH9K_HWRNG": "n",
+    "AUXILIARY_BUS": "y"
   },
   "components": [
     {
@@ -9310,6 +9313,7 @@
         "cfg80211_update_owe_info_event",
         "cfg80211_vendor_cmd_get_sender",
         "cfg80211_vendor_cmd_reply",
+        "get_wiphy_regdom",
         "ieee80211_channel_to_freq_khz",
         "ieee80211_freq_khz_to_channel",
         "ieee80211_get_channel_khz",
@@ -10689,7 +10693,13 @@
           "qcacld-3.0/core/pld/src/pld_common.c",
           "qcacld-3.0/core/pld/src/pld_ipci.c",
           "qcacld-3.0/configs/default_config.h",
-          ":qcom/opensource/dataipa/config/dataipa_vendor.h"
+          ":qcom/opensource/dataipa/config/dataipa_vendor.h",
+          "qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c",
+          "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_coex.c",
+          "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_dwell.c",
+          "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c",
+          "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c",
+          "qcacld-3.0/core/wma/src/wma_wonder_tsf.c"
         ],
         "kconfig": "Kconfig",
         "defconfig": "platform_defconfig",
@@ -10719,7 +10729,8 @@
           ":icnss2",
           ":onyx_relay",
           ":wlan_main_extra_0",
-          ":wlan_main_extra_1"
+          ":wlan_main_extra_1",
+          ":wonder_headers"
         ],
         "copts": {
           "ref": "wlan_copts"
@@ -12320,7 +12331,27 @@
       "output": "net/mac80211/mac80211.ko",
       "configs": {
         "MAC80211": "m"
-      }
+      },
+      "required_exports": [
+        "__ieee80211_schedule_txq",
+        "ieee80211_alloc_hw_nm",
+        "ieee80211_emulate_add_chanctx",
+        "ieee80211_emulate_change_chanctx",
+        "ieee80211_emulate_remove_chanctx",
+        "ieee80211_free_hw",
+        "ieee80211_next_txq",
+        "ieee80211_register_hw",
+        "ieee80211_rx_napi",
+        "ieee80211_start_tx_ba_cb_irqsafe",
+        "ieee80211_stop_tx_ba_cb_irqsafe",
+        "ieee80211_tx_dequeue",
+        "ieee80211_tx_status_ext",
+        "ieee80211_txq_get_depth",
+        "ieee80211_txq_schedule_start",
+        "ieee80211_unregister_hw",
+        "ieee80211_vif_to_wdev",
+        "wiphy_to_ieee80211_hw"
+      ]
     },
     {
       "kind": "vendor_ddk",
@@ -14105,6 +14136,64 @@
       "configs": {
         "ATH9K_HTC": "m"
       }
+    },
+    {
+      "kind": "vendor_ddk",
+      "rule": "ddk_headers",
+      "name": "wonder_headers",
+      "attrs": {
+        "hdrs": {
+          "glob": [
+            "wonder/include/**/*.h"
+          ]
+        },
+        "includes": [
+          "wonder/include"
+        ],
+        "visibility": [
+          "//visibility:public"
+        ]
+      }
+    },
+    {
+      "kind": "vendor_ddk",
+      "rule": "ddk_module",
+      "name": "wonder",
+      "attrs": {
+        "srcs": {
+          "concat": [
+            {
+              "glob": [
+                "wonder/**/*.h"
+              ]
+            },
+            [
+              "wonder/band_config.c",
+              "wonder/mac80211.c",
+              "wonder/mac80211_txs.c",
+              "wonder/main.c",
+              "wonder/nl80211_ven_cmd.c",
+              "wonder/ssr.c",
+              "wonder/wondertap.c",
+              "wonder/debugfs.c"
+            ]
+          ]
+        },
+        "out": "wonder.ko",
+        "kconfig": "wonder/Kconfig",
+        "defconfig": "wonder/wonder_fragment",
+        "deps": [
+          ":wonder_headers",
+          ":mac80211",
+          ":cfg80211"
+        ],
+        "copts": [
+          "-DDYNAMIC_DEBUG_MODULE"
+        ],
+        "visibility": [
+          "//visibility:public"
+        ]
+      }
     }
   ],
   "source_groups": {
@@ -14514,6 +14603,16 @@
         "discovery": {
           "glob": []
         }
+      },
+      {
+        "project": "baseline/kernel/google/wonder",
+        "prefixes": [
+          "wonder"
+        ],
+        "destination_prefix": "wonder",
+        "discovery": {
+          "from_recipes": true
+        }
       }
     ],
     "ownership_overrides": {
@@ -14707,6 +14806,11 @@
         "qcacld-3.0/Kconfig",
         "qcacld-3.0/Makefile",
         "qcacld-3.0/configs/sun_consolidate_wcn7750_defconfig"
+      ],
+      "baseline/kernel/google/wonder": [
+        "wonder/Kconfig",
+        "wonder/Makefile",
+        "wonder/wonder_fragment"
       ]
     },
     "rom_source_checksums": {
@@ -14714,6 +14818,11 @@
         "glob": [
           "qcom/opensource/dataipa/**",
           "qcom/opensource/datarmnet-ext/mem/**"
+        ]
+      },
+      "baseline/kernel/google/wonder": {
+        "glob": [
+          "wonder/**"
         ]
       }
     }

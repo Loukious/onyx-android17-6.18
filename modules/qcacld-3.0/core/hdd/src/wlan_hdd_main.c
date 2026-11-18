@@ -28,6 +28,7 @@
 #include <wbuff.h>
 #include "cfg_ucfg_api.h"
 #include <wlan_hdd_includes.h>
+#include <wlan_hdd_wonder.h>
 #include <cds_api.h>
 #include <cds_sched.h>
 #include <linux/cpu.h>
@@ -3941,6 +3942,8 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
 	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
 }
 
+static int hdd_sta_mon_idle_preflight(struct hdd_context *hdd_ctx);
+
 static int
 hdd_sta_mon_start_channel(struct hdd_adapter *adapter,
 			  struct wlan_mlme_sta_mon_snapshot *snapshot)
@@ -4020,9 +4023,50 @@ hdd_sta_mon_start_channel(struct hdd_adapter *adapter,
 	ret = !mon_chan ||
 		QDF_IS_STATUS_ERROR(wlan_vdev_is_up_active_state(mon_vdev)) ||
 		!hdd_sta_mon_channel_equal(mon_chan, chan) ? -EBUSY : 0;
+	if (!ret && snapshot->exclusive) {
+		live = *snapshot;
+		/* Preserve the firmware's complete channel, including phymode
+		 * and flags used by the native helper's exact power-owner check.
+		 */
+		live.channel = *mon_chan;
+		if (wlan_objmgr_pdev_get_pdev_id(wlan_vdev_get_pdev(mon_vdev)) !=
+		    snapshot->pdev_id)
+			ret = -EBUSY;
+	}
 	hdd_objmgr_put_vdev_by_user(mon_vdev, WLAN_INIT_DEINIT_ID);
 	if (ret)
 		return ret;
+
+	if (snapshot->exclusive) {
+		/* No associated owner exists. Validate the monitor itself after
+		 * its real native START, including the complete channel and lmac.
+		 */
+		ret = hdd_sta_mon_idle_preflight(hdd_ctx);
+		if (ret)
+			return ret;
+		live.mon_vdev_id = adapter->deflink->vdev_id;
+		live.mac_id = wlan_mlme_get_vdev_mac_id(hdd_ctx->pdev,
+						      live.mon_vdev_id);
+		if (live.mac_id >= MAX_MAC ||
+		    !wlan_mlme_sta_mon_handoff_ready(hdd_ctx->psoc, &live))
+			return -EBUSY;
+		/* The helper takes actual monitor ext-TPC and real objmgr IDs. */
+		ucfg_dp_sta_mon_coex_pause(hdd_ctx->psoc);
+		wma_injection_pre_stop_cleanup();
+		if (!wma_injection_handoff_is_quiesced())
+			return -EBUSY;
+		status = wma_injection_exclusive_resume(live.mon_vdev_id,
+					live.generation, adapter->dev->dev_addr);
+		if (QDF_IS_STATUS_ERROR(status))
+			return qdf_status_to_os_return(status);
+		if (!wlan_mlme_sta_mon_handoff_complete(hdd_ctx->psoc,
+						       live.generation))
+			return -EBUSY;
+		hdd_info("AP-free native monitor ready: monitor=%u generation=%llu freq=%u width=%u mac=%u",
+			 live.mon_vdev_id, live.generation, live.channel.ch_freq,
+			 live.channel.ch_width, live.mac_id);
+		return 0;
+	}
 
 	ret = hdd_sta_mon_snapshot(hdd_ctx, &live);
 	if (ret || live.sta_vdev_id != snapshot->sta_vdev_id ||
@@ -4142,16 +4186,82 @@ next_adapter:
 	return ret;
 }
 
+/* An enabled Android STA is an owner even when unassociated. Only an
+ * explicit Wonder native-exclusive lease may borrow its idle radio. The
+ * preflight runs again after arm; longer-lived work owns MLME update refs.
+ */
+static int hdd_sta_mon_idle_preflight(struct hdd_context *hdd_ctx)
+{
+	struct wlan_mlme_sta_mon_snapshot idle = { .exclusive = true };
+	struct hdd_adapter *adapter, *next;
+	struct wlan_hdd_link_info *link;
+	struct wlan_objmgr_vdev *vdev;
+	bool have_open_sta = false;
+	int ret;
+	wlan_net_dev_ref_dbgid dbg = NET_DEV_HOLD_GET_ADAPTER;
+
+	if (hdd_is_connection_in_progress(NULL, NULL) ||
+	    policy_mgr_mode_specific_connection_count(hdd_ctx->psoc,
+						     PM_STA_MODE, NULL))
+		return -EBUSY;
+	ret = hdd_sta_mon_exclusive_preflight(hdd_ctx, &idle);
+	if (ret)
+		return ret;
+	hdd_for_each_adapter_dev_held_safe(hdd_ctx, adapter, next, dbg) {
+		if (ret)
+			goto next_adapter;
+		if (adapter->device_mode == QDF_P2P_CLIENT_MODE ||
+		    adapter->delete_in_progress) {
+			ret = -EBUSY;
+			goto next_adapter;
+		}
+		if (adapter->device_mode != QDF_STA_MODE)
+			goto next_adapter;
+		if ((adapter->dev->flags & IFF_UP) &&
+		    test_bit(DEVICE_IFACE_OPENED, &adapter->event_flags))
+			have_open_sta = true;
+		hdd_adapter_for_each_active_link_info(adapter, link) {
+			vdev = hdd_objmgr_get_vdev_by_user(link, WLAN_OSIF_CM_ID);
+			if (!vdev) {
+				ret = -EBUSY;
+				break;
+			}
+			/* A CM-disconnected link must also be physically down.
+			 * This checks every active MLO link without issuing a
+			 * fan-out disconnect or touching Android's STA flags.
+			 */
+			if (!ucfg_cm_is_vdev_disconnected(vdev) ||
+			    QDF_IS_STATUS_SUCCESS(wlan_vdev_is_up_active_state(vdev)))
+				ret = -EBUSY;
+			hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_CM_ID);
+			if (ret)
+				break;
+		}
+next_adapter:
+		hdd_adapter_dev_put_debug(adapter, dbg);
+	}
+	return ret ? ret : have_open_sta ? 0 : -EBUSY;
+}
+
 static int
 hdd_sta_mon_validate_exclusive_channel(struct hdd_adapter *adapter,
 				       const struct wlan_channel *channel,
 				       struct ch_params *params)
 {
 	struct hdd_context *hdd_ctx = adapter->hdd_ctx;
+	struct ieee80211_channel *cfg_channel;
 	uint32_t width, first, freq, secondary = 0;
 	enum channel_state state;
 	uint8_t power;
 
+	/* This path validates a native monitor before its objmgr vdev exists. */
+	if (adapter->device_mode != QDF_MONITOR_MODE)
+		return -EINVAL;
+	cfg_channel = ieee80211_get_channel(hdd_ctx->wiphy, channel->ch_freq);
+	if (!cfg_channel || cfg_channel->flags &
+	    (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_IR |
+	     IEEE80211_CHAN_RADAR))
+		return -EOPNOTSUPP;
 	if ((!WLAN_REG_IS_24GHZ_CH_FREQ(channel->ch_freq) &&
 	     !WLAN_REG_IS_5GHZ_CH_FREQ(channel->ch_freq)) || channel->ch_cfreq2)
 		return -EOPNOTSUPP;
@@ -4202,9 +4312,49 @@ hdd_sta_mon_validate_exclusive_channel(struct hdd_adapter *adapter,
 		    power == REG_INVALID_TXPOWER || power > 127)
 			return -EOPNOTSUPP;
 	}
-	return hdd_validate_channel_and_bandwidth(adapter, channel->ch_freq,
-						0, channel->ch_width);
+	/* All monitor channel checks are complete. The generic validator also
+	 * requires a live vdev solely for P2P GO DFS-assist policy, while this
+	 * native bootstrap runs before hdd_start_adapter creates that vdev.
+	 */
+	return 0;
 }
+
+#ifdef FEATURE_WLAN_WONDER
+int hdd_wonder_build_exclusive_channel(struct hdd_adapter *adapter,
+				u32 frequency, u32 bandwidth,
+				struct wlan_channel *channel)
+{
+	struct hdd_context *hdd_ctx = adapter->hdd_ctx;
+	struct ieee80211_channel *cfg_channel;
+	struct ch_params params = {0};
+	int ret;
+
+	if (!channel || frequency > U16_MAX ||
+	    (bandwidth != CH_WIDTH_20MHZ && bandwidth != CH_WIDTH_40MHZ &&
+	     bandwidth != CH_WIDTH_80MHZ))
+		return -EOPNOTSUPP;
+	cfg_channel = ieee80211_get_channel(hdd_ctx->wiphy, frequency);
+	if (!cfg_channel || cfg_channel->flags &
+	    (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_IR |
+	     IEEE80211_CHAN_RADAR))
+		return -EOPNOTSUPP;
+	params.ch_width = bandwidth;
+	wlan_reg_set_channel_params_for_pwrmode(hdd_ctx->pdev, frequency,
+					       0, &params, REG_CURRENT_PWR_MODE);
+	if (params.ch_width != bandwidth)
+		return -EOPNOTSUPP;
+	qdf_mem_zero(channel, sizeof(*channel));
+	channel->ch_freq = frequency;
+	channel->ch_ieee = wlan_reg_freq_to_chan(hdd_ctx->pdev, frequency);
+	channel->ch_width = bandwidth;
+	channel->ch_cfreq1 = params.mhz_freq_seg0;
+	channel->ch_cfreq2 = params.mhz_freq_seg1;
+	channel->ch_freq_seg1 = params.center_freq_seg0;
+	channel->ch_freq_seg2 = params.center_freq_seg1;
+	ret = hdd_sta_mon_validate_exclusive_channel(adapter, channel, &params);
+	return ret;
+}
+#endif
 
 int hdd_sta_mon_set_channel(struct hdd_adapter *adapter,
 			    const struct wlan_channel *requested)
@@ -4484,6 +4634,10 @@ static int __hdd_mon_open(struct net_device *dev)
 	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(adapter);
 	struct bbm_params param = {0};
 	struct wlan_mlme_sta_mon_snapshot coex;
+	bool exclusive = false;
+#ifdef FEATURE_WLAN_WONDER
+	u32 frequency, bandwidth;
+#endif
 
 	hdd_enter_dev(dev);
 
@@ -4506,7 +4660,24 @@ static int __hdd_mon_open(struct net_device *dev)
 	if (ret)
 		return ret;
 	if (adapter->sta_mon_coexist) {
-		ret = hdd_sta_mon_snapshot(hdd_ctx, &coex);
+#ifdef FEATURE_WLAN_WONDER
+		exclusive = hdd_wonder_get_init_channel(adapter, &frequency,
+						      &bandwidth);
+		if (exclusive) {
+			qdf_mem_zero(&coex, sizeof(coex));
+			coex.exclusive = true;
+			coex.sta_vdev_id = WLAN_INVALID_VDEV_ID;
+			coex.mon_vdev_id = WLAN_INVALID_VDEV_ID;
+			coex.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+			coex.pdev_id = wlan_objmgr_pdev_get_pdev_id(hdd_ctx->pdev);
+			coex.generation = wlan_mlme_sta_mon_epoch(hdd_ctx->psoc);
+			ret = hdd_sta_mon_idle_preflight(hdd_ctx);
+			if (!ret)
+				ret = hdd_wonder_build_exclusive_channel(adapter,
+						frequency, bandwidth, &coex.channel);
+		} else
+#endif
+			ret = hdd_sta_mon_snapshot(hdd_ctx, &coex);
 		if (ret)
 			return ret;
 		if (coex.sta_ap_coexist) {
@@ -4521,12 +4692,22 @@ static int __hdd_mon_open(struct net_device *dev)
 		}
 		if (!try_module_get(THIS_MODULE))
 			return -EBUSY;
-		if (!wlan_mlme_sta_mon_arm(hdd_ctx->psoc, &coex)) {
+		/* Arm and scan admission share the MLME control lock. A scan which
+		 * wins first changes the generation/counts and makes arm fail; one
+		 * arriving later sees the Wonder-only lease before invalidation.
+		 */
+		if (!wlan_mlme_sta_mon_arm(hdd_ctx->psoc, &coex,
+					   READ_ONCE(adapter->wonder_owned))) {
 			module_put(THIS_MODULE);
 			return -EBUSY;
 		}
 		adapter->sta_mon_module_held = true;
 		adapter->sta_mon_stop_failed = false;
+		if (exclusive && (hdd_sta_mon_idle_preflight(hdd_ctx) ||
+		    !wlan_mlme_sta_mon_start_valid(hdd_ctx->psoc, coex.generation))) {
+			ret = -EBUSY;
+			goto open_fail;
+		}
 	}
 
 	hdd_mon_mode_ether_setup(dev);
@@ -4605,6 +4786,9 @@ static int __hdd_mon_open(struct net_device *dev)
 
 open_fail:
 	if (adapter->sta_mon_coexist) {
+		if (exclusive)
+			wlan_mlme_sta_mon_handoff_cancel(hdd_ctx->psoc,
+						       coex.generation);
 		wlan_mlme_sta_mon_invalidate(hdd_ctx->psoc,
 					     WLAN_INVALID_VDEV_ID);
 		if (QDF_IS_STATUS_SUCCESS(hdd_stop_adapter(hdd_ctx, adapter)))
@@ -8641,10 +8825,14 @@ hdd_register_netdevice(struct hdd_adapter *adapter, struct net_device *dev,
 {
 	int ret;
 
-	if (params->is_add_virtual_iface)
+	if (params->is_add_virtual_iface) {
 		ret = wlan_cfg80211_register_netdevice(dev);
-	else
+		/* Match cleanup even when creation fails before the caller returns. */
+		if (!ret)
+			adapter->is_virtual_iface = true;
+	} else {
 		ret = register_netdevice(dev);
+	}
 
 	return ret;
 }
@@ -9516,6 +9704,10 @@ int hdd_vdev_create(struct wlan_hdd_link_info *link_info)
 
 	/* do vdev create via objmgr */
 	hdd_ctx = WLAN_HDD_GET_CTX(adapter);
+#ifdef FEATURE_WLAN_WONDER
+	if (!hdd_wonder_vdev_admission(adapter))
+		return -EBUSY;
+#endif
 
 	if (hdd_use_sta_vdev_for_p2p_dev_upon_vdev_exhaust(hdd_ctx))
 		hdd_debug("max vdev create limit reached, use sta vdev for p2p device operation");
@@ -11047,7 +11239,7 @@ struct hdd_adapter *hdd_open_adapter(struct hdd_context *hdd_ctx,
 
 	for (i = 0; i < NET_DEV_HOLD_ID_MAX; i++)
 		qdf_atomic_init(
-			&adapter->net_dev_hold_ref_count[NET_DEV_HOLD_ID_MAX]);
+			&adapter->net_dev_hold_ref_count[i]);
 
 	/* Add it to the hdd's session list. */
 	status = hdd_add_adapter_back(hdd_ctx, adapter);
@@ -13892,6 +14084,9 @@ void hdd_wlan_exit(struct hdd_context *hdd_ctx)
 	struct wiphy *wiphy = hdd_ctx->wiphy;
 
 	hdd_enter();
+
+	/* Unbind Wonder and drain its RX handler before closing WLAN adapters. */
+	hdd_wonder_unregister(hdd_ctx);
 
 	dp_wait_complete_tasks(gp_dp_ctx);
 	qdf_mutex_destroy(&mibstats_lock);
@@ -20544,6 +20739,8 @@ QDF_STATUS hdd_psoc_create_vdevs(struct hdd_context *hdd_ctx)
 	    driver_mode != QDF_GLOBAL_EPPING_MODE)
 		hdd_psoc_idle_timer_start(hdd_ctx);
 
+	hdd_wonder_register(hdd_ctx);
+
 	return QDF_STATUS_SUCCESS;
 }
 
@@ -22980,6 +23177,8 @@ static int __hdd_driver_mode_change(struct hdd_context *hdd_ctx,
 	if (!hdd_sta_mon_prepare_stop(hdd_ctx))
 		return -EBUSY;
 
+	hdd_wonder_unregister(hdd_ctx);
+
 	hdd_psoc_idle_timer_stop(hdd_ctx);
 
 	/* ensure adapters are stopped */
@@ -23048,6 +23247,8 @@ static int __hdd_driver_mode_change(struct hdd_context *hdd_ctx,
 	param.policy = BBM_DRIVER_MODE_POLICY;
 	param.policy_info.driver_mode = con_mode;
 	ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
+
+	hdd_wonder_register(hdd_ctx);
 
 	return 0;
 }
@@ -24706,11 +24907,28 @@ next_adapter:
 	return allowed && have_sta;
 }
 
-int
-wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
+#ifdef FEATURE_WLAN_WONDER
+bool hdd_wonder_can_start(struct hdd_context *hdd_ctx)
+{
+	struct wlan_mlme_sta_mon_snapshot coex;
+
+	return hdd_get_conparam() == QDF_GLOBAL_MISSION_MODE &&
+	       ucfg_mlme_is_sta_mon_conc_supported(hdd_ctx->psoc) &&
+	       !hdd_get_adapter(hdd_ctx, QDF_MONITOR_MODE) &&
+	       ucfg_pkt_capture_get_mode(hdd_ctx->psoc) ==
+						PACKET_CAPTURE_MODE_DISABLE &&
+	       (hdd_monitor_can_start_standalone(hdd_ctx) ||
+		!hdd_sta_mon_snapshot(hdd_ctx, &coex) ||
+		!hdd_sta_mon_idle_preflight(hdd_ctx));
+}
+#endif
+
+static int
+hdd_add_monitor_check(struct hdd_context *hdd_ctx,
 			   struct hdd_adapter **adapter,
 			   const char *name, bool rtnl_held,
-			   unsigned char name_assign_type, bool is_rx_mon)
+			   unsigned char name_assign_type, bool is_rx_mon,
+			   unsigned char *wonder_mac, bool *exclusive)
 {
 	struct hdd_adapter *sta_adapter;
 	struct hdd_adapter *mon_adapter;
@@ -24719,15 +24937,25 @@ wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
 	struct hdd_adapter_create_param params = {0};
 	struct wlan_mlme_sta_mon_snapshot coex;
 	bool use_coex = hdd_monitor_coexist_enabled() && is_rx_mon;
+	bool use_exclusive = false;
 	int ret;
 	struct iface_combination_params combo = {
 		.radio_idx = -1,
 		.num_different_channels = 1,
 	};
 
+	if (exclusive)
+		*exclusive = false;
 	sta_adapter = hdd_get_adapter(hdd_ctx, QDF_STA_MODE);
+	if (use_coex && wonder_mac && exclusive &&
+	    hdd_sta_mon_snapshot(hdd_ctx, &coex) &&
+	    !hdd_sta_mon_idle_preflight(hdd_ctx))
+		use_exclusive = true;
 	if (use_coex && hdd_monitor_can_start_standalone(hdd_ctx))
 		use_coex = false;
+	/* Wonder cannot repurpose a live Android STA as standalone monitor. */
+	if (wonder_mac && !use_coex && !hdd_monitor_can_start_standalone(hdd_ctx))
+		return -EBUSY;
 	if (!sta_adapter && !use_coex) {
 		hdd_err("No station adapter");
 		return -EINVAL;
@@ -24746,7 +24974,12 @@ wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
 			return -EOPNOTSUPP;
 		wlan_mlme_sta_mon_register(hdd_ctx->psoc,
 					  hdd_sta_mon_queue_stop, hdd_ctx);
-		ret = hdd_sta_mon_snapshot(hdd_ctx, &coex);
+		if (use_exclusive) {
+			qdf_mem_zero(&coex, sizeof(coex));
+			ret = hdd_sta_mon_idle_preflight(hdd_ctx);
+		} else {
+			ret = hdd_sta_mon_snapshot(hdd_ctx, &coex);
+		}
 		if (ret)
 			return ret;
 		combo.iftype_num[coex.ap_owner ? NL80211_IFTYPE_AP :
@@ -24788,13 +25021,12 @@ wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
 		wlan_hdd_del_p2p_interface(hdd_ctx);
 
 	params.is_add_virtual_iface = 1;
-	if (use_coex)
+	if (use_coex || wonder_mac)
 		params.num_sessions = 1;
 
 	mon_adapter = hdd_open_adapter(hdd_ctx, QDF_MONITOR_MODE, name,
-				       wlan_hdd_get_intf_addr(
-				       hdd_ctx,
-				       QDF_MONITOR_MODE),
+				       wonder_mac ?: wlan_hdd_get_intf_addr(
+				       hdd_ctx, QDF_MONITOR_MODE),
 				       name_assign_type, rtnl_held, &params);
 	if (!mon_adapter) {
 		hdd_err("hdd_open_adapter failed");
@@ -24812,8 +25044,29 @@ wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
 		hdd_set_idle_ps_config(hdd_ctx, false);
 
 	*adapter = mon_adapter;
+	if (exclusive)
+		*exclusive = use_exclusive;
 	return 0;
 }
+
+int wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
+			      struct hdd_adapter **adapter, const char *name,
+			      bool rtnl_held, unsigned char name_assign_type,
+			      bool is_rx_mon)
+{
+	return hdd_add_monitor_check(hdd_ctx, adapter, name, rtnl_held,
+				    name_assign_type, is_rx_mon, NULL, NULL);
+}
+
+#ifdef FEATURE_WLAN_WONDER
+int hdd_wonder_add_monitor(struct hdd_context *hdd_ctx,
+			   struct hdd_adapter **adapter, const char *name,
+			   unsigned char *mac, bool *exclusive)
+{
+	return hdd_add_monitor_check(hdd_ctx, adapter, name, true,
+				    NET_NAME_USER, true, mac, exclusive);
+}
+#endif
 
 #ifdef FEATURE_MONITOR_MODE_SUPPORT
 
@@ -24839,6 +25092,9 @@ void hdd_sme_monitor_mode_callback(uint8_t vdev_id, bool is_up)
 		return;
 	}
 	if (is_up) {
+#ifdef FEATURE_WLAN_WONDER
+		WRITE_ONCE(adapter->wonder_channel_complete_ns, ktime_get_ns());
+#endif
 		qdf_event_set(&adapter->qdf_monitor_mode_vdev_up_event);
 		hdd_debug("monitor mode vdev up completed for vdev %d",
 			  vdev_id);

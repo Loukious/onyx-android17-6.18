@@ -21,6 +21,26 @@ def hashes(root):
             for p in sorted(root.rglob("*")) if p.is_file() and p.name != RECEIPT}
 
 
+def source_bytes(workspace, source):
+    """Read the exact locked blob, allowing a reviewed destination prefix."""
+    from catalog import _path
+    _path(source["project"])
+    _path(source["path"])
+    source_path = source.get("source_path", source["path"])
+    _path(source_path)
+    repo = workspace / source["project"]
+    revision = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    if revision != source["revision"]:
+        raise ValueError(f"unexpected revision in {source['project']}; run prepare.py")
+    blob = subprocess.check_output([
+        "git", "-C", str(repo), "rev-parse", f"{revision}:{source_path}"
+    ], text=True).strip()
+    if blob != source["blob"]:
+        raise ValueError(f"unexpected source blob: {source_path}")
+    return subprocess.check_output(["git", "-C", str(repo), "cat-file", "blob", blob])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workspace", type=Path)
@@ -48,21 +68,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix=".onyx-stage-", dir=workspace) as temporary:
         root = Path(temporary)
         for source in imports:
-            repo = workspace / source["project"]
-            revision = subprocess.check_output(
-                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-            if revision != source["revision"]:
-                parser.error(f"unexpected revision in {source['project']}; run prepare.py")
-            blob = subprocess.check_output([
-                "git", "-C", str(repo), "rev-parse", f"{revision}:{source['path']}"
-            ], text=True).strip()
-            if blob != source["blob"]:
-                parser.error(f"unexpected source blob: {source['path']}")
+            try:
+                contents = source_bytes(workspace, source)
+            except ValueError as error:
+                parser.error(str(error))
             target = root / source["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(subprocess.check_output([
-                "git", "-C", str(repo), "cat-file", "blob", blob
-            ]))
+            target.write_bytes(contents)
         for patch in sorted((HERE / "patches").glob("*.patch")):
             subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i", str(patch)],
                            cwd=root, check=True)

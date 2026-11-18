@@ -38,6 +38,10 @@
 #include "qdf_mem.h"   /* qdf_mem_malloc,free */
 #include "dp_htt.h"
 #include "dp_mon.h"
+#if defined(QCA_WIFI_WCN7750) && defined(CONFIG_WORD_BASED_TLV) && \
+    defined(BE_NON_AP_COMPACT_TLV) && defined(NO_RX_PKT_HDR_TLV)
+#include "hal_be_rx.h"
+#endif
 #include "dp_rx_mon.h"
 #include "cdp_txrx_injection.h"
 #include "cdp_txrx_mon.h"
@@ -193,6 +197,119 @@ unlock:
 	mutex_unlock(&dp_sta_mon_binding_lock);
 }
 
+/* Caller holds RCU; unrelated live helper bindings are never selected. */
+static struct dp_sta_mon_helper_binding *
+dp_sta_mon_find_shared_binding(struct dp_soc *soc, struct dp_mon_mac *mon_mac)
+{
+	struct dp_sta_mon_helper_binding *binding;
+
+	list_for_each_entry_rcu(binding, &dp_sta_mon_bindings, list) {
+		if (binding->soc == soc && binding->mon_mac == mon_mac)
+			return binding;
+	}
+	return NULL;
+}
+
+/* Caller holds mon_lock and RCU; this validates the live destination owner. */
+static bool
+dp_sta_mon_shared_binding_live(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
+			       struct dp_sta_mon_helper_binding *binding,
+			       uint32_t mac_id)
+{
+	struct dp_vdev *monitor, *helper;
+
+	if (!binding || !dp_mon_is_sta_coex(soc) ||
+	    dp_mon_sta_coex_is_paused(soc))
+		return false;
+	monitor = binding->monitor;
+	helper = binding->helper;
+	return binding->soc == soc && binding->mon_mac == mon_mac &&
+		monitor && helper && monitor->pdev &&
+		monitor->pdev->soc == soc && helper->pdev == monitor->pdev &&
+		monitor->lmac_id == mac_id && helper->lmac_id == mac_id &&
+		mon_mac->mvdev == monitor && monitor->monitor_vdev &&
+		monitor->monitor_vdev->osif_rx_mon && monitor->osif_vdev &&
+		monitor->pdev->monitor_pdev->monitor_configured &&
+		binding->frequency && binding->frequency <= 65535 &&
+		mon_mac->mon_chan_freq == binding->frequency &&
+		smp_load_acquire(&helper->osif_rx) == dp_sta_mon_helper_rx_marker &&
+		rcu_dereference(helper->osif_vdev) == (void *)binding &&
+		binding->token_valid(binding->arg, monitor->vdev_id,
+				     binding->generation);
+}
+
+/* Caller holds mon_lock and RCU until the receive callback consumes @nbuf.
+ * Zero frequency marks data-path copies without measured channel provenance.
+ */
+static bool
+dp_sta_mon_publish(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
+		   struct dp_sta_mon_helper_binding *binding, qdf_nbuf_t nbuf,
+		   struct mon_rx_status *status, uint32_t measured_frequency)
+{
+#ifdef FEATURE_WLAN_WONDER
+	struct cdp_wonder_rx_lease lease = {0};
+#endif
+
+	if (!binding || !binding->monitor ||
+	    !dp_sta_mon_shared_binding_live(soc, mon_mac, binding,
+						     binding->monitor->lmac_id))
+		return false;
+#ifdef FEATURE_WLAN_WONDER
+	if (!wlan_injection_wonder_rx_begin(binding->arg,
+			binding->monitor->vdev_id, binding->generation,
+			measured_frequency, &lease))
+		return false;
+#else
+	if (measured_frequency && measured_frequency != binding->frequency)
+		return false;
+#endif
+	/* Admission and dwell revocation stay serialized through publication. */
+	binding->monitor->monitor_vdev->osif_rx_mon(
+		binding->monitor->osif_vdev, nbuf, status);
+#ifdef FEATURE_WLAN_WONDER
+	wlan_injection_wonder_rx_end(&lease);
+#endif
+	return true;
+}
+
+#ifdef FEATURE_WLAN_WONDER
+static uint32_t dp_sta_mon_measured_frequency(struct dp_mon_mac *mon_mac)
+{
+	if (!mon_mac->wonder_rx_frequency ||
+	    mon_mac->wonder_rx_frequency > 65535 ||
+	    mon_mac->wonder_rx_frequency_ppdu_id !=
+				mon_mac->ppdu_info.com_info.ppdu_id ||
+	    mon_mac->wonder_rx_frequency !=
+				mon_mac->ppdu_info.rx_status.chan_freq)
+		return 0;
+	return mon_mac->wonder_rx_frequency;
+}
+#endif
+
+/* Full monitor status and the MPDU have already been matched by the reaper. */
+static bool
+dp_sta_mon_publish_full(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
+			qdf_nbuf_t nbuf, struct mon_rx_status *status)
+{
+	struct dp_sta_mon_helper_binding *binding;
+	uint32_t frequency = 0;
+	bool delivered;
+
+	if (!dp_mon_is_sta_coex(soc)) {
+		mon_mac->mvdev->monitor_vdev->osif_rx_mon(
+			mon_mac->mvdev->osif_vdev, nbuf, status);
+		return true;
+	}
+#ifdef FEATURE_WLAN_WONDER
+	frequency = dp_sta_mon_measured_frequency(mon_mac);
+#endif
+	rcu_read_lock();
+	binding = dp_sta_mon_find_shared_binding(soc, mon_mac);
+	delivered = dp_sta_mon_publish(soc, mon_mac, binding, nbuf, status,
+				       frequency);
+	rcu_read_unlock();
+	return delivered;
+}
 /* Only fields known for this actual frame are exported, with the full MPDU. */
 struct dp_sta_mon_radiotap {
 	uint8_t version;
@@ -227,6 +344,7 @@ void dp_mon_sta_coex_mgmt_rx(struct cdp_soc_t *soc_hdl,
 	struct dp_vdev *monitor;
 	struct dp_mon_mac *mon_mac;
 	struct dp_mon_vdev *mon_vdev;
+	struct dp_sta_mon_helper_binding *binding;
 	struct dp_sta_mon_radiotap *rtap;
 	qdf_nbuf_t copy = NULL;
 	uint32_t length, header_len = sizeof(*rtap);
@@ -277,18 +395,16 @@ void dp_mon_sta_coex_mgmt_rx(struct cdp_soc_t *soc_hdl,
 		     qdf_nbuf_data(nbuf), length);
 
 	mon_mac = dp_get_mon_mac(monitor->pdev, mac_id);
+	rcu_read_lock();
 	qdf_spin_lock_bh(&mon_mac->mon_lock);
 	mon_vdev = monitor->monitor_vdev;
-	if (mon_mac->mvdev == monitor && mon_vdev &&
-	    mon_vdev->osif_rx_mon && monitor->osif_vdev &&
-	    monitor->pdev->monitor_pdev->monitor_configured &&
-	    mon_mac->mon_chan_freq == frequency &&
-	    dp_mon_is_sta_coex(soc) && !dp_mon_sta_coex_is_paused(soc) &&
-	    token_valid(arg, monitor_id, generation)) {
-		mon_vdev->osif_rx_mon(monitor->osif_vdev, copy, NULL);
+	binding = dp_sta_mon_find_shared_binding(soc, mon_mac);
+	if (mon_vdev && binding && binding->monitor == monitor &&
+	    binding->generation == generation && binding->arg == arg &&
+	    dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, frequency))
 		copy = NULL;
-	}
 	qdf_spin_unlock_bh(&mon_mac->mon_lock);
+	rcu_read_unlock();
 out:
 	if (copy)
 		qdf_nbuf_free(copy);
@@ -361,46 +477,6 @@ dp_sta_mon_eapol_span(const uint8_t *header, uint32_t captured_len,
 	return true;
 }
 
-/* Caller holds RCU; unrelated live helper bindings are never selected. */
-static struct dp_sta_mon_helper_binding *
-dp_sta_mon_find_shared_binding(struct dp_soc *soc, struct dp_mon_mac *mon_mac)
-{
-	struct dp_sta_mon_helper_binding *binding;
-
-	list_for_each_entry_rcu(binding, &dp_sta_mon_bindings, list) {
-		if (binding->soc == soc && binding->mon_mac == mon_mac)
-			return binding;
-	}
-	return NULL;
-}
-
-/* Caller holds mon_lock and RCU; this validates the live destination owner. */
-static bool
-dp_sta_mon_shared_binding_live(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
-			       struct dp_sta_mon_helper_binding *binding,
-			       uint32_t mac_id)
-{
-	struct dp_vdev *monitor, *helper;
-
-	if (!binding || !dp_mon_is_sta_coex(soc) ||
-	    dp_mon_sta_coex_is_paused(soc))
-		return false;
-	monitor = binding->monitor;
-	helper = binding->helper;
-	return binding->soc == soc && binding->mon_mac == mon_mac &&
-		monitor && helper && monitor->pdev &&
-		monitor->pdev->soc == soc && helper->pdev == monitor->pdev &&
-		monitor->lmac_id == mac_id && helper->lmac_id == mac_id &&
-		mon_mac->mvdev == monitor && monitor->monitor_vdev &&
-		monitor->monitor_vdev->osif_rx_mon && monitor->osif_vdev &&
-		monitor->pdev->monitor_pdev->monitor_configured &&
-		binding->frequency && binding->frequency <= 65535 &&
-		mon_mac->mon_chan_freq == binding->frequency &&
-		smp_load_acquire(&helper->osif_rx) == dp_sta_mon_helper_rx_marker &&
-		rcu_dereference(helper->osif_vdev) == (void *)binding &&
-		binding->token_valid(binding->arg, monitor->vdev_id,
-				     binding->generation);
-}
 
 void dp_mon_sta_coex_copy_shared(struct dp_soc *soc, uint32_t mac_id,
 			       qdf_nbuf_t nbuf, uint32_t buffer_size,
@@ -506,11 +582,8 @@ void dp_mon_sta_coex_copy_shared(struct dp_soc *soc, uint32_t mac_id,
 	qdf_mem_copy(dst + span.header_len, ether + 14, span.payload_len);
 
 	/* Generation identifies the current owner, not the age of an air frame. */
-	if (dp_sta_mon_shared_binding_live(soc, mon_mac, binding, mac_id)) {
-		binding->monitor->monitor_vdev->osif_rx_mon(
-			binding->monitor->osif_vdev, copy, NULL);
+	if (dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, 0))
 		copy = NULL;
-	}
 out:
 	if (copy)
 		qdf_nbuf_free(copy);
@@ -637,11 +710,8 @@ void dp_mon_sta_coex_copy_unknown_raw(struct dp_soc *soc, uint32_t mac_id,
 	/* RAW supplies the complete MPDU and hardware FCS. */
 	rtap->flags = IEEE80211_RADIOTAP_F_FCS;
 	qdf_mem_copy(rtap + 1, frame, length);
-	if (dp_sta_mon_shared_binding_live(soc, mon_mac, binding, mac_id)) {
-		binding->monitor->monitor_vdev->osif_rx_mon(
-			binding->monitor->osif_vdev, copy, NULL);
+	if (dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, 0))
 		copy = NULL;
-	}
 out:
 	if (copy)
 		qdf_nbuf_free(copy);
@@ -649,6 +719,248 @@ out:
 	rcu_read_unlock();
 }
 
+#else
+
+#if defined(QCA_WIFI_WCN7750) && defined(CONFIG_WORD_BASED_TLV) && \
+    defined(BE_NON_AP_COMPACT_TLV) && defined(NO_RX_PKT_HDR_TLV) && \
+    !defined(BIG_ENDIAN_HOST)
+/* The compact MPDU descriptor retains the complete 24-byte non-QoS header.
+ * Its 802.3 MSDU retains LLC/SNAP, including AWDL's vendor encapsulation.
+ * No header, sequence, address, LLC or payload byte is synthesized here.
+ */
+static bool
+dp_sta_mon_awdl_span(const uint8_t *header, const uint8_t *ether,
+                    uint32_t length, const uint8_t *helper_mac,
+                    uint32_t *payload_len)
+{
+    static const uint8_t awdl_bssid[] = { 0x00, 0x25, 0x00, 0xff, 0x94, 0x73 };
+    static const uint8_t awdl_llc[] = { 0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0x00 };
+    uint32_t body_len;
+
+    if (!header || !ether || !helper_mac || !payload_len ||
+        length < 14 + sizeof(awdl_llc) + 8 || length > 1514 ||
+        header[0] != 0x08 ||
+        (header[1] & (IEEE80211_FC1_DIR_MASK | IEEE80211_FC1_WEP |
+                      IEEE80211_FC1_MORE_FRAG | IEEE80211_FC1_ORDER)) ||
+        (header[22] & 0x0f) ||
+        qdf_mem_cmp(header + 4, helper_mac, QDF_MAC_ADDR_SIZE) ||
+        qdf_mem_cmp(header + 16, awdl_bssid, sizeof(awdl_bssid)) ||
+        qdf_mem_cmp(ether, header + 4, QDF_MAC_ADDR_SIZE) ||
+        qdf_mem_cmp(ether + 6, header + 10, QDF_MAC_ADDR_SIZE) ||
+        qdf_mem_cmp(ether + 14, awdl_llc, sizeof(awdl_llc)))
+        return false;
+    body_len = ((uint32_t)ether[12] << 8) | ether[13];
+    /* A complete nonaggregated MSDU; Ethernet padding is not an air payload. */
+    if (body_len != length - 14 || body_len > 1500)
+        return false;
+    *payload_len = body_len;
+    return true;
+}
+
+void dp_mon_sta_coex_copy_shared(struct dp_soc *soc, uint32_t mac_id,
+                               qdf_nbuf_t nbuf, uint32_t buffer_size,
+                               uint32_t msdu_flags, void *ring_desc)
+{
+    struct dp_sta_mon_helper_binding *binding;
+    struct dp_sta_mon_radiotap_flags *rtap;
+    struct dp_mon_mac *mon_mac;
+    struct dp_pdev *pdev;
+    struct rx_pkt_tlvs *tlvs;
+    hal_rx_mpdu_start_t *mpdu;
+    qdf_nbuf_t copy = NULL;
+    uint8_t *tlv, *header, *ether;
+    uint32_t capacity, offset, length, payload_len, out_len;
+    uint32_t single_msdu = HAL_MSDU_F_FIRST_MSDU_IN_MPDU |
+                           HAL_MSDU_F_LAST_MSDU_IN_MPDU;
+
+    BUILD_BUG_ON(sizeof(hal_rx_mpdu_start_t) != 56);
+    BUILD_BUG_ON(sizeof(struct rx_pkt_tlvs) != 120);
+    if (!soc || !nbuf || !dp_mon_is_sta_coex(soc) ||
+        dp_mon_sta_coex_is_paused(soc) || qdf_nbuf_is_frag(nbuf) ||
+        (msdu_flags & (single_msdu | HAL_MSDU_F_MSDU_CONTINUATION)) != single_msdu)
+        return;
+    pdev = dp_get_pdev_for_lmac_id(soc, mac_id);
+    if (!pdev || !pdev->monitor_pdev)
+        return;
+    mon_mac = dp_get_mon_mac(pdev, mac_id);
+    /* Shared-ring caller holds mon_lock through copy and publication. */
+    rcu_read_lock();
+    binding = dp_sta_mon_find_shared_binding(soc, mon_mac);
+    if (!dp_sta_mon_shared_binding_live(soc, mon_mac, binding, mac_id))
+        goto out;
+    capacity = dp_sta_mon_rx_capacity(nbuf, buffer_size);
+    if (soc->rx_pkt_tlv_size != sizeof(*tlvs) || capacity < sizeof(*tlvs))
+        goto out;
+    tlv = qdf_nbuf_data(nbuf);
+    tlvs = (struct rx_pkt_tlvs *)tlv;
+    mpdu = &HAL_RX_MPDU_START(tlvs);
+    if (!hal_rx_attn_msdu_done_get(soc->hal_soc, tlv) ||
+        !hal_rx_msdu_end_first_msdu_get(soc->hal_soc, tlv) ||
+        !hal_rx_msdu_end_last_msdu_get(soc->hal_soc, tlv) ||
+        hal_rx_get_filter_category(soc->hal_soc, tlv) != 0 ||
+        hal_rx_tlv_decap_format_get(soc->hal_soc, tlv) != HAL_HW_RX_DECAP_FORMAT_8023 ||
+        hal_rx_tlv_mpdu_fcs_err_get(soc->hal_soc, tlv) ||
+        hal_rx_tlv_mpdu_len_err_get(soc->hal_soc, tlv) ||
+        !mpdu->mpdu_frame_control_valid || !mpdu->mpdu_duration_valid ||
+        !mpdu->mac_addr_ad1_valid || !mpdu->mac_addr_ad2_valid ||
+        !mpdu->mac_addr_ad3_valid || !mpdu->mpdu_sequence_control_valid ||
+        mpdu->mpdu_fragment_number || mpdu->more_fragment_flag ||
+        mpdu->encrypted || mpdu->amsdu_present)
+        goto out;
+    header = (uint8_t *)&tlvs->mpdu_start_tlv + 32;
+    if ((header[22] | ((uint16_t)header[23] << 8)) >> 4 != mpdu->mpdu_sequence_number)
+        goto out;
+    offset = sizeof(*tlvs) + hal_rx_msdu_end_l3_hdr_padding_get(soc->hal_soc, tlv);
+    length = hal_rx_msdu_start_msdu_len_get(soc->hal_soc, tlv);
+    if (offset > capacity || length > capacity - offset)
+        goto out;
+    ether = tlv + offset;
+    if (!dp_sta_mon_awdl_span(header, ether, length, binding->helper_mac, &payload_len))
+        goto out;
+    out_len = sizeof(*rtap) + sizeof(struct ieee80211_frame) + payload_len;
+    copy = qdf_nbuf_alloc(NULL, out_len, 0, 4, false);
+    if (!copy || !qdf_nbuf_put_tail(copy, out_len))
+        goto out;
+    rtap = (struct dp_sta_mon_radiotap_flags *)qdf_nbuf_data(copy);
+    qdf_mem_zero(rtap, sizeof(*rtap));
+    rtap->len = cpu_to_le16(sizeof(*rtap));
+    rtap->present = cpu_to_le32(BIT(IEEE80211_RADIOTAP_FLAGS));
+    qdf_mem_copy(rtap + 1, header, sizeof(struct ieee80211_frame));
+    qdf_mem_copy((uint8_t *)(rtap + 1) + sizeof(struct ieee80211_frame), ether + 14, payload_len);
+    if (dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, 0))
+        copy = NULL;
+out:
+    if (copy)
+        qdf_nbuf_free(copy);
+    rcu_read_unlock();
+}
+
+/* A compact unknown-peer RAW buffer includes the header and captured FCS.
+ * Accept only complete plaintext AWDL data for the current private helper.
+ */
+static bool
+dp_sta_mon_awdl_raw_frame(const uint8_t *header, const uint8_t *frame,
+                         uint32_t length, const uint8_t *helper_mac)
+{
+    static const uint8_t awdl_bssid[] = { 0x00, 0x25, 0x00, 0xff, 0x94, 0x73 };
+    static const uint8_t awdl_llc[] = { 0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0x00 };
+    uint32_t header_len = sizeof(struct ieee80211_frame);
+
+    if (!header || !frame || !helper_mac ||
+        length < header_len + sizeof(awdl_llc) + 8 + HAL_RX_FCS_LEN ||
+        /* The supported single 802.11 MSDU is bounded by its 2304-byte body. */
+        length > header_len + 2304 + HAL_RX_FCS_LEN ||
+        header[0] != 0x08 ||
+        (header[1] & (IEEE80211_FC1_DIR_MASK | IEEE80211_FC1_WEP |
+                      IEEE80211_FC1_MORE_FRAG | IEEE80211_FC1_ORDER)) ||
+        (header[22] & 0x0f) ||
+        qdf_mem_cmp(header + 4, helper_mac, QDF_MAC_ADDR_SIZE) ||
+        qdf_mem_cmp(header + 16, awdl_bssid, sizeof(awdl_bssid)) ||
+        qdf_mem_cmp(frame, header, header_len) ||
+        qdf_mem_cmp(frame + header_len, awdl_llc, sizeof(awdl_llc)))
+        return false;
+    return true;
+}
+
+void dp_mon_sta_coex_copy_unknown_raw(struct dp_soc *soc, uint32_t mac_id,
+                                    qdf_nbuf_t nbuf, uint8_t *rx_tlv_hdr,
+                                    uint16_t ppdu_id)
+{
+    struct dp_sta_mon_helper_binding *binding;
+    struct dp_sta_mon_radiotap_flags *rtap;
+    struct dp_mon_mac *mon_mac;
+    struct dp_pdev *pdev;
+    struct rx_pkt_tlvs *tlvs;
+    hal_rx_mpdu_start_t *mpdu;
+    hal_rx_msdu_end_t *msdu;
+    qdf_nbuf_t copy = NULL;
+    uint8_t *header, *frame;
+    uint32_t capacity, offset, length, out_len;
+
+    BUILD_BUG_ON(sizeof(hal_rx_mpdu_start_t) != 56);
+    BUILD_BUG_ON(sizeof(struct rx_pkt_tlvs) != 120);
+    /* REO retains ownership of the original DMA-unmapped exception skb. */
+    if (!soc || !nbuf || !dp_mon_is_sta_coex(soc) ||
+        dp_mon_sta_coex_is_paused(soc) ||
+        rx_tlv_hdr != qdf_nbuf_data(nbuf) || qdf_nbuf_is_frag(nbuf) ||
+        qdf_nbuf_is_nonlinear(nbuf) || qdf_nbuf_is_rx_chfrag_cont(nbuf))
+        return;
+    pdev = dp_get_pdev_for_lmac_id(soc, mac_id);
+    if (!pdev || !pdev->monitor_pdev)
+        return;
+    mon_mac = dp_get_mon_mac(pdev, mac_id);
+    rcu_read_lock();
+    qdf_spin_lock_bh(&mon_mac->mon_lock);
+    binding = dp_sta_mon_find_shared_binding(soc, mon_mac);
+    if (!dp_sta_mon_shared_binding_live(soc, mon_mac, binding, mac_id))
+        goto out;
+
+    capacity = dp_sta_mon_rx_capacity(nbuf,
+                                     wlan_cfg_rx_buffer_size(soc->wlan_cfg_ctx));
+    if (soc->rx_pkt_tlv_size != sizeof(*tlvs) || capacity < sizeof(*tlvs) ||
+        qdf_nbuf_len(nbuf) < sizeof(*tlvs))
+        goto out;
+    tlvs = (struct rx_pkt_tlvs *)rx_tlv_hdr;
+    mpdu = &HAL_RX_MPDU_START(tlvs);
+    msdu = &HAL_RX_MSDU_END(tlvs);
+    /* Lookup failures are expected here; parser and capture errors are not. */
+    if (!hal_rx_attn_msdu_done_get(soc->hal_soc, rx_tlv_hdr) ||
+        !hal_rx_msdu_end_first_msdu_get(soc->hal_soc, rx_tlv_hdr) ||
+        !hal_rx_msdu_end_last_msdu_get(soc->hal_soc, rx_tlv_hdr) ||
+        hal_rx_get_filter_category(soc->hal_soc, rx_tlv_hdr) != 0 ||
+        hal_rx_tlv_decap_format_get(soc->hal_soc, rx_tlv_hdr) != HAL_HW_RX_DECAP_FORMAT_RAW ||
+        hal_rx_tlv_mpdu_fcs_err_get(soc->hal_soc, rx_tlv_hdr) ||
+        hal_rx_tlv_mpdu_len_err_get(soc->hal_soc, rx_tlv_hdr) ||
+        HAL_RX_TLV_PHY_PPDU_ID_GET(tlvs) != ppdu_id ||
+        !mpdu->mpdu_frame_control_valid || !mpdu->mpdu_duration_valid ||
+        !mpdu->mac_addr_ad1_valid || !mpdu->mac_addr_ad2_valid ||
+        !mpdu->mac_addr_ad3_valid || !mpdu->mpdu_sequence_control_valid ||
+        mpdu->mpdu_fragment_number || mpdu->more_fragment_flag ||
+        mpdu->fr_ds || mpdu->to_ds || mpdu->encrypted || mpdu->decrypt_needed ||
+        mpdu->decap_type != HAL_HW_RX_DECAP_FORMAT_RAW || !mpdu->raw_mpdu ||
+        mpdu->ampdu_flag || mpdu->bar_frame || mpdu->fragment_flag ||
+        !mpdu->non_qos || mpdu->null_data || mpdu->mgmt_type || mpdu->ctrl_type ||
+        mpdu->order || mpdu->amsdu_present ||
+        msdu->to_ds || msdu->fr_ds || msdu->msdu_drop || msdu->fragment_flag ||
+        msdu->aggregation_count || msdu->flow_aggregation_continuation || msdu->msdu_limit_error ||
+        msdu->amsdu_parser_error || !msdu->non_qos || msdu->null_data ||
+        msdu->mgmt_type || msdu->ctrl_type || msdu->a_msdu_error || msdu->order ||
+        msdu->wifi_parser_error || msdu->overflow_err || msdu->msdu_length_err ||
+        msdu->amsdu_addr_mismatch || msdu->buffer_fragment ||
+        msdu->tkip_mic_err || msdu->decrypt_err)
+        goto out;
+    header = (uint8_t *)&tlvs->mpdu_start_tlv + 32;
+    if ((header[22] | ((uint16_t)header[23] << 8)) >> 4 != mpdu->mpdu_sequence_number ||
+        !!(header[1] & IEEE80211_FC1_RETRY) != !!mpdu->mpdu_retry)
+        goto out;
+    offset = sizeof(*tlvs) + hal_rx_msdu_end_l3_hdr_padding_get(soc->hal_soc,
+                                                             rx_tlv_hdr);
+    length = hal_rx_msdu_start_msdu_len_get(soc->hal_soc, rx_tlv_hdr);
+    if (length != mpdu->mpdu_length || length != msdu->reported_mpdu_length ||
+        offset > capacity || length > capacity - offset ||
+        offset > qdf_nbuf_len(nbuf) || length > qdf_nbuf_len(nbuf) - offset)
+        goto out;
+    frame = rx_tlv_hdr + offset;
+    if (!dp_sta_mon_awdl_raw_frame(header, frame, length, binding->helper_mac))
+        goto out;
+    out_len = sizeof(*rtap) + length;
+    copy = qdf_nbuf_alloc(NULL, out_len, 0, 4, false);
+    if (!copy || !qdf_nbuf_put_tail(copy, out_len))
+        goto out;
+    rtap = (struct dp_sta_mon_radiotap_flags *)qdf_nbuf_data(copy);
+    qdf_mem_zero(rtap, sizeof(*rtap));
+    rtap->len = cpu_to_le16(sizeof(*rtap));
+    rtap->present = cpu_to_le32(BIT(IEEE80211_RADIOTAP_FLAGS));
+    rtap->flags = IEEE80211_RADIOTAP_F_FCS;
+    qdf_mem_copy(rtap + 1, frame, length);
+    if (dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, 0))
+        copy = NULL;
+out:
+    if (copy)
+        qdf_nbuf_free(copy);
+    qdf_spin_unlock_bh(&mon_mac->mon_lock);
+    rcu_read_unlock();
+}
 #else
 void dp_mon_sta_coex_copy_shared(struct dp_soc *soc, uint32_t mac_id,
 			       qdf_nbuf_t nbuf, uint32_t buffer_size,
@@ -661,6 +973,7 @@ void dp_mon_sta_coex_copy_unknown_raw(struct dp_soc *soc, uint32_t mac_id,
 				    uint16_t ppdu_id)
 {
 }
+#endif
 #endif
 
 static qdf_nbuf_t dp_sta_mon_copy_raw(struct dp_soc *soc, qdf_nbuf_t first,
@@ -775,7 +1088,10 @@ dp_sta_mon_deliver_raw(struct dp_soc *soc,
 		goto drop;
 	}
 
-	mon_vdev->osif_rx_mon(binding->monitor->osif_vdev, copy, NULL);
+	if (!dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, 0)) {
+		qdf_spin_unlock_bh(&mon_mac->mon_lock);
+		goto drop;
+	}
 	copy = NULL;
 	qdf_spin_unlock_bh(&mon_mac->mon_lock);
 	qdf_nbuf_list_free(nbuf);
@@ -877,6 +1193,15 @@ bool dp_mon_sta_coex_rx_exception(struct dp_soc *soc, struct dp_vdev *helper,
 out:
 	rcu_read_unlock();
 	return consumed;
+}
+#else
+static bool
+dp_sta_mon_publish_full(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
+			qdf_nbuf_t nbuf, struct mon_rx_status *status)
+{
+	mon_mac->mvdev->monitor_vdev->osif_rx_mon(
+		mon_mac->mvdev->osif_vdev, nbuf, status);
+	return true;
 }
 #endif
 
@@ -2538,7 +2863,6 @@ dp_rx_handle_smart_mesh_mode(struct dp_soc *soc, struct dp_pdev *pdev,
 			      qdf_nbuf_t nbuf, uint8_t mac_id)
 {
 	uint8_t size = 0;
-	struct dp_mon_vdev *mon_vdev;
 	struct dp_mon_mac *mon_mac = dp_get_mon_mac(pdev, mac_id);
 
 	if (!mon_mac->mvdev) {
@@ -2547,8 +2871,6 @@ dp_rx_handle_smart_mesh_mode(struct dp_soc *soc, struct dp_pdev *pdev,
 			  __func__, __LINE__);
 		return 1;
 	}
-
-	mon_vdev = mon_mac->mvdev->monitor_vdev;
 
 	if (!ppdu_info->msdu_info.first_msdu_payload) {
 		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_ERROR,
@@ -2578,8 +2900,8 @@ dp_rx_handle_smart_mesh_mode(struct dp_soc *soc, struct dp_pdev *pdev,
 		return 1;
 	}
 
-	mon_vdev->osif_rx_mon(mon_mac->mvdev->osif_vdev,
-			      nbuf, NULL);
+	if (!dp_sta_mon_publish_full(soc, mon_mac, nbuf, NULL))
+		return 1;
 	mon_mac->ppdu_info.rx_status.monitor_direct_used = 0;
 	return 0;
 }
@@ -2846,8 +3168,8 @@ dp_rx_mon_send_mpdu(struct dp_pdev *pdev, struct dp_mon_mac *mon_mac,
 	mon_vdev = vdev->monitor_vdev;
 	if (qdf_likely(mon_vdev && mon_vdev->osif_rx_mon)) {
 		dp_rx_mon_disable_pf(mpdu_buf);
-		mon_vdev->osif_rx_mon(vdev->osif_vdev,
-				      mpdu_buf, NULL);
+		if (!dp_sta_mon_publish_full(soc, mon_mac, mpdu_buf, NULL))
+			goto fail_free;
 	}
 
 	dp_vdev_unref_delete(soc, vdev, DP_MOD_ID_MISC);
@@ -3127,7 +3449,6 @@ QDF_STATUS dp_rx_mon_deliver(struct dp_soc *soc, uint32_t mac_id,
 	struct cdp_mon_status *rs;
 	qdf_nbuf_t mon_skb, skb_next;
 	qdf_nbuf_t mon_mpdu = NULL;
-	struct dp_mon_vdev *mon_vdev;
 	struct dp_mon_pdev *mon_pdev;
 	struct dp_mon_mac *mon_mac;
 
@@ -3168,8 +3489,6 @@ QDF_STATUS dp_rx_mon_deliver(struct dp_soc *soc, uint32_t mac_id,
 	    mon_mac->mvdev->osif_vdev &&
 	    mon_mac->mvdev->monitor_vdev &&
 	    mon_mac->mvdev->monitor_vdev->osif_rx_mon) {
-		mon_vdev = mon_mac->mvdev->monitor_vdev;
-
 		mon_mac->ppdu_info.rx_status.ppdu_id =
 			mon_mac->ppdu_info.com_info.ppdu_id;
 		mon_mac->ppdu_info.rx_status.device_id = soc->device_id;
@@ -3190,9 +3509,11 @@ QDF_STATUS dp_rx_mon_deliver(struct dp_soc *soc, uint32_t mac_id,
 			qdf_nbuf_free(mon_mpdu);
 			return QDF_STATUS_E_AGAIN;
 		}
-		mon_vdev->osif_rx_mon(mon_mac->mvdev->osif_vdev,
-				      mon_mpdu,
-				      &mon_mac->ppdu_info.rx_status);
+		if (!dp_sta_mon_publish_full(soc, mon_mac, mon_mpdu,
+					    &mon_mac->ppdu_info.rx_status)) {
+			qdf_nbuf_free(mon_mpdu);
+			return QDF_STATUS_E_AGAIN;
+		}
 	} else {
 		dp_rx_mon_dest_debug("%pK: mon_mpdu=%pK monitor_vdev %pK osif_vdev %pK"
 				     , soc, mon_mpdu, mon_mac->mvdev,
@@ -3222,10 +3543,8 @@ QDF_STATUS dp_rx_mon_deliver_non_std(struct dp_soc *soc,
 				     uint32_t mac_id)
 {
 	struct dp_pdev *pdev = dp_get_pdev_for_lmac_id(soc, mac_id);
-	ol_txrx_rx_mon_fp osif_rx_mon;
 	qdf_nbuf_t dummy_msdu;
 	struct dp_mon_pdev *mon_pdev;
-	struct dp_mon_vdev *mon_vdev;
 	struct dp_mon_mac *mon_mac;
 
 	/* Sanity checking */
@@ -3241,9 +3560,7 @@ QDF_STATUS dp_rx_mon_deliver_non_std(struct dp_soc *soc,
 	    !mon_mac->mvdev->monitor_vdev->osif_rx_mon)
 		goto mon_deliver_non_std_fail;
 
-	mon_vdev = mon_mac->mvdev->monitor_vdev;
 	/* Generate a dummy skb_buff */
-	osif_rx_mon = mon_vdev->osif_rx_mon;
 	dummy_msdu = qdf_nbuf_alloc(soc->osdev, MAX_MONITOR_HEADER,
 				    MAX_MONITOR_HEADER, 4, FALSE);
 	if (!dummy_msdu)
@@ -3264,8 +3581,10 @@ QDF_STATUS dp_rx_mon_deliver_non_std(struct dp_soc *soc,
 	}
 
 	/* deliver to the user layer application */
-	osif_rx_mon(mon_mac->mvdev->osif_vdev,
-		    dummy_msdu, NULL);
+	if (!dp_sta_mon_publish_full(soc, mon_mac, dummy_msdu, NULL)) {
+		qdf_nbuf_free(dummy_msdu);
+		goto mon_deliver_non_std_fail;
+	}
 
 	return QDF_STATUS_SUCCESS;
 

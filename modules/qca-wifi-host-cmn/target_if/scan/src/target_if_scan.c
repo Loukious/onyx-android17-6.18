@@ -29,6 +29,7 @@
 #include <wlan_objmgr_psoc_obj.h>
 #include <wlan_scan_tgt_api.h>
 #include <target_if.h>
+#include "wlan_mlme_sta_mon.h"
 
 static inline struct wlan_lmac_if_scan_rx_ops *
 target_if_scan_get_rx_ops(struct wlan_objmgr_psoc *psoc)
@@ -107,9 +108,14 @@ target_if_scan_event_handler(ol_scn_t scn, uint8_t *data, uint32_t datalen)
 		return -EINVAL;
 	}
 
+	/* Observe genuine target events before SCM's active-queue filter, which
+	 * may discard late firmware completion after a synthetic cancellation.
+	 */
+	wlan_mlme_sta_mon_scan_fw_event(psoc, &event_info->event);
 	scan_rx_ops = target_if_scan_get_rx_ops(psoc);
 	if (!scan_rx_ops) {
 		target_if_err("scan_rx_ops is NULL");
+		qdf_mem_free(event_info);
 		return -EINVAL;
 	}
 

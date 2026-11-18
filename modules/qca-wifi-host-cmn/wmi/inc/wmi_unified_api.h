@@ -1468,11 +1468,62 @@ QDF_STATUS wmi_mgmt_unified_cmd_send(wmi_unified_t wmi_handle,
  *  @wmi_handle: handle to WMI.
  *  @param: pointer to hold offchan data cmd parameter
  *
- *  Return: QDF_STATUS_SUCCESS on success and QDF_STATUS_E_FAILURE for failure
+ * The caller supplies an unmapped, linear, caller-owned frame. Success leaves
+ * the frame DMA mapped and owned by the caller until a matching firmware
+ * completion or a proven firmware drain. Failure leaves the frame unmapped.
+ * Submission neither acquires a channel dwell nor proves RF transmission.
+ *
+ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
  */
 QDF_STATUS wmi_offchan_data_tx_cmd_send(
 		wmi_unified_t wmi_handle,
 		struct wmi_offchan_data_tx_params *param);
+
+/**
+ * wmi_extract_offchan_data_tx_compl_param() - decode off-channel completion
+ * @wmi_handle: WMI handle
+ * @evt_buf: processed completion event TLVs
+ * @param: output, cleared on failure
+ *
+ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
+ */
+QDF_STATUS wmi_extract_offchan_data_tx_compl_param(
+		wmi_unified_t wmi_handle, void *evt_buf,
+		struct wmi_host_offchan_data_tx_compl_event *param);
+
+/**
+ * wmi_offchan_data_tx_pdev_id() - normalize the completion's one-based pdev ID
+ * @wmi_handle: WMI handle with the current target-to-host pdev map
+ * @target_pdev_id: stock target completion pdev ID (1..3)
+ * @host_pdev_id: output host pdev ID
+ *
+ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
+ */
+QDF_STATUS wmi_offchan_data_tx_pdev_id(wmi_unified_t wmi_handle,
+		uint32_t target_pdev_id, uint32_t *host_pdev_id);
+
+/**
+ * wmi_offchan_data_tx_completion_register() - register completion owner
+ * @wmi_handle: WMI handle with the live off-channel TX service enabled
+ * @handler_func: completion callback
+ * @rx_ctx: event processing context
+ *
+ * Registration requires an available decoder and rejects an existing owner.
+ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
+ */
+QDF_STATUS wmi_offchan_data_tx_completion_register(
+		wmi_unified_t wmi_handle,
+		wmi_unified_event_handler handler_func, uint8_t rx_ctx);
+
+/**
+ * wmi_offchan_data_tx_completion_unregister() - unregister completion owner
+ * @wmi_handle: WMI handle previously registered by the caller
+ *
+ * This does not synchronize queued callbacks or return DMA ownership. The
+ * owner must separately drain callbacks and firmware before releasing frames.
+ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
+ */
+QDF_STATUS wmi_offchan_data_tx_completion_unregister(wmi_unified_t wmi_handle);
 
 /**
  * wmi_unified_modem_power_state() - set modem power state to fw

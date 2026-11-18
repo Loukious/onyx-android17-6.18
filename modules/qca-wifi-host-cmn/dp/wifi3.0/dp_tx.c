@@ -3885,9 +3885,19 @@ dp_tx_add_injection_metadata(qdf_nbuf_t nbuf,
 		case CDP_INJECTION_HT:
 			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_HT;
 			break;
-		default:
+		case CDP_INJECTION_VHT:
+			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_VHT;
+			break;
+		case CDP_INJECTION_HE_SU:
+			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_HE_SU;
+			meta->ltf_subtype_11ax = params.he_ltf;
+			meta->use_dcm_11ax = 0;
+			break;
+		case CDP_INJECTION_OFDM:
 			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_OFDM;
 			break;
+		default:
+			return false;
 		}
 	}
 	if (params.bandwidth_valid) {

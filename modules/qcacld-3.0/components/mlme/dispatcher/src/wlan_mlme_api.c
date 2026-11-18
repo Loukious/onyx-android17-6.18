@@ -43,6 +43,7 @@
 #include "wlan_policy_mgr_api.h"
 #include "cds_api.h"
 #include "cdp_txrx_mon.h"
+#include "wlan_scan_public_structs.h"
 #include <linux/spinlock.h>
 
 /* All callbacks are nonblocking; no firmware response is waited for here. */
@@ -62,6 +63,20 @@ sta_mon_control(struct wlan_objmgr_psoc *psoc)
 static bool sta_mon_ap_lease_locked(struct wlan_mlme_sta_mon_control *ctrl)
 {
 	return ctrl->snapshot.ap_owner &&
+		(ctrl->fw_uncertain ||
+		 (ctrl->attached && ctrl->state != WLAN_STA_MON_OFF &&
+		  ctrl->state != WLAN_STA_MON_QUIESCED));
+}
+
+/* Wonder has no restart path after an unrelated STA scan closes its monitor.
+ * Hold host scan admission from atomic arm through proven native/DP teardown, even
+ * during suspend or asynchronous invalidation. An uncertain firmware teardown
+ * cannot release radio ownership. This does not change non-scan admission.
+ */
+static bool sta_mon_wonder_scan_lease_locked(
+		struct wlan_mlme_sta_mon_control *ctrl)
+{
+	return ctrl->wonder_scan_lease &&
 		(ctrl->fw_uncertain ||
 		 (ctrl->attached && ctrl->state != WLAN_STA_MON_OFF &&
 		  ctrl->state != WLAN_STA_MON_QUIESCED));
@@ -111,6 +126,8 @@ void wlan_mlme_sta_mon_register(struct wlan_objmgr_psoc *psoc,
 	if (!stop) {
 		ctrl->attached = false;
 		ctrl->state = WLAN_STA_MON_OFF;
+		if (!ctrl->fw_uncertain)
+			ctrl->wonder_scan_lease = false;
 	}
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
 }
@@ -124,7 +141,8 @@ bool wlan_mlme_sta_mon_attach(struct wlan_objmgr_psoc *psoc)
 	if (!ctrl)
 		return false;
 	spin_lock_irqsave(&sta_mon_lock, flags);
-	if (ctrl->stop && !ctrl->attached && !ctrl->fw_uncertain) {
+	if (ctrl->stop && !ctrl->attached && !ctrl->fw_uncertain &&
+	    !ctrl->scan_reserved) {
 		ctrl->attached = true;
 		ctrl->state = WLAN_STA_MON_QUIESCED;
 		ctrl->snapshot.generation++;
@@ -134,6 +152,7 @@ bool wlan_mlme_sta_mon_attach(struct wlan_objmgr_psoc *psoc)
 		ctrl->snapshot.ap_owner = false;
 		ctrl->snapshot.sta_ap_coexist = false;
 		ctrl->snapshot.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+		ctrl->wonder_scan_lease = false;
 		ok = true;
 	}
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
@@ -155,6 +174,7 @@ void wlan_mlme_sta_mon_detach(struct wlan_objmgr_psoc *psoc)
 		ctrl->snapshot.ap_owner = false;
 		ctrl->snapshot.sta_ap_coexist = false;
 		ctrl->snapshot.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+		ctrl->wonder_scan_lease = false;
 	}
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
 }
@@ -174,7 +194,8 @@ uint64_t wlan_mlme_sta_mon_epoch(struct wlan_objmgr_psoc *psoc)
 }
 
 bool wlan_mlme_sta_mon_arm(struct wlan_objmgr_psoc *psoc,
-			  struct wlan_mlme_sta_mon_snapshot *snapshot)
+			  struct wlan_mlme_sta_mon_snapshot *snapshot,
+			  bool wonder_owned)
 {
 	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
 	unsigned long flags;
@@ -189,10 +210,17 @@ bool wlan_mlme_sta_mon_arm(struct wlan_objmgr_psoc *psoc,
 	      snapshot->companion_sta_vdev_id == snapshot->mon_vdev_id ||
 	      snapshot->sta_vdev_id == snapshot->mon_vdev_id)))
 		return false;
+	if (snapshot->exclusive &&
+	    (!wonder_owned || snapshot->ap_owner ||
+	     snapshot->sta_vdev_id != WLAN_INVALID_VDEV_ID ||
+	     snapshot->mon_vdev_id != WLAN_INVALID_VDEV_ID))
+		return false;
 	if (!snapshot->sta_ap_coexist)
 		snapshot->companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
 	spin_lock_irqsave(&sta_mon_lock, flags);
 	if (ctrl->stop && ctrl->attached && !ctrl->updates && !ctrl->admissions &&
+	    !ctrl->scan_reserved && !ctrl->exclusive_lease &&
+	    !ctrl->handoff_generation &&
 	    !ctrl->fw_uncertain && !(snapshot->ap_owner && snapshot->exclusive) &&
 	    ctrl->state == WLAN_STA_MON_QUIESCED &&
 	    ctrl->snapshot.generation == snapshot->generation) {
@@ -202,6 +230,18 @@ bool wlan_mlme_sta_mon_arm(struct wlan_objmgr_psoc *psoc,
 		dp_mon_sta_coex_unpause(wlan_psoc_get_dp_handle(psoc));
 		snapshot->generation++;
 		ctrl->snapshot = *snapshot;
+		ctrl->wonder_scan_lease = wonder_owned;
+		if (snapshot->exclusive) {
+			/* Claim before native CREATE; reconnect/scan/ROC admission and
+			 * this arm share the same lock. Reuse the typed RESTART proof,
+			 * never manufacture an associated STA or disconnect completion.
+			 */
+			ctrl->exclusive_lease = true;
+			ctrl->handoff_generation = snapshot->generation;
+			ctrl->handoff_phase = WLAN_STA_MON_HANDOFF_RESTART;
+			ctrl->handoff_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+			ctrl->handoff_disconnect_seen = false;
+		}
 		ctrl->state = WLAN_STA_MON_ARMING;
 		ok = true;
 	}
@@ -294,7 +334,7 @@ bool wlan_mlme_sta_mon_quiesced(struct wlan_objmgr_psoc *psoc)
 		return false;
 	spin_lock_irqsave(&sta_mon_lock, flags);
 	ctrl->snapshot.generation++;
-	ok = ctrl->attached && !ctrl->fw_uncertain &&
+	ok = ctrl->attached && !ctrl->fw_uncertain && !ctrl->scan_reserved &&
 		!ctrl->handoff_generation;
 	if (ok) {
 		/* Only HDD's proven native/DP teardown releases radio ownership. */
@@ -304,6 +344,7 @@ bool wlan_mlme_sta_mon_quiesced(struct wlan_objmgr_psoc *psoc)
 		ctrl->snapshot.ap_owner = false;
 		ctrl->snapshot.sta_ap_coexist = false;
 		ctrl->snapshot.companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+		ctrl->wonder_scan_lease = false;
 	}
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
 	return ok;
@@ -598,6 +639,208 @@ bool wlan_mlme_sta_mon_admission_begin(struct wlan_objmgr_psoc *psoc)
 		ctrl->admissions++;
 	spin_unlock_irqrestore(&sta_mon_lock, flags);
 	return ok;
+}
+
+static bool sta_mon_scan_tuple_matches(
+		const struct wlan_mlme_sta_mon_scan_reservation *reservation,
+		uint32_t vdev_id, uint32_t scan_id, uint32_t requester)
+{
+	return reservation->vdev_id == vdev_id &&
+		reservation->scan_id == scan_id &&
+		reservation->requester == requester;
+}
+
+bool wlan_mlme_sta_mon_scan_reserve(struct wlan_objmgr_psoc *psoc,
+		const struct wlan_mlme_sta_mon_scan_reservation *reservation,
+		wlan_mlme_sta_mon_scan_cb callback, void *arg)
+{
+	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
+	unsigned long flags;
+	bool ok = false;
+
+	if (!ctrl || !reservation || !callback || !reservation->generation ||
+	    !reservation->helper_cookie || !reservation->frequency ||
+	    reservation->frequency > 65535 ||
+	    reservation->vdev_id == WLAN_INVALID_VDEV_ID ||
+	    cds_is_driver_recovering() || cds_is_driver_unloading() ||
+	    cds_is_fw_down())
+		return false;
+	spin_lock_irqsave(&sta_mon_lock, flags);
+	if (ctrl->attached && ctrl->state == WLAN_STA_MON_READY &&
+	    !ctrl->fw_uncertain && !ctrl->updates && !ctrl->admissions &&
+	    !ctrl->exclusive_lease && !ctrl->handoff_generation &&
+	    !ctrl->snapshot.exclusive && !ctrl->snapshot.ap_owner &&
+	    !ctrl->scan_reserved &&
+	    ctrl->snapshot.mon_vdev_id == reservation->vdev_id &&
+	    ctrl->snapshot.generation == reservation->generation &&
+	    ctrl->snapshot.channel.ch_freq != reservation->frequency) {
+		ctrl->scan_reservation = *reservation;
+		ctrl->scan_callback = callback;
+		ctrl->scan_arg = arg;
+		ctrl->scan_submission_started = false;
+		ctrl->scan_fw_pending = false;
+		ctrl->scan_fw_observed = false;
+		ctrl->scan_reserved = true;
+		ok = true;
+	}
+	spin_unlock_irqrestore(&sta_mon_lock, flags);
+	return ok;
+}
+
+bool wlan_mlme_sta_mon_scan_admission_begin(struct wlan_objmgr_psoc *psoc,
+		uint32_t vdev_id, uint32_t scan_id, uint32_t requester,
+		uint32_t frequency, uint32_t channel_count, bool offchan_data_tx,
+		bool *reserved)
+{
+	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
+	unsigned long flags;
+	bool ok;
+
+	if (!reserved)
+		return false;
+	*reserved = false;
+	if (!ctrl)
+		return true;
+	spin_lock_irqsave(&sta_mon_lock, flags);
+	if (ctrl->scan_reserved &&
+	    sta_mon_scan_tuple_matches(&ctrl->scan_reservation, vdev_id,
+				      scan_id, requester)) {
+		*reserved = true;
+		ok = ctrl->attached && !ctrl->fw_uncertain &&
+			ctrl->state == WLAN_STA_MON_READY &&
+			ctrl->snapshot.generation == ctrl->scan_reservation.generation &&
+			!ctrl->scan_submission_started && !ctrl->updates &&
+			!ctrl->admissions && channel_count == 1 && offchan_data_tx &&
+			frequency == ctrl->scan_reservation.frequency;
+		if (ok) {
+			ctrl->scan_submission_started = true;
+			ctrl->admissions++;
+		}
+	} else {
+		/* Refuse before update_begin can revoke a live Wonder generation.
+		 * Generic STA monitors retain ordinary scan invalidation behavior.
+		 */
+		ok = !ctrl->exclusive_lease && !ctrl->handoff_generation &&
+			!sta_mon_ap_lease_locked(ctrl) &&
+			!sta_mon_wonder_scan_lease_locked(ctrl) &&
+			ctrl->admissions != U32_MAX;
+		if (ok)
+			ctrl->admissions++;
+	}
+	spin_unlock_irqrestore(&sta_mon_lock, flags);
+	return ok;
+}
+
+bool wlan_mlme_sta_mon_scan_activate(struct wlan_objmgr_psoc *psoc,
+		uint32_t vdev_id, uint32_t scan_id, uint32_t requester,
+		uint32_t frequency, uint32_t channel_count, bool offchan_data_tx,
+		bool reserved_request)
+{
+	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
+	unsigned long flags;
+	bool ok = !reserved_request;
+
+	if (!ctrl)
+		return !reserved_request;
+	spin_lock_irqsave(&sta_mon_lock, flags);
+	if (ctrl->scan_reserved &&
+	    sta_mon_scan_tuple_matches(&ctrl->scan_reservation, vdev_id,
+				      scan_id, requester)) {
+		ok = reserved_request && ctrl->attached && !ctrl->fw_uncertain &&
+			ctrl->state == WLAN_STA_MON_READY && !ctrl->updates &&
+			ctrl->snapshot.generation == ctrl->scan_reservation.generation &&
+			ctrl->scan_submission_started && !ctrl->scan_fw_pending &&
+			channel_count == 1 && offchan_data_tx &&
+			frequency == ctrl->scan_reservation.frequency;
+		if (ok)
+			ctrl->scan_fw_pending = true;
+	}
+	spin_unlock_irqrestore(&sta_mon_lock, flags);
+	return ok;
+}
+
+/* Both notice producers supply borrowed, already-attributed event metadata. */
+static void sta_mon_scan_notice(struct wlan_objmgr_psoc *psoc,
+		const struct scan_event *event,
+		enum wlan_mlme_sta_mon_scan_notice notice)
+{
+	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
+	unsigned long flags;
+	bool terminal;
+
+	if (!ctrl || !event)
+		return;
+	spin_lock_irqsave(&sta_mon_lock, flags);
+	if (!ctrl->scan_reserved || !ctrl->scan_callback ||
+	    !sta_mon_scan_tuple_matches(&ctrl->scan_reservation, event->vdev_id,
+				       event->scan_id, event->requester))
+		goto out;
+	if (notice == WLAN_STA_MON_SCAN_FIRMWARE) {
+		if (!ctrl->scan_fw_pending)
+			goto out;
+		ctrl->scan_fw_observed = true;
+	} else if (ctrl->scan_fw_observed) {
+		/* A failed cancel or synthetic completion never retires firmware. */
+		goto out;
+	}
+	terminal = notice == WLAN_STA_MON_SCAN_NOT_SUBMITTED ||
+		event->type == SCAN_EVENT_TYPE_COMPLETED ||
+		event->type == SCAN_EVENT_TYPE_START_FAILED ||
+		event->type == SCAN_EVENT_TYPE_DEQUEUED;
+	ctrl->scan_callback(ctrl->scan_arg, event, notice,
+		ctrl->scan_reservation.generation,
+		ctrl->scan_reservation.helper_cookie);
+	if (terminal) {
+		ctrl->scan_reserved = false;
+		ctrl->scan_callback = NULL;
+		ctrl->scan_arg = NULL;
+		ctrl->scan_submission_started = false;
+		ctrl->scan_fw_pending = false;
+		ctrl->scan_fw_observed = false;
+	}
+out:
+	spin_unlock_irqrestore(&sta_mon_lock, flags);
+}
+
+void wlan_mlme_sta_mon_scan_fw_event(struct wlan_objmgr_psoc *psoc,
+				    const struct scan_event *event)
+{
+	sta_mon_scan_notice(psoc, event, WLAN_STA_MON_SCAN_FIRMWARE);
+}
+
+void wlan_mlme_sta_mon_scan_not_submitted(struct wlan_objmgr_psoc *psoc,
+					const struct scan_event *event)
+{
+	sta_mon_scan_notice(psoc, event, WLAN_STA_MON_SCAN_NOT_SUBMITTED);
+}
+
+bool wlan_mlme_sta_mon_scan_release_unsubmitted(struct wlan_objmgr_psoc *psoc,
+		const struct wlan_mlme_sta_mon_scan_reservation *reservation)
+{
+	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
+	unsigned long flags;
+	bool released = false;
+
+	if (!ctrl || !reservation)
+		return false;
+	spin_lock_irqsave(&sta_mon_lock, flags);
+	if (ctrl->scan_reserved &&
+	    sta_mon_scan_tuple_matches(&ctrl->scan_reservation,
+		reservation->vdev_id, reservation->scan_id, reservation->requester) &&
+	    ctrl->scan_reservation.generation == reservation->generation &&
+	    ctrl->scan_reservation.helper_cookie == reservation->helper_cookie) {
+		if (ctrl->scan_submission_started || ctrl->scan_fw_pending ||
+		    ctrl->scan_fw_observed)
+			goto out;
+		ctrl->scan_reserved = false;
+		ctrl->scan_callback = NULL;
+		ctrl->scan_arg = NULL;
+		ctrl->scan_submission_started = false;
+		released = true;
+	}
+out:
+	spin_unlock_irqrestore(&sta_mon_lock, flags);
+	return released;
 }
 
 bool wlan_mlme_sta_mon_mgmt_admission_begin(struct wlan_objmgr_psoc *psoc,

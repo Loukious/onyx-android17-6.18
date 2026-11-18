@@ -15,7 +15,7 @@ import tempfile
 import tarfile
 
 from catalog import check_generated, load_catalog, native_configs, native_modules, vendor_modules
-from verify_native_abi import verify_native_exports
+from verify_native_abi import verify_native_exports, verify_native_imports
 from verify_modules import verify
 
 HERE = Path(__file__).resolve().parent
@@ -27,7 +27,7 @@ def output_category(path, execution_root):
     return "platform" if "onyx" in relative.parts else "gki"
 
 
-def verify_native_modules(kernel_dir, symvers, release):
+def verify_native_modules(kernel_dir, symvers, release, vendor_outputs):
     """Verify native Kbuild outputs without adding another shipped source copy."""
     components = load_catalog()
     wanted = {entry["output"] for entry in native_modules(components)}
@@ -57,9 +57,10 @@ def verify_native_modules(kernel_dir, symvers, release):
         verification = verify(list(selected.values()), symvers, release)
         native_abi = [verify_native_exports(selected[output], output, symvers, components)
                       for output in sorted(wanted)]
+        native_imports = verify_native_imports(vendor_outputs, selected, symvers, components)
         for entry in verification:
             entry["archive_member"] = members[entry["module"]]
-    return verification, native_abi
+    return verification, native_abi, native_imports
 
 
 def verify_standalone_provider(verifier, harness, receipt, staged, artifacts):
@@ -229,7 +230,8 @@ def main():
     for option, value in native_configs().items():
         if selections.get("CONFIG_" + option, "n") != value:
             raise ValueError("Native wireless Kconfig selection differs: " + option)
-    native_verification, native_abi_validation = verify_native_modules(kernel_dir, symvers, release)
+    native_verification, native_abi_validation, native_import_admission = verify_native_modules(
+        kernel_dir, symvers, release, modules)
 
     for path in outputs:
         category = output_category(path, execution_root)
@@ -307,6 +309,7 @@ def main():
         "module_verification": verification,
         "native_module_verification": native_verification,
         "native_abi_validation": native_abi_validation,
+        "native_import_admission_validation": native_import_admission,
         "nethunter_host_validation": nethunter_validation,
         "mi_thermal_host_validation": thermal_validation,
         "charger_thermal_host_validation": charger_thermal_validation,

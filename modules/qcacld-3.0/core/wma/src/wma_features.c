@@ -59,6 +59,7 @@
 #include "ol_fw.h"
 
 #include "wma_internal.h"
+#include "wma_wonder_tsf.h"
 #include "wma_nan_datapath.h"
 #include <cdp_txrx_handle.h>
 #include "wlan_pmo_ucfg_api.h"
@@ -653,6 +654,13 @@ int wma_vdev_tsf_handler(void *handle, uint8_t *data, uint32_t data_len)
 				       tsf_event->mac_id_valid,
 				       tsf_event->tsf_id,
 				       tsf_event->tsf_id_valid);
+	/* Wonder owns its capture completion; legacy TSF_PLUS need not be started
+	 * for a monitor vdev, and may have no host capture timer initialized.
+	 */
+	if (wma_wonder_tsf_event(ptsf)) {
+		qdf_mem_free(ptsf);
+		return 0;
+	}
 	tsf_msg.type = eWNI_SME_TSF_EVENT;
 	tsf_msg.bodyptr = ptsf;
 	tsf_msg.bodyval = 0;

@@ -1,0 +1,3982 @@
+diff --git a/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h b/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
+index 45b446fddbfc78a36993e65ca8a3fd690be7623d..bda5a118cd8a799e7fb1a548ce86b5699139e656 100644
+--- a/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
++++ b/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
+@@ -106,6 +106,20 @@ static inline void wma_injection_power_override(uint8_t vdev_id)
+ #endif
+ 
+ #ifdef FEATURE_WLAN_WONDER
++struct cdp_wonder_rx_lease {
++	void *coex;
++	unsigned long flags;
++};
++
++bool wlan_injection_wonder_rx_begin(void *arg, uint8_t monitor_id,
++		uint64_t generation, uint32_t measured_frequency,
++		struct cdp_wonder_rx_lease *lease);
++void wlan_injection_wonder_rx_end(struct cdp_wonder_rx_lease *lease);
++/* Caller already holds MLME TX admission. These take only the dwell lock. */
++bool wlan_injection_wonder_home_tx_begin_locked(void *arg, uint8_t monitor_id,
++		uint64_t generation, struct cdp_wonder_rx_lease *lease);
++void wlan_injection_wonder_home_tx_end_locked(struct cdp_wonder_rx_lease *lease);
++
+ bool wlan_injection_wonder_vdev_admission(uint8_t opmode);
+ /* Genuine per-PPDU airtime and MAC TSF, never packet-count estimates. */
+ void wlan_injection_wonder_note_airtime(uint32_t pdev_id, uint32_t lmac_id,
+@@ -136,6 +150,10 @@ bool wma_injection_get_tx_params(qdf_nbuf_t nbuf,
+ struct cdp_injection_tx_guard {
+ 	unsigned long flags;
+ 	bool held;
++#ifdef FEATURE_WLAN_WONDER
++	struct cdp_wonder_rx_lease wonder_lease;
++	bool wonder_held;
++#endif
+ };
+ 
+ bool wma_injection_tx_begin(qdf_nbuf_t nbuf,
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c b/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c
+index 778383c3bae8eed0db704c31216e9c019b8d03ec..65e759727644173220e7269172fbedb703dac441 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c
++++ b/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c
+@@ -486,7 +486,7 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
+ 		    mon_pdev->undecoded_metadata_capture ||
+ 		    rx_enh_capture_mode != CDP_RX_ENH_CAPTURE_DISABLED) {
+ 			do {
+-#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE) && \
++#if defined(FEATURE_WLAN_WONDER) && \
+ 	defined(QCA_WIFI_WCN7750)
+ 				/* Full monitor may retain the previous status until its
+ 				 * destination is consumed. Track actual TLVs for this PPDU.
+@@ -495,11 +495,17 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
+ 				    WIFIRX_PPDU_START_E) {
+ 					mon_mac->wonder_rx_start_seen = true;
+ 					mon_mac->wonder_rx_end_seen = false;
++					dp_mon_wonder_rx_frequency_reset(mon_mac);
+ 				}
+ #endif
+ 				tlv_status = hal_rx_status_get_tlv_info(rx_tlv,
+ 						ppdu_info, pdev->soc->hal_soc,
+ 						status_nbuf);
++#if defined(FEATURE_WLAN_WONDER) && defined(QCA_WIFI_WCN7750)
++				if (HAL_RX_GET_USER_TLV32_TYPE(rx_tlv) ==
++				    WIFIRX_PPDU_START_E)
++					dp_mon_wonder_rx_frequency_start(mon_mac);
++#endif
+ #if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE) && \
+ 	defined(QCA_WIFI_WCN7750)
+ 				if (HAL_RX_GET_USER_TLV32_TYPE(rx_tlv) ==
+@@ -591,11 +597,16 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
+ #ifdef FEATURE_WLAN_WONDER
+ 			mon_mac->wonder_rx_start_seen = false;
+ 			mon_mac->wonder_rx_end_seen = false;
++			dp_mon_wonder_rx_frequency_reset(mon_mac);
+ #endif
+ 			dp_rx_mon_deliver_non_std(soc, mac_id);
+ 			dp_mon_rx_ppdu_status_reset(mon_mac);
+ 		} else if ((qdf_likely(tlv_status == HAL_TLV_STATUS_PPDU_DONE)) &&
+ 				(qdf_likely(!dp_rx_mon_check_phyrx_abort(pdev, ppdu_info)))) {
++#ifdef FEATURE_WLAN_WONDER
++			if (!mon_mac->wonder_rx_start_seen)
++				dp_mon_wonder_rx_frequency_reset(mon_mac);
++#endif
+ #if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE) && \
+ 	defined(QCA_WIFI_WCN7750)
+ 			/* Once per PPDU, before per-user stats and channel fallbacks. */
+@@ -659,6 +670,7 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
+ 			if (tlv_status == HAL_TLV_STATUS_PPDU_DONE) {
+ 				mon_mac->wonder_rx_start_seen = false;
+ 				mon_mac->wonder_rx_end_seen = false;
++				dp_mon_wonder_rx_frequency_reset(mon_mac);
+ 			}
+ #endif
+ 			dp_rx_mon_handle_ppdu_undecoded_metadata(soc, pdev,
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h b/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h
+index e917653798af81412649f88a42887faf5accd143..0a7e17d65d332d2a737ad49615c455ac67ad962c 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h
++++ b/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h
+@@ -1228,6 +1228,9 @@ struct dp_mon_mac {
+ 	/* Metadata must belong to this PPDU, including after a missing end TLV. */
+ 	bool wonder_rx_start_seen;
+ 	bool wonder_rx_end_seen;
++	/* Captured from this PPDU START, before the configured HOME fallback. */
++	uint32_t wonder_rx_frequency;
++	uint32_t wonder_rx_frequency_ppdu_id;
+ #endif
+ #ifdef WLAN_FEATURE_LOCAL_PKT_CAPTURE
+ 	/* Maintain MSDU list on PPDU */
+@@ -5393,6 +5396,29 @@ dp_mon_mode_local_pkt_capture(struct dp_soc *soc)
+ }
+ #endif
+ 
++#ifdef FEATURE_WLAN_WONDER
++static inline void
++dp_mon_wonder_rx_frequency_reset(struct dp_mon_mac *mon_mac)
++{
++	mon_mac->wonder_rx_frequency = 0;
++	mon_mac->wonder_rx_frequency_ppdu_id = 0;
++}
++
++/* Call only after decoding this actual PPDU START TLV. */
++static inline void
++dp_mon_wonder_rx_frequency_start(struct dp_mon_mac *mon_mac)
++{
++	uint32_t frequency = mon_mac->ppdu_info.rx_status.chan_freq;
++
++	dp_mon_wonder_rx_frequency_reset(mon_mac);
++	if (frequency && frequency <= 65535) {
++		mon_mac->wonder_rx_frequency = frequency;
++		mon_mac->wonder_rx_frequency_ppdu_id =
++			mon_mac->ppdu_info.com_info.ppdu_id;
++	}
++}
++#endif
++
+ #ifdef WIFI_MONITOR_SUPPORT
+ void
+ dp_check_and_dump_full_mon_info(struct dp_soc *soc, struct dp_pdev *pdev,
+@@ -5408,6 +5434,10 @@ static inline void
+ dp_mon_rx_ppdu_status_reset(struct dp_mon_mac *mon_mac)
+ {
+ 	mon_mac->mon_ppdu_status = DP_PPDU_STATUS_START;
++
++#ifdef FEATURE_WLAN_WONDER
++	dp_mon_wonder_rx_frequency_reset(mon_mac);
++#endif
+ 	mon_mac->ppdu_info.com_info.num_users = 0;
+ 	qdf_mem_zero(&mon_mac->ppdu_info.rx_status,
+ 		     sizeof(mon_mac->ppdu_info.rx_status));
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_rx_mon.c b/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_rx_mon.c
+index 9d4843cb84d93dec7c909cf9f8799ef74bf90520..8af6d55f01d1965749c22322dc149dd384ce744d 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_rx_mon.c
++++ b/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_rx_mon.c
+@@ -193,6 +193,119 @@ unlock:
+ 	mutex_unlock(&dp_sta_mon_binding_lock);
+ }
+ 
++/* Caller holds RCU; unrelated live helper bindings are never selected. */
++static struct dp_sta_mon_helper_binding *
++dp_sta_mon_find_shared_binding(struct dp_soc *soc, struct dp_mon_mac *mon_mac)
++{
++	struct dp_sta_mon_helper_binding *binding;
++
++	list_for_each_entry_rcu(binding, &dp_sta_mon_bindings, list) {
++		if (binding->soc == soc && binding->mon_mac == mon_mac)
++			return binding;
++	}
++	return NULL;
++}
++
++/* Caller holds mon_lock and RCU; this validates the live destination owner. */
++static bool
++dp_sta_mon_shared_binding_live(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
++			       struct dp_sta_mon_helper_binding *binding,
++			       uint32_t mac_id)
++{
++	struct dp_vdev *monitor, *helper;
++
++	if (!binding || !dp_mon_is_sta_coex(soc) ||
++	    dp_mon_sta_coex_is_paused(soc))
++		return false;
++	monitor = binding->monitor;
++	helper = binding->helper;
++	return binding->soc == soc && binding->mon_mac == mon_mac &&
++		monitor && helper && monitor->pdev &&
++		monitor->pdev->soc == soc && helper->pdev == monitor->pdev &&
++		monitor->lmac_id == mac_id && helper->lmac_id == mac_id &&
++		mon_mac->mvdev == monitor && monitor->monitor_vdev &&
++		monitor->monitor_vdev->osif_rx_mon && monitor->osif_vdev &&
++		monitor->pdev->monitor_pdev->monitor_configured &&
++		binding->frequency && binding->frequency <= 65535 &&
++		mon_mac->mon_chan_freq == binding->frequency &&
++		smp_load_acquire(&helper->osif_rx) == dp_sta_mon_helper_rx_marker &&
++		rcu_dereference(helper->osif_vdev) == (void *)binding &&
++		binding->token_valid(binding->arg, monitor->vdev_id,
++				     binding->generation);
++}
++
++/* Caller holds mon_lock and RCU until the receive callback consumes @nbuf.
++ * Zero frequency marks data-path copies without measured channel provenance.
++ */
++static bool
++dp_sta_mon_publish(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
++		   struct dp_sta_mon_helper_binding *binding, qdf_nbuf_t nbuf,
++		   struct mon_rx_status *status, uint32_t measured_frequency)
++{
++#ifdef FEATURE_WLAN_WONDER
++	struct cdp_wonder_rx_lease lease = {0};
++#endif
++
++	if (!binding || !binding->monitor ||
++	    !dp_sta_mon_shared_binding_live(soc, mon_mac, binding,
++						     binding->monitor->lmac_id))
++		return false;
++#ifdef FEATURE_WLAN_WONDER
++	if (!wlan_injection_wonder_rx_begin(binding->arg,
++			binding->monitor->vdev_id, binding->generation,
++			measured_frequency, &lease))
++		return false;
++#else
++	if (measured_frequency && measured_frequency != binding->frequency)
++		return false;
++#endif
++	/* Admission and dwell revocation stay serialized through publication. */
++	binding->monitor->monitor_vdev->osif_rx_mon(
++		binding->monitor->osif_vdev, nbuf, status);
++#ifdef FEATURE_WLAN_WONDER
++	wlan_injection_wonder_rx_end(&lease);
++#endif
++	return true;
++}
++
++#ifdef FEATURE_WLAN_WONDER
++static uint32_t dp_sta_mon_measured_frequency(struct dp_mon_mac *mon_mac)
++{
++	if (!mon_mac->wonder_rx_frequency ||
++	    mon_mac->wonder_rx_frequency > 65535 ||
++	    mon_mac->wonder_rx_frequency_ppdu_id !=
++				mon_mac->ppdu_info.com_info.ppdu_id ||
++	    mon_mac->wonder_rx_frequency !=
++				mon_mac->ppdu_info.rx_status.chan_freq)
++		return 0;
++	return mon_mac->wonder_rx_frequency;
++}
++#endif
++
++/* Full monitor status and the MPDU have already been matched by the reaper. */
++static bool
++dp_sta_mon_publish_full(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
++			qdf_nbuf_t nbuf, struct mon_rx_status *status)
++{
++	struct dp_sta_mon_helper_binding *binding;
++	uint32_t frequency = 0;
++	bool delivered;
++
++	if (!dp_mon_is_sta_coex(soc)) {
++		mon_mac->mvdev->monitor_vdev->osif_rx_mon(
++			mon_mac->mvdev->osif_vdev, nbuf, status);
++		return true;
++	}
++#ifdef FEATURE_WLAN_WONDER
++	frequency = dp_sta_mon_measured_frequency(mon_mac);
++#endif
++	rcu_read_lock();
++	binding = dp_sta_mon_find_shared_binding(soc, mon_mac);
++	delivered = dp_sta_mon_publish(soc, mon_mac, binding, nbuf, status,
++				       frequency);
++	rcu_read_unlock();
++	return delivered;
++}
+ /* Only fields known for this actual frame are exported, with the full MPDU. */
+ struct dp_sta_mon_radiotap {
+ 	uint8_t version;
+@@ -227,6 +340,7 @@ void dp_mon_sta_coex_mgmt_rx(struct cdp_soc_t *soc_hdl,
+ 	struct dp_vdev *monitor;
+ 	struct dp_mon_mac *mon_mac;
+ 	struct dp_mon_vdev *mon_vdev;
++	struct dp_sta_mon_helper_binding *binding;
+ 	struct dp_sta_mon_radiotap *rtap;
+ 	qdf_nbuf_t copy = NULL;
+ 	uint32_t length, header_len = sizeof(*rtap);
+@@ -277,18 +391,16 @@ void dp_mon_sta_coex_mgmt_rx(struct cdp_soc_t *soc_hdl,
+ 		     qdf_nbuf_data(nbuf), length);
+ 
+ 	mon_mac = dp_get_mon_mac(monitor->pdev, mac_id);
++	rcu_read_lock();
+ 	qdf_spin_lock_bh(&mon_mac->mon_lock);
+ 	mon_vdev = monitor->monitor_vdev;
+-	if (mon_mac->mvdev == monitor && mon_vdev &&
+-	    mon_vdev->osif_rx_mon && monitor->osif_vdev &&
+-	    monitor->pdev->monitor_pdev->monitor_configured &&
+-	    mon_mac->mon_chan_freq == frequency &&
+-	    dp_mon_is_sta_coex(soc) && !dp_mon_sta_coex_is_paused(soc) &&
+-	    token_valid(arg, monitor_id, generation)) {
+-		mon_vdev->osif_rx_mon(monitor->osif_vdev, copy, NULL);
++	binding = dp_sta_mon_find_shared_binding(soc, mon_mac);
++	if (mon_vdev && binding && binding->monitor == monitor &&
++	    binding->generation == generation && binding->arg == arg &&
++	    dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, frequency))
+ 		copy = NULL;
+-	}
+ 	qdf_spin_unlock_bh(&mon_mac->mon_lock);
++	rcu_read_unlock();
+ out:
+ 	if (copy)
+ 		qdf_nbuf_free(copy);
+@@ -361,46 +473,6 @@ dp_sta_mon_eapol_span(const uint8_t *header, uint32_t captured_len,
+ 	return true;
+ }
+ 
+-/* Caller holds RCU; unrelated live helper bindings are never selected. */
+-static struct dp_sta_mon_helper_binding *
+-dp_sta_mon_find_shared_binding(struct dp_soc *soc, struct dp_mon_mac *mon_mac)
+-{
+-	struct dp_sta_mon_helper_binding *binding;
+-
+-	list_for_each_entry_rcu(binding, &dp_sta_mon_bindings, list) {
+-		if (binding->soc == soc && binding->mon_mac == mon_mac)
+-			return binding;
+-	}
+-	return NULL;
+-}
+-
+-/* Caller holds mon_lock and RCU; this validates the live destination owner. */
+-static bool
+-dp_sta_mon_shared_binding_live(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
+-			       struct dp_sta_mon_helper_binding *binding,
+-			       uint32_t mac_id)
+-{
+-	struct dp_vdev *monitor, *helper;
+-
+-	if (!binding || !dp_mon_is_sta_coex(soc) ||
+-	    dp_mon_sta_coex_is_paused(soc))
+-		return false;
+-	monitor = binding->monitor;
+-	helper = binding->helper;
+-	return binding->soc == soc && binding->mon_mac == mon_mac &&
+-		monitor && helper && monitor->pdev &&
+-		monitor->pdev->soc == soc && helper->pdev == monitor->pdev &&
+-		monitor->lmac_id == mac_id && helper->lmac_id == mac_id &&
+-		mon_mac->mvdev == monitor && monitor->monitor_vdev &&
+-		monitor->monitor_vdev->osif_rx_mon && monitor->osif_vdev &&
+-		monitor->pdev->monitor_pdev->monitor_configured &&
+-		binding->frequency && binding->frequency <= 65535 &&
+-		mon_mac->mon_chan_freq == binding->frequency &&
+-		smp_load_acquire(&helper->osif_rx) == dp_sta_mon_helper_rx_marker &&
+-		rcu_dereference(helper->osif_vdev) == (void *)binding &&
+-		binding->token_valid(binding->arg, monitor->vdev_id,
+-				     binding->generation);
+-}
+ 
+ void dp_mon_sta_coex_copy_shared(struct dp_soc *soc, uint32_t mac_id,
+ 			       qdf_nbuf_t nbuf, uint32_t buffer_size,
+@@ -506,11 +578,8 @@ void dp_mon_sta_coex_copy_shared(struct dp_soc *soc, uint32_t mac_id,
+ 	qdf_mem_copy(dst + span.header_len, ether + 14, span.payload_len);
+ 
+ 	/* Generation identifies the current owner, not the age of an air frame. */
+-	if (dp_sta_mon_shared_binding_live(soc, mon_mac, binding, mac_id)) {
+-		binding->monitor->monitor_vdev->osif_rx_mon(
+-			binding->monitor->osif_vdev, copy, NULL);
++	if (dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, 0))
+ 		copy = NULL;
+-	}
+ out:
+ 	if (copy)
+ 		qdf_nbuf_free(copy);
+@@ -637,11 +706,8 @@ void dp_mon_sta_coex_copy_unknown_raw(struct dp_soc *soc, uint32_t mac_id,
+ 	/* RAW supplies the complete MPDU and hardware FCS. */
+ 	rtap->flags = IEEE80211_RADIOTAP_F_FCS;
+ 	qdf_mem_copy(rtap + 1, frame, length);
+-	if (dp_sta_mon_shared_binding_live(soc, mon_mac, binding, mac_id)) {
+-		binding->monitor->monitor_vdev->osif_rx_mon(
+-			binding->monitor->osif_vdev, copy, NULL);
++	if (dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, 0))
+ 		copy = NULL;
+-	}
+ out:
+ 	if (copy)
+ 		qdf_nbuf_free(copy);
+@@ -775,7 +841,10 @@ dp_sta_mon_deliver_raw(struct dp_soc *soc,
+ 		goto drop;
+ 	}
+ 
+-	mon_vdev->osif_rx_mon(binding->monitor->osif_vdev, copy, NULL);
++	if (!dp_sta_mon_publish(soc, mon_mac, binding, copy, NULL, 0)) {
++		qdf_spin_unlock_bh(&mon_mac->mon_lock);
++		goto drop;
++	}
+ 	copy = NULL;
+ 	qdf_spin_unlock_bh(&mon_mac->mon_lock);
+ 	qdf_nbuf_list_free(nbuf);
+@@ -878,6 +947,15 @@ out:
+ 	rcu_read_unlock();
+ 	return consumed;
+ }
++#else
++static bool
++dp_sta_mon_publish_full(struct dp_soc *soc, struct dp_mon_mac *mon_mac,
++			qdf_nbuf_t nbuf, struct mon_rx_status *status)
++{
++	mon_mac->mvdev->monitor_vdev->osif_rx_mon(
++		mon_mac->mvdev->osif_vdev, nbuf, status);
++	return true;
++}
+ #endif
+ 
+ #ifdef QCA_SUPPORT_MON_FCS_CAP_DBG
+@@ -2538,7 +2616,6 @@ dp_rx_handle_smart_mesh_mode(struct dp_soc *soc, struct dp_pdev *pdev,
+ 			      qdf_nbuf_t nbuf, uint8_t mac_id)
+ {
+ 	uint8_t size = 0;
+-	struct dp_mon_vdev *mon_vdev;
+ 	struct dp_mon_mac *mon_mac = dp_get_mon_mac(pdev, mac_id);
+ 
+ 	if (!mon_mac->mvdev) {
+@@ -2548,8 +2625,6 @@ dp_rx_handle_smart_mesh_mode(struct dp_soc *soc, struct dp_pdev *pdev,
+ 		return 1;
+ 	}
+ 
+-	mon_vdev = mon_mac->mvdev->monitor_vdev;
+-
+ 	if (!ppdu_info->msdu_info.first_msdu_payload) {
+ 		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_ERROR,
+ 			  "[%s]:[%d] First msdu payload not present",
+@@ -2578,8 +2653,8 @@ dp_rx_handle_smart_mesh_mode(struct dp_soc *soc, struct dp_pdev *pdev,
+ 		return 1;
+ 	}
+ 
+-	mon_vdev->osif_rx_mon(mon_mac->mvdev->osif_vdev,
+-			      nbuf, NULL);
++	if (!dp_sta_mon_publish_full(soc, mon_mac, nbuf, NULL))
++		return 1;
+ 	mon_mac->ppdu_info.rx_status.monitor_direct_used = 0;
+ 	return 0;
+ }
+@@ -2846,8 +2921,8 @@ dp_rx_mon_send_mpdu(struct dp_pdev *pdev, struct dp_mon_mac *mon_mac,
+ 	mon_vdev = vdev->monitor_vdev;
+ 	if (qdf_likely(mon_vdev && mon_vdev->osif_rx_mon)) {
+ 		dp_rx_mon_disable_pf(mpdu_buf);
+-		mon_vdev->osif_rx_mon(vdev->osif_vdev,
+-				      mpdu_buf, NULL);
++		if (!dp_sta_mon_publish_full(soc, mon_mac, mpdu_buf, NULL))
++			goto fail_free;
+ 	}
+ 
+ 	dp_vdev_unref_delete(soc, vdev, DP_MOD_ID_MISC);
+@@ -3127,7 +3202,6 @@ QDF_STATUS dp_rx_mon_deliver(struct dp_soc *soc, uint32_t mac_id,
+ 	struct cdp_mon_status *rs;
+ 	qdf_nbuf_t mon_skb, skb_next;
+ 	qdf_nbuf_t mon_mpdu = NULL;
+-	struct dp_mon_vdev *mon_vdev;
+ 	struct dp_mon_pdev *mon_pdev;
+ 	struct dp_mon_mac *mon_mac;
+ 
+@@ -3168,8 +3242,6 @@ QDF_STATUS dp_rx_mon_deliver(struct dp_soc *soc, uint32_t mac_id,
+ 	    mon_mac->mvdev->osif_vdev &&
+ 	    mon_mac->mvdev->monitor_vdev &&
+ 	    mon_mac->mvdev->monitor_vdev->osif_rx_mon) {
+-		mon_vdev = mon_mac->mvdev->monitor_vdev;
+-
+ 		mon_mac->ppdu_info.rx_status.ppdu_id =
+ 			mon_mac->ppdu_info.com_info.ppdu_id;
+ 		mon_mac->ppdu_info.rx_status.device_id = soc->device_id;
+@@ -3190,9 +3262,11 @@ QDF_STATUS dp_rx_mon_deliver(struct dp_soc *soc, uint32_t mac_id,
+ 			qdf_nbuf_free(mon_mpdu);
+ 			return QDF_STATUS_E_AGAIN;
+ 		}
+-		mon_vdev->osif_rx_mon(mon_mac->mvdev->osif_vdev,
+-				      mon_mpdu,
+-				      &mon_mac->ppdu_info.rx_status);
++		if (!dp_sta_mon_publish_full(soc, mon_mac, mon_mpdu,
++					    &mon_mac->ppdu_info.rx_status)) {
++			qdf_nbuf_free(mon_mpdu);
++			return QDF_STATUS_E_AGAIN;
++		}
+ 	} else {
+ 		dp_rx_mon_dest_debug("%pK: mon_mpdu=%pK monitor_vdev %pK osif_vdev %pK"
+ 				     , soc, mon_mpdu, mon_mac->mvdev,
+@@ -3222,10 +3296,8 @@ QDF_STATUS dp_rx_mon_deliver_non_std(struct dp_soc *soc,
+ 				     uint32_t mac_id)
+ {
+ 	struct dp_pdev *pdev = dp_get_pdev_for_lmac_id(soc, mac_id);
+-	ol_txrx_rx_mon_fp osif_rx_mon;
+ 	qdf_nbuf_t dummy_msdu;
+ 	struct dp_mon_pdev *mon_pdev;
+-	struct dp_mon_vdev *mon_vdev;
+ 	struct dp_mon_mac *mon_mac;
+ 
+ 	/* Sanity checking */
+@@ -3241,9 +3313,7 @@ QDF_STATUS dp_rx_mon_deliver_non_std(struct dp_soc *soc,
+ 	    !mon_mac->mvdev->monitor_vdev->osif_rx_mon)
+ 		goto mon_deliver_non_std_fail;
+ 
+-	mon_vdev = mon_mac->mvdev->monitor_vdev;
+ 	/* Generate a dummy skb_buff */
+-	osif_rx_mon = mon_vdev->osif_rx_mon;
+ 	dummy_msdu = qdf_nbuf_alloc(soc->osdev, MAX_MONITOR_HEADER,
+ 				    MAX_MONITOR_HEADER, 4, FALSE);
+ 	if (!dummy_msdu)
+@@ -3264,8 +3334,10 @@ QDF_STATUS dp_rx_mon_deliver_non_std(struct dp_soc *soc,
+ 	}
+ 
+ 	/* deliver to the user layer application */
+-	osif_rx_mon(mon_mac->mvdev->osif_vdev,
+-		    dummy_msdu, NULL);
++	if (!dp_sta_mon_publish_full(soc, mon_mac, dummy_msdu, NULL)) {
++		qdf_nbuf_free(dummy_msdu);
++		goto mon_deliver_non_std_fail;
++	}
+ 
+ 	return QDF_STATUS_SUCCESS;
+ 
+diff --git a/qca-wifi-host-cmn/target_if/scan/src/target_if_scan.c b/qca-wifi-host-cmn/target_if/scan/src/target_if_scan.c
+index 8f4ad3c8958cff5139788c644aa49f014fa4725e..61b9c047f77f285c9f6ded4ecf40a107d0b27dd1 100644
+--- a/qca-wifi-host-cmn/target_if/scan/src/target_if_scan.c
++++ b/qca-wifi-host-cmn/target_if/scan/src/target_if_scan.c
+@@ -29,6 +29,7 @@
+ #include <wlan_objmgr_psoc_obj.h>
+ #include <wlan_scan_tgt_api.h>
+ #include <target_if.h>
++#include "wlan_mlme_sta_mon.h"
+ 
+ static inline struct wlan_lmac_if_scan_rx_ops *
+ target_if_scan_get_rx_ops(struct wlan_objmgr_psoc *psoc)
+@@ -107,9 +108,14 @@ target_if_scan_event_handler(ol_scn_t scn, uint8_t *data, uint32_t datalen)
+ 		return -EINVAL;
+ 	}
+ 
++	/* Observe genuine target events before SCM's active-queue filter, which
++	 * may discard late firmware completion after a synthetic cancellation.
++	 */
++	wlan_mlme_sta_mon_scan_fw_event(psoc, &event_info->event);
+ 	scan_rx_ops = target_if_scan_get_rx_ops(psoc);
+ 	if (!scan_rx_ops) {
+ 		target_if_err("scan_rx_ops is NULL");
++		qdf_mem_free(event_info);
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/qca-wifi-host-cmn/umac/scan/core/src/wlan_scan_manager.c b/qca-wifi-host-cmn/umac/scan/core/src/wlan_scan_manager.c
+index 63e747c4da5defe720a7702e93f0fed2e7bea071..d164cdad70972552ce60767612302af004a71007 100644
+--- a/qca-wifi-host-cmn/umac/scan/core/src/wlan_scan_manager.c
++++ b/qca-wifi-host-cmn/umac/scan/core/src/wlan_scan_manager.c
+@@ -36,6 +36,7 @@
+ #endif
+ #include <wlan_dfs_utils_api.h>
+ #include <cfg_scan.h>
++#include "wlan_mlme_sta_mon.h"
+ 
+ QDF_STATUS
+ scm_scan_free_scan_request_mem(struct scan_start_request *req)
+@@ -252,13 +253,37 @@ scm_update_last_scan_time(struct scan_start_request *req)
+ 	return QDF_STATUS_SUCCESS;
+ }
+ 
++static void scm_scan_not_submitted(struct scan_start_request *req)
++{
++	struct scan_event event = {0};
++
++	event.type = SCAN_EVENT_TYPE_COMPLETED;
++	event.vdev_id = req->scan_req.vdev_id;
++	event.requester = req->scan_req.scan_req_id;
++	event.scan_id = req->scan_req.scan_id;
++	wlan_mlme_sta_mon_scan_not_submitted(wlan_vdev_get_psoc(req->vdev),
++					    &event);
++}
++
+ static QDF_STATUS
+ scm_activate_scan_request(struct scan_start_request *req)
+ {
+ 	QDF_STATUS status;
+ 
+-	status = tgt_scan_start(req);
++	if (!wlan_mlme_sta_mon_scan_activate(wlan_vdev_get_psoc(req->vdev),
++			req->scan_req.vdev_id, req->scan_req.scan_id,
++			req->scan_req.scan_req_id,
++			req->scan_req.chan_list.chan[0].freq,
++			req->scan_req.chan_list.num_chan,
++			req->scan_req.scan_f_offchan_data_tx,
++			req->sta_mon_reserved))
++		status = QDF_STATUS_E_BUSY;
++	else {
++		req->target_start_attempted = true;
++		status = tgt_scan_start(req);
++	}
+ 	if (status != QDF_STATUS_SUCCESS) {
++		scm_scan_not_submitted(req);
+ 		scm_err("tgt_scan_start failed, status: %d", status);
+ 		/* scan could not be started and hence
+ 		 * we will not receive any completions.
+@@ -338,6 +363,8 @@ scm_scan_serialize_callback(struct wlan_serialization_command *cmd,
+ 		 * notify registered scan event handlers with
+ 		 * status completed and reason cancelled.
+ 		 */
++		if (!req->target_start_attempted)
++			scm_scan_not_submitted(req);
+ 		status = scm_post_internal_scan_complete_event(req,
+ 				SCAN_REASON_CANCELLED);
+ 		break;
+@@ -1404,7 +1431,12 @@ scm_scan_start_req(struct scheduler_msg *msg)
+ 		goto err;
+ 	}
+ 
+-	scm_scan_req_update_params(req->vdev, req, scan_obj);
++	/* A private reservation carries an exact passive single-channel request.
++	 * Global custom/aux/low-latency scan settings must not rewrite its channel
++	 * or suppress public action reception. Activation validates it again.
++	 */
++	if (!req->sta_mon_reserved)
++		scm_scan_req_update_params(req->vdev, req, scan_obj);
+ 	scm_print_scan_req_info(&req->scan_req);
+ 
+ 	if (!req->scan_req.chan_list.num_chan) {
+@@ -1440,11 +1472,13 @@ scm_scan_start_req(struct scheduler_msg *msg)
+ 		break;
+ 	default:
+ 		scm_debug("ser cmd status %d", ser_cmd_status);
++		status = QDF_STATUS_E_FAILURE;
+ 		goto err;
+ 	}
+ 
+ 	return status;
+ err:
++	scm_scan_not_submitted(req);
+ 	/*
+ 	 * notify registered scan event handlers
+ 	 * about internal error
+@@ -1894,6 +1928,7 @@ QDF_STATUS scm_scan_start_flush_callback(struct scheduler_msg *msg)
+ 	}
+ 
+ 	req = msg->bodyptr;
++	scm_scan_not_submitted(req);
+ 	scm_post_internal_scan_complete_event(req, SCAN_REASON_CANCELLED);
+ 	wlan_objmgr_vdev_release_ref(req->vdev, WLAN_SCAN_ID);
+ 	scm_scan_free_scan_request_mem(req);
+diff --git a/qca-wifi-host-cmn/umac/scan/dispatcher/inc/wlan_scan_public_structs.h b/qca-wifi-host-cmn/umac/scan/dispatcher/inc/wlan_scan_public_structs.h
+index 51bd305d91f8f9fb1a01c732b5710302ec36bf44..ffe23eb0e4bcb90dfeaf25a4a4c36ee4028092bf 100644
+--- a/qca-wifi-host-cmn/umac/scan/dispatcher/inc/wlan_scan_public_structs.h
++++ b/qca-wifi-host-cmn/umac/scan/dispatcher/inc/wlan_scan_public_structs.h
+@@ -1270,6 +1270,9 @@ struct scan_req_params {
+ struct scan_start_request {
+ 	struct wlan_objmgr_vdev *vdev;
+ 	struct scan_req_params scan_req;
++	/* Host-only provenance, zeroed by wlan_scan_init_default_params(). */
++	bool sta_mon_reserved;
++	bool target_start_attempted;
+ };
+ 
+ /**
+diff --git a/qca-wifi-host-cmn/umac/scan/dispatcher/src/wlan_scan_api.c b/qca-wifi-host-cmn/umac/scan/dispatcher/src/wlan_scan_api.c
+index ea287853b4e85e6c711e7bf247b42118f3f3b713..ef50d3f40533cd010ff7f31b2a958ac73b74ae6a 100644
+--- a/qca-wifi-host-cmn/umac/scan/dispatcher/src/wlan_scan_api.c
++++ b/qca-wifi-host-cmn/umac/scan/dispatcher/src/wlan_scan_api.c
+@@ -455,11 +455,50 @@ static QDF_STATUS sta_mon_scan_start_flush(struct scheduler_msg *msg)
+ 	return scm_scan_start_flush_callback(msg);
+ }
+ 
++static void sta_mon_scan_rejected(struct scan_start_request *req)
++{
++	struct scan_event event = {0};
++
++	event.type = SCAN_EVENT_TYPE_COMPLETED;
++	event.reason = SCAN_REASON_INTERNAL_FAILURE;
++	event.vdev_id = req->scan_req.vdev_id;
++	event.requester = req->scan_req.scan_req_id;
++	event.scan_id = req->scan_req.scan_id;
++	wlan_mlme_sta_mon_scan_not_submitted(wlan_vdev_get_psoc(req->vdev),
++					    &event);
++}
++
++static QDF_STATUS sta_mon_reserved_scan_start_req(struct scheduler_msg *msg)
++{
++	struct scan_start_request *req = msg->bodyptr;
++	struct wlan_objmgr_psoc *psoc = wlan_vdev_get_psoc(req->vdev);
++	QDF_STATUS status;
++
++	status = wlan_objmgr_psoc_try_get_ref(psoc, WLAN_SCAN_ID);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wlan_mlme_sta_mon_admission_end(psoc);
++		return scm_scan_start_flush_callback(msg);
++	}
++	status = scm_scan_start_req(msg);
++	wlan_mlme_sta_mon_admission_end(psoc);
++	wlan_objmgr_psoc_release_ref(psoc, WLAN_SCAN_ID);
++	return status;
++}
++
++static QDF_STATUS sta_mon_reserved_scan_start_flush(struct scheduler_msg *msg)
++{
++	struct scan_start_request *req = msg->bodyptr;
++
++	wlan_mlme_sta_mon_admission_end(wlan_vdev_get_psoc(req->vdev));
++	return scm_scan_start_flush_callback(msg);
++}
++
+ QDF_STATUS wlan_scan_start(struct scan_start_request *req)
+ {
+ 	struct scheduler_msg msg = {0};
+ 	struct wlan_objmgr_psoc *psoc;
+ 	QDF_STATUS status;
++	bool reserved;
+ 
+ 	if (!req || !req->vdev) {
+ 		scm_err("req or vdev within req is NULL");
+@@ -468,12 +507,19 @@ QDF_STATUS wlan_scan_start(struct scan_start_request *req)
+ 	}
+ 
+ 	psoc = wlan_vdev_get_psoc(req->vdev);
+-	if (!wlan_mlme_sta_mon_admission_begin(psoc)) {
++	if (!wlan_mlme_sta_mon_scan_admission_begin(psoc,
++			req->scan_req.vdev_id, req->scan_req.scan_id,
++			req->scan_req.scan_req_id,
++			req->scan_req.chan_list.chan[0].freq,
++			req->scan_req.chan_list.num_chan,
++			req->scan_req.scan_f_offchan_data_tx, &reserved)) {
+ 		scm_scan_free_scan_request_mem(req);
+ 		return QDF_STATUS_E_BUSY;
+ 	}
+ 	if (!scm_is_scan_allowed(req->vdev)) {
+ 		scm_err_rl("scan disabled, rejecting the scan req");
++		if (reserved)
++			sta_mon_scan_rejected(req);
+ 		wlan_mlme_sta_mon_admission_end(psoc);
+ 		scm_scan_free_scan_request_mem(req);
+ 		return QDF_STATUS_E_AGAIN;
+@@ -487,22 +533,31 @@ QDF_STATUS wlan_scan_start(struct scan_start_request *req)
+ 	status = wlan_objmgr_vdev_try_get_ref(req->vdev, WLAN_SCAN_ID);
+ 	if (QDF_IS_STATUS_ERROR(status)) {
+ 		scm_info("unable to get reference");
++		if (reserved)
++			sta_mon_scan_rejected(req);
+ 		wlan_mlme_sta_mon_admission_end(psoc);
+ 		scm_scan_free_scan_request_mem(req);
+ 		return status;
+ 	}
+ 
+ 	msg.bodyptr = req;
+-	msg.callback = sta_mon_scan_start_req;
+-	msg.flush_callback = sta_mon_scan_start_flush;
++	req->sta_mon_reserved = reserved;
++	msg.callback = reserved ? sta_mon_reserved_scan_start_req :
++				 sta_mon_scan_start_req;
++	msg.flush_callback = reserved ? sta_mon_reserved_scan_start_flush :
++				       sta_mon_scan_start_flush;
+ 	/* The scheduler callback owns admission until scan serialization. */
+-	wlan_mlme_sta_mon_update_begin(psoc);
++	if (!reserved)
++		wlan_mlme_sta_mon_update_begin(psoc);
+ 
+ 	status = scheduler_post_message(QDF_MODULE_ID_OS_IF,
+ 					QDF_MODULE_ID_SCAN,
+ 					QDF_MODULE_ID_OS_IF, &msg);
+ 	if (QDF_IS_STATUS_ERROR(status)) {
+-		wlan_mlme_sta_mon_update_end(psoc);
++		if (reserved)
++			sta_mon_scan_rejected(req);
++		else
++			wlan_mlme_sta_mon_update_end(psoc);
+ 		wlan_mlme_sta_mon_admission_end(psoc);
+ 		wlan_objmgr_vdev_release_ref(req->vdev, WLAN_SCAN_ID);
+ 		scm_scan_free_scan_request_mem(req);
+diff --git a/qca-wifi-host-cmn/wmi/inc/wmi_unified_api.h b/qca-wifi-host-cmn/wmi/inc/wmi_unified_api.h
+index 36a238ce17b039a7e3b26d73e40b3fccdaea9ec8..30ef24aade433f41466f7ac3499b3e02040fff6d 100644
+--- a/qca-wifi-host-cmn/wmi/inc/wmi_unified_api.h
++++ b/qca-wifi-host-cmn/wmi/inc/wmi_unified_api.h
+@@ -1468,12 +1468,63 @@ QDF_STATUS wmi_mgmt_unified_cmd_send(wmi_unified_t wmi_handle,
+  *  @wmi_handle: handle to WMI.
+  *  @param: pointer to hold offchan data cmd parameter
+  *
+- *  Return: QDF_STATUS_SUCCESS on success and QDF_STATUS_E_FAILURE for failure
++ * The caller supplies an unmapped, linear, caller-owned frame. Success leaves
++ * the frame DMA mapped and owned by the caller until a matching firmware
++ * completion or a proven firmware drain. Failure leaves the frame unmapped.
++ * Submission neither acquires a channel dwell nor proves RF transmission.
++ *
++ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
+  */
+ QDF_STATUS wmi_offchan_data_tx_cmd_send(
+ 		wmi_unified_t wmi_handle,
+ 		struct wmi_offchan_data_tx_params *param);
+ 
++/**
++ * wmi_extract_offchan_data_tx_compl_param() - decode off-channel completion
++ * @wmi_handle: WMI handle
++ * @evt_buf: processed completion event TLVs
++ * @param: output, cleared on failure
++ *
++ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
++ */
++QDF_STATUS wmi_extract_offchan_data_tx_compl_param(
++		wmi_unified_t wmi_handle, void *evt_buf,
++		struct wmi_host_offchan_data_tx_compl_event *param);
++
++/**
++ * wmi_offchan_data_tx_pdev_id() - normalize the completion's one-based pdev ID
++ * @wmi_handle: WMI handle with the current target-to-host pdev map
++ * @target_pdev_id: stock target completion pdev ID (1..3)
++ * @host_pdev_id: output host pdev ID
++ *
++ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
++ */
++QDF_STATUS wmi_offchan_data_tx_pdev_id(wmi_unified_t wmi_handle,
++		uint32_t target_pdev_id, uint32_t *host_pdev_id);
++
++/**
++ * wmi_offchan_data_tx_completion_register() - register completion owner
++ * @wmi_handle: WMI handle with the live off-channel TX service enabled
++ * @handler_func: completion callback
++ * @rx_ctx: event processing context
++ *
++ * Registration requires an available decoder and rejects an existing owner.
++ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
++ */
++QDF_STATUS wmi_offchan_data_tx_completion_register(
++		wmi_unified_t wmi_handle,
++		wmi_unified_event_handler handler_func, uint8_t rx_ctx);
++
++/**
++ * wmi_offchan_data_tx_completion_unregister() - unregister completion owner
++ * @wmi_handle: WMI handle previously registered by the caller
++ *
++ * This does not synchronize queued callbacks or return DMA ownership. The
++ * owner must separately drain callbacks and firmware before releasing frames.
++ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
++ */
++QDF_STATUS wmi_offchan_data_tx_completion_unregister(wmi_unified_t wmi_handle);
++
+ /**
+  * wmi_unified_modem_power_state() - set modem power state to fw
+  * @wmi_handle: wmi handle
+diff --git a/qca-wifi-host-cmn/wmi/inc/wmi_unified_param.h b/qca-wifi-host-cmn/wmi/inc/wmi_unified_param.h
+index ad2c908502af301b47b63bb992cbd9404201e533..5cb35b05b49d3c85335a199699a4fa8a1f4a5a6f 100644
+--- a/qca-wifi-host-cmn/wmi/inc/wmi_unified_param.h
++++ b/qca-wifi-host-cmn/wmi/inc/wmi_unified_param.h
+@@ -1944,7 +1944,7 @@ struct wmi_mgmt_params {
+  * @vdev_id: vdev id
+  * @tx_params_valid: Flag that indicates if TX params are valid
+  * @chanfreq: channel frequency
+- * @desc_id: descriptor id relyaed back by target
++ * @desc_id: descriptor ID, bounded to the stock target's 16-bit echo
+  * @pdata: frame data
+  * @macaddr: macaddr of peer
+  * @qdf_ctx: qdf context for qdf_nbuf_map
+@@ -1956,13 +1956,27 @@ struct wmi_offchan_data_tx_params {
+ 	uint8_t vdev_id;
+ 	bool tx_params_valid;
+ 	uint16_t chanfreq;
+-	uint16_t desc_id;
++	uint32_t desc_id;
+ 	void *pdata;
+ 	uint8_t *macaddr;
+ 	void *qdf_ctx;
+ 	struct tx_send_params tx_param;
+ };
+ 
++/**
++ * struct wmi_host_offchan_data_tx_compl_event - off-channel TX completion
++ * @desc_id: descriptor ID supplied by the sender
++ * @status: target TX completion status
++ * @pdev_id: host pdev ID of the completing MAC
++ *
++ * The off-channel completion does not establish a valid hardware PPDU ID.
++ */
++struct wmi_host_offchan_data_tx_compl_event {
++	uint32_t desc_id;
++	uint32_t status;
++	uint32_t pdev_id;
++};
++
+ /**
+  * struct sta_uapsd_params - uapsd auto trig params
+  * @wmm_ac: WMM access category from 0 to 3
+diff --git a/qca-wifi-host-cmn/wmi/inc/wmi_unified_priv.h b/qca-wifi-host-cmn/wmi/inc/wmi_unified_priv.h
+index aafde08eb115881030a6e0874d2b82134e83d72d..8d82a738a38d42c9e73f392495a667ac63fe64f2 100644
+--- a/qca-wifi-host-cmn/wmi/inc/wmi_unified_priv.h
++++ b/qca-wifi-host-cmn/wmi/inc/wmi_unified_priv.h
+@@ -734,6 +734,10 @@ QDF_STATUS (*send_mgmt_cmd)(wmi_unified_t wmi_handle,
+ QDF_STATUS (*send_offchan_data_tx_cmd)(wmi_unified_t wmi_handle,
+ 				struct wmi_offchan_data_tx_params *param);
+ 
++QDF_STATUS (*extract_offchan_data_tx_compl_param)(wmi_unified_t wmi_handle,
++		void *evt_buf,
++		struct wmi_host_offchan_data_tx_compl_event *param);
++
+ QDF_STATUS (*send_modem_power_state_cmd)(wmi_unified_t wmi_handle,
+ 		uint32_t param_value);
+ 
+@@ -1517,10 +1521,6 @@ QDF_STATUS (*extract_swba_quiet_info)(wmi_unified_t wmi_handle, void *evt_buf,
+ 				      uint32_t idx,
+ 				      wmi_host_quiet_info *quiet_info);
+ 
+-QDF_STATUS (*extract_offchan_data_tx_compl_param)(wmi_unified_t wmi_handle,
+-		void *evt_buf,
+-		struct wmi_host_offchan_data_tx_compl_event *param);
+-
+ QDF_STATUS (*extract_pdev_tpc_config_ev_param)(wmi_unified_t wmi_handle,
+ 		void *evt_buf, wmi_host_pdev_tpc_config_event *param);
+ 
+diff --git a/qca-wifi-host-cmn/wmi/src/wmi_unified_api.c b/qca-wifi-host-cmn/wmi/src/wmi_unified_api.c
+index 9ff9d88a55c4460fa72e8e09954233c50654b172..f3dc31f25bdd9098b7d519819bf286ba236871db 100644
+--- a/qca-wifi-host-cmn/wmi/src/wmi_unified_api.c
++++ b/qca-wifi-host-cmn/wmi/src/wmi_unified_api.c
+@@ -676,6 +676,9 @@ QDF_STATUS
+ wmi_offchan_data_tx_cmd_send(wmi_unified_t wmi_handle,
+ 			     struct wmi_offchan_data_tx_params *param)
+ {
++	if (!wmi_handle || !wmi_handle->ops || !param)
++		return QDF_STATUS_E_INVAL;
++
+ 	if (wmi_handle->ops->send_offchan_data_tx_cmd)
+ 		return wmi_handle->ops->send_offchan_data_tx_cmd(wmi_handle,
+ 				  param);
+@@ -683,6 +686,77 @@ wmi_offchan_data_tx_cmd_send(wmi_unified_t wmi_handle,
+ 	return QDF_STATUS_E_FAILURE;
+ }
+ 
++QDF_STATUS wmi_offchan_data_tx_pdev_id(wmi_unified_t wmi_handle,
++		uint32_t target_pdev_id, uint32_t *host_pdev_id)
++{
++	uint32_t id;
++
++	if (!host_pdev_id)
++		return QDF_STATUS_E_INVAL;
++	*host_pdev_id = WMI_HOST_PDEV_ID_INVALID;
++	if (!wmi_handle || !wmi_handle->ops ||
++	    target_pdev_id < 1 || target_pdev_id > 3)
++		return QDF_STATUS_E_INVAL;
++	if (!wmi_handle->ops->convert_target_pdev_id_to_host)
++		return QDF_STATUS_E_NOSUPPORT;
++	id = wmi_handle->ops->convert_target_pdev_id_to_host(wmi_handle,
++							  target_pdev_id);
++	if (id == WMI_HOST_PDEV_ID_INVALID)
++		return QDF_STATUS_E_INVAL;
++	*host_pdev_id = id;
++	return QDF_STATUS_SUCCESS;
++}
++
++QDF_STATUS wmi_extract_offchan_data_tx_compl_param(
++		wmi_unified_t wmi_handle, void *evt_buf,
++		struct wmi_host_offchan_data_tx_compl_event *param)
++{
++	QDF_STATUS status;
++
++	if (!param)
++		return QDF_STATUS_E_INVAL;
++
++	qdf_mem_zero(param, sizeof(*param));
++	if (!wmi_handle || !wmi_handle->ops || !evt_buf)
++		return QDF_STATUS_E_INVAL;
++
++	if (!wmi_handle->ops->extract_offchan_data_tx_compl_param)
++		return QDF_STATUS_E_NOSUPPORT;
++
++	status = wmi_handle->ops->extract_offchan_data_tx_compl_param(
++			wmi_handle, evt_buf, param);
++	if (QDF_IS_STATUS_ERROR(status))
++		qdf_mem_zero(param, sizeof(*param));
++
++	return status;
++}
++
++QDF_STATUS wmi_offchan_data_tx_completion_register(
++		wmi_unified_t wmi_handle,
++		wmi_unified_event_handler handler_func, uint8_t rx_ctx)
++{
++	if (!wmi_handle || !wmi_handle->ops || !handler_func)
++		return QDF_STATUS_E_INVAL;
++
++	if (!wmi_handle->ops->extract_offchan_data_tx_compl_param ||
++	    !wmi_handle->ops->convert_target_pdev_id_to_host ||
++	    !wmi_service_enabled(wmi_handle, wmi_service_offchan_tx_wmi))
++		return QDF_STATUS_E_NOSUPPORT;
++
++	return wmi_unified_register_event_handler(wmi_handle,
++			wmi_offchan_data_tx_completion_event, handler_func,
++			rx_ctx);
++}
++
++QDF_STATUS wmi_offchan_data_tx_completion_unregister(wmi_unified_t wmi_handle)
++{
++	if (!wmi_handle)
++		return QDF_STATUS_E_INVAL;
++
++	return wmi_unified_unregister_event_handler(wmi_handle,
++			wmi_offchan_data_tx_completion_event);
++}
++
+ QDF_STATUS wmi_unified_modem_power_state(wmi_unified_t wmi_handle,
+ 					 uint32_t param_value)
+ {
+diff --git a/qca-wifi-host-cmn/wmi/src/wmi_unified_tlv.c b/qca-wifi-host-cmn/wmi/src/wmi_unified_tlv.c
+index 2956494e4b86878d78cbd0b8ca8f48ed852fa718..80a5a14ab40d3f289d09027cfe8c6c0f5276d7a4 100644
+--- a/qca-wifi-host-cmn/wmi/src/wmi_unified_tlv.c
++++ b/qca-wifi-host-cmn/wmi/src/wmi_unified_tlv.c
+@@ -5374,71 +5374,148 @@ static QDF_STATUS send_offchan_data_tx_cmd_tlv(wmi_unified_t wmi_handle,
+ 	wmi_offchan_data_tx_send_cmd_fixed_param *cmd;
+ 	int32_t cmd_len;
+ 	uint64_t dma_addr;
+-	void *qdf_ctx = param->qdf_ctx;
+ 	uint8_t *bufp;
+-	int32_t bufp_len = (param->frm_len < mgmt_tx_dl_frm_len) ?
+-					param->frm_len : mgmt_tx_dl_frm_len;
+-	QDF_STATUS status = QDF_STATUS_SUCCESS;
++	int32_t bufp_len;
++	QDF_STATUS status;
++
++	if (!wmi_handle || !param || !param->tx_frame || !param->pdata ||
++	    !param->qdf_ctx || !param->frm_len || param->desc_id > 0xffff ||
++	    qdf_nbuf_is_nonlinear(param->tx_frame) ||
++	    qdf_nbuf_get_num_frags(param->tx_frame) != 1 ||
++	    param->frm_len > qdf_nbuf_len(param->tx_frame))
++		return QDF_STATUS_E_INVAL;
+ 
++	bufp_len = (param->frm_len < mgmt_tx_dl_frm_len) ?
++			param->frm_len : mgmt_tx_dl_frm_len;
+ 	cmd_len = sizeof(wmi_offchan_data_tx_send_cmd_fixed_param) +
+ 		  WMI_TLV_HDR_SIZE +
+-		  roundup(bufp_len, sizeof(uint32_t));
+-
+-	buf = wmi_buf_alloc(wmi_handle, sizeof(wmi_tx_send_params) + cmd_len);
++		  roundup(bufp_len, sizeof(uint32_t)) +
++		  sizeof(wmi_tx_send_params);
++	buf = wmi_buf_alloc(wmi_handle, cmd_len);
+ 	if (!buf)
+ 		return QDF_STATUS_E_NOMEM;
+ 
+-	cmd = (wmi_offchan_data_tx_send_cmd_fixed_param *) wmi_buf_data(buf);
+-	bufp = (uint8_t *) cmd;
++	cmd = (wmi_offchan_data_tx_send_cmd_fixed_param *)wmi_buf_data(buf);
++	qdf_mem_zero(cmd, cmd_len);
++	bufp = (uint8_t *)cmd;
+ 	WMITLV_SET_HDR(&cmd->tlv_header,
+-		WMITLV_TAG_STRUC_wmi_offchan_data_tx_send_cmd_fixed_param,
+-		WMITLV_GET_STRUCT_TLVLEN
+-		(wmi_offchan_data_tx_send_cmd_fixed_param));
+-
++		      WMITLV_TAG_STRUC_wmi_offchan_data_tx_send_cmd_fixed_param,
++		      WMITLV_GET_STRUCT_TLVLEN(
++			      wmi_offchan_data_tx_send_cmd_fixed_param));
+ 	cmd->vdev_id = param->vdev_id;
+-
+ 	cmd->desc_id = param->desc_id;
+ 	cmd->chanfreq = param->chanfreq;
+-	bufp += sizeof(wmi_offchan_data_tx_send_cmd_fixed_param);
+-	WMITLV_SET_HDR(bufp, WMITLV_TAG_ARRAY_BYTE, roundup(bufp_len,
+-							    sizeof(uint32_t)));
++	bufp += sizeof(*cmd);
++	WMITLV_SET_HDR(bufp, WMITLV_TAG_ARRAY_BYTE,
++		      roundup(bufp_len, sizeof(uint32_t)));
+ 	bufp += WMI_TLV_HDR_SIZE;
++	/* Swap only the aligned, zero-padded command copy on big-endian hosts. */
+ 	qdf_mem_copy(bufp, param->pdata, bufp_len);
+-	qdf_nbuf_map_single(qdf_ctx, param->tx_frame, QDF_DMA_TO_DEVICE);
++	WMI_HOST_IF_MSG_COPY_CHAR_ARRAY(bufp, bufp, bufp_len);
++
++	status = qdf_nbuf_map_single(param->qdf_ctx, param->tx_frame,
++				     QDF_DMA_TO_DEVICE);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wmi_err("offchan frame map failed");
++		goto free_buf;
++	}
++
+ 	dma_addr = qdf_nbuf_get_frag_paddr(param->tx_frame, 0);
+-	cmd->paddr_lo = (uint32_t)(dma_addr & 0xffffffff);
+ #if defined(HTT_PADDR64)
++	if (dma_addr >> 37) {
++		status = QDF_STATUS_E_INVAL;
++		goto unmap_tx_frame;
++	}
+ 	cmd->paddr_hi = (uint32_t)((dma_addr >> 32) & 0x1F);
++#else
++	if (dma_addr >> 32) {
++		status = QDF_STATUS_E_INVAL;
++		goto unmap_tx_frame;
++	}
+ #endif
++	cmd->paddr_lo = (uint32_t)(dma_addr & 0xffffffff);
+ 	cmd->frame_len = param->frm_len;
+ 	cmd->buf_len = bufp_len;
+ 	cmd->tx_params_valid = param->tx_params_valid;
+ 
+ 	wmi_mgmt_cmd_record(wmi_handle, WMI_OFFCHAN_DATA_TX_SEND_CMDID,
+-			bufp, cmd->vdev_id, cmd->chanfreq);
+-
++			    bufp, cmd->vdev_id, cmd->chanfreq);
+ 	bufp += roundup(bufp_len, sizeof(uint32_t));
+ 	if (param->tx_params_valid) {
+ 		status = populate_tx_send_params(bufp, param->tx_param);
+-		if (status != QDF_STATUS_SUCCESS) {
++		if (QDF_IS_STATUS_ERROR(status)) {
+ 			wmi_err("Populate TX send params failed");
+-			goto err1;
++			goto unmap_tx_frame;
+ 		}
+-		cmd_len += sizeof(wmi_tx_send_params);
++	} else {
++		/* The fixed TX-params TLV is required even without overrides. */
++		WMITLV_SET_HDR(&((wmi_tx_send_params *)bufp)->tlv_header,
++			      WMITLV_TAG_STRUC_wmi_tx_send_params,
++			      WMITLV_GET_STRUCT_TLVLEN(wmi_tx_send_params));
+ 	}
+ 
+ 	wmi_mtrace(WMI_OFFCHAN_DATA_TX_SEND_CMDID, cmd->vdev_id, 0);
+-	if (wmi_unified_cmd_send(wmi_handle, buf, cmd_len,
+-				WMI_OFFCHAN_DATA_TX_SEND_CMDID)) {
++	status = wmi_unified_cmd_send(wmi_handle, buf, cmd_len,
++				    WMI_OFFCHAN_DATA_TX_SEND_CMDID);
++	if (QDF_IS_STATUS_ERROR(status)) {
+ 		wmi_err("Failed to offchan data Tx");
+-		goto err1;
++		goto unmap_tx_frame;
+ 	}
+ 
+ 	return QDF_STATUS_SUCCESS;
+ 
+-err1:
++unmap_tx_frame:
++	qdf_nbuf_unmap_single(param->qdf_ctx, param->tx_frame,
++				     QDF_DMA_TO_DEVICE);
++free_buf:
+ 	wmi_buf_free(buf);
+-	return QDF_STATUS_E_FAILURE;
++	return status;
++}
++
++/**
++ * extract_offchan_data_tx_compl_param_tlv() - decode processed completion TLVs
++ * @wmi_handle: WMI handle
++ * @evt_buf: processed completion event TLVs
++ * @param: host completion output
++ *
++ * Return: QDF_STATUS_SUCCESS on success or a QDF error status
++ */
++static QDF_STATUS extract_offchan_data_tx_compl_param_tlv(
++		wmi_unified_t wmi_handle, void *evt_buf,
++		struct wmi_host_offchan_data_tx_compl_event *param)
++{
++	WMI_OFFCHAN_DATA_TX_COMPLETION_EVENTID_param_tlvs *param_buf = evt_buf;
++	wmi_offchan_data_tx_compl_event_fixed_param *evt;
++	uint32_t pdev_id;
++	QDF_STATUS status;
++
++	if (!param)
++		return QDF_STATUS_E_INVAL;
++
++	qdf_mem_zero(param, sizeof(*param));
++	if (!wmi_handle || !wmi_handle->ops || !param_buf ||
++	    !param_buf->fixed_param)
++		return QDF_STATUS_E_INVAL;
++
++	if (!wmi_handle->ops->convert_target_pdev_id_to_host)
++		return QDF_STATUS_E_NOSUPPORT;
++
++	evt = param_buf->fixed_param;
++	if (WMITLV_GET_TLVTAG(evt->tlv_header) !=
++	    WMITLV_TAG_STRUC_wmi_offchan_data_tx_compl_event_fixed_param ||
++	    WMITLV_GET_TLVLEN(evt->tlv_header) !=
++	    WMITLV_GET_STRUCT_TLVLEN(wmi_offchan_data_tx_compl_event_fixed_param))
++		return QDF_STATUS_E_INVAL;
++
++	status = wmi_offchan_data_tx_pdev_id(wmi_handle, evt->pdev_id, &pdev_id);
++	if (QDF_IS_STATUS_ERROR(status))
++		return status;
++
++	param->desc_id = evt->desc_id;
++	param->status = evt->status;
++	param->pdev_id = pdev_id;
++
++	return QDF_STATUS_SUCCESS;
+ }
+ 
+ /**
+@@ -23054,6 +23131,8 @@ struct wmi_ops tlv_ops =  {
+ 	.send_scan_chan_list_cmd = send_scan_chan_list_cmd_tlv,
+ 	.send_mgmt_cmd = send_mgmt_cmd_tlv,
+ 	.send_offchan_data_tx_cmd = send_offchan_data_tx_cmd_tlv,
++	.extract_offchan_data_tx_compl_param =
++				extract_offchan_data_tx_compl_param_tlv,
+ 	.send_modem_power_state_cmd = send_modem_power_state_cmd_tlv,
+ 	.send_set_sta_ps_mode_cmd = send_set_sta_ps_mode_cmd_tlv,
+ 	.send_idle_roam_monitor_cmd = send_idle_roam_monitor_cmd_tlv,
+diff --git a/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c b/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
+index c4eab76c1c4456f30b08d8007b4fdae78ca9dd0f..17471b1a63eb9058dcb7143cf3005faff0013d39 100644
+--- a/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
++++ b/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
+@@ -870,6 +870,19 @@ void dp_sta_notify_tx_comp_cb(qdf_nbuf_t nbuf, void *ctx, uint16_t flag)
+ }
+ 
+ #ifdef FEATURE_MONITOR_MODE_SUPPORT
++static enum dp_nbuf_push_type dp_mon_rx_push_type(struct net_device *dev)
++{
++#ifdef FEATURE_WLAN_WONDER
++	/* Final publication holds radio admission. Wonder's mac80211 RX handler
++	 * can transmit a reply, so enqueue it instead of calling it recursively
++	 * through netif_receive_skb while the admission lock is still held.
++	 */
++	if (hdd_wonder_netdev_is_owned(dev))
++		return DP_NBUF_PUSH_SIMPLE;
++#endif
++	return qdf_in_atomic() ? DP_NBUF_PUSH_NAPI : DP_NBUF_PUSH_BH_DISABLE;
++}
++
+ QDF_STATUS dp_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
+ {
+ 	struct wlan_dp_intf *dp_intf;
+@@ -934,8 +947,7 @@ QDF_STATUS dp_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
+ 			 * This is the last packet on the chain
+ 			 * Scheduling rx sirq
+ 			 */
+-			type = qdf_in_atomic() ? DP_NBUF_PUSH_NAPI :
+-						 DP_NBUF_PUSH_BH_DISABLE;
++			type = dp_mon_rx_push_type(dp_intf->dev);
+ 			status = dp_intf->dp_ctx->dp_ops.dp_nbuf_push_pkt(nbuf,
+ 							type);
+ 		}
+diff --git a/qcacld-3.0/components/mlme/core/inc/wlan_mlme_main.h b/qcacld-3.0/components/mlme/core/inc/wlan_mlme_main.h
+index 8a0fdc094166824dd77cb7500755560b64f2adce..6a7c8e55da2057951e4569e5182436ba551912e4 100644
+--- a/qcacld-3.0/components/mlme/core/inc/wlan_mlme_main.h
++++ b/qcacld-3.0/components/mlme/core/inc/wlan_mlme_main.h
+@@ -155,6 +155,9 @@ struct wlan_mlme_tx_ops {
+ 
+ struct wlan_mlme_sta_mon_control {
+ 	struct wlan_mlme_sta_mon_snapshot snapshot;
++	struct wlan_mlme_sta_mon_scan_reservation scan_reservation;
++	wlan_mlme_sta_mon_scan_cb scan_callback;
++	void *scan_arg;
+ 	enum wlan_mlme_sta_mon_state state;
+ 	wlan_mlme_sta_mon_stop_cb stop;
+ 	void *arg;
+@@ -167,6 +170,10 @@ struct wlan_mlme_sta_mon_control {
+ 	bool exclusive_lease;
+ 	bool attached;
+ 	bool fw_uncertain;
++	bool scan_reserved;
++	bool scan_submission_started;
++	bool scan_fw_pending;
++	bool scan_fw_observed;
+ };
+ 
+ /**
+diff --git a/qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h b/qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h
+index 88e63003f2d85e22a6832faa2c03b6da60e41edc..b4934725ce83068483d4b46b1671f3a19b52aefe 100644
+--- a/qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h
++++ b/qcacld-3.0/components/mlme/dispatcher/inc/wlan_mlme_sta_mon.h
+@@ -43,6 +43,69 @@ struct wlan_mlme_sta_mon_snapshot {
+ /* Called under the control lock: only pause delivery and queue work. */
+ typedef void (*wlan_mlme_sta_mon_stop_cb)(void *arg);
+ 
++struct scan_event;
++
++/* A private scan reservation does not change the associated STA's home BSS.
++ * Only an exact single-channel request may consume it. Firmware observations
++ * and a proven never-submitted request are distinct notice types: an ordinary
++ * scan-manager cancellation notification cannot prove that firmware drained.
++ */
++struct wlan_mlme_sta_mon_scan_reservation {
++	uint64_t generation;
++	uint64_t helper_cookie;
++	uint32_t scan_id;
++	uint32_t requester;
++	uint32_t frequency;
++	uint8_t vdev_id;
++};
++
++enum wlan_mlme_sta_mon_scan_notice {
++	WLAN_STA_MON_SCAN_FIRMWARE,
++	WLAN_STA_MON_SCAN_NOT_SUBMITTED,
++};
++
++/* Called under the admission lock. It must be nonblocking, must not re-enter
++ * MLME admission, and must not retain the borrowed event pointer.
++ * Generation/cookie identify the reserved callback context; they are not wire
++ * fields supplied by the firmware event.
++ */
++typedef void (*wlan_mlme_sta_mon_scan_cb)(void *arg,
++				const struct scan_event *event,
++				enum wlan_mlme_sta_mon_scan_notice notice,
++				uint64_t generation, uint64_t helper_cookie);
++
++bool wlan_mlme_sta_mon_scan_reserve(struct wlan_objmgr_psoc *psoc,
++		const struct wlan_mlme_sta_mon_scan_reservation *reservation,
++		wlan_mlme_sta_mon_scan_cb callback, void *arg);
++/* @reserved selects a distinct scheduler callback that does not revoke this
++ * one reservation. All unmatched scans retain normal invalidation semantics.
++ */
++bool wlan_mlme_sta_mon_scan_admission_begin(struct wlan_objmgr_psoc *psoc,
++		uint32_t vdev_id, uint32_t scan_id, uint32_t requester,
++		uint32_t frequency, uint32_t channel_count, bool offchan_data_tx,
++		bool *reserved);
++/* Called immediately before tgt_scan_start, after scan-manager parameter
++ * updates. Unrelated requests pass through; a reserved request must still
++ * have its exact single channel and live owner. It never authorizes traffic.
++ */
++bool wlan_mlme_sta_mon_scan_activate(struct wlan_objmgr_psoc *psoc,
++		uint32_t vdev_id, uint32_t scan_id, uint32_t requester,
++		uint32_t frequency, uint32_t channel_count, bool offchan_data_tx,
++		bool reserved_request);
++/* This entry point is exclusively for the successfully decoded target scan
++ * event, before scan serialization drops late firmware completions.
++ */
++void wlan_mlme_sta_mon_scan_fw_event(struct wlan_objmgr_psoc *psoc,
++				    const struct scan_event *event);
++/* Only request paths which prove that tgt_scan_start never accepted this
++ * request may use this entry point. A cancel send or a timeout is insufficient.
++ */
++void wlan_mlme_sta_mon_scan_not_submitted(struct wlan_objmgr_psoc *psoc,
++					const struct scan_event *event);
++/* Synchronous submit rejection, before a scheduler/firmware event can own it. */
++bool wlan_mlme_sta_mon_scan_release_unsubmitted(struct wlan_objmgr_psoc *psoc,
++		const struct wlan_mlme_sta_mon_scan_reservation *reservation);
++
+ void wlan_mlme_sta_mon_register(struct wlan_objmgr_psoc *psoc,
+ 			       wlan_mlme_sta_mon_stop_cb stop, void *arg);
+ bool wlan_mlme_sta_mon_attach(struct wlan_objmgr_psoc *psoc);
+diff --git a/qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c b/qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c
+index 9db9a5e7a9829f45f54a35e9cd73b0192ab62099..201eb2d7cc47f07b1a1a8ba86f5e3d24749b1a28 100644
+--- a/qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c
++++ b/qcacld-3.0/components/mlme/dispatcher/src/wlan_mlme_api.c
+@@ -43,6 +43,7 @@
+ #include "wlan_policy_mgr_api.h"
+ #include "cds_api.h"
+ #include "cdp_txrx_mon.h"
++#include "wlan_scan_public_structs.h"
+ #include <linux/spinlock.h>
+ 
+ /* All callbacks are nonblocking; no firmware response is waited for here. */
+@@ -124,7 +125,8 @@ bool wlan_mlme_sta_mon_attach(struct wlan_objmgr_psoc *psoc)
+ 	if (!ctrl)
+ 		return false;
+ 	spin_lock_irqsave(&sta_mon_lock, flags);
+-	if (ctrl->stop && !ctrl->attached && !ctrl->fw_uncertain) {
++	if (ctrl->stop && !ctrl->attached && !ctrl->fw_uncertain &&
++	    !ctrl->scan_reserved) {
+ 		ctrl->attached = true;
+ 		ctrl->state = WLAN_STA_MON_QUIESCED;
+ 		ctrl->snapshot.generation++;
+@@ -193,6 +195,7 @@ bool wlan_mlme_sta_mon_arm(struct wlan_objmgr_psoc *psoc,
+ 		snapshot->companion_sta_vdev_id = WLAN_INVALID_VDEV_ID;
+ 	spin_lock_irqsave(&sta_mon_lock, flags);
+ 	if (ctrl->stop && ctrl->attached && !ctrl->updates && !ctrl->admissions &&
++	    !ctrl->scan_reserved &&
+ 	    !ctrl->fw_uncertain && !(snapshot->ap_owner && snapshot->exclusive) &&
+ 	    ctrl->state == WLAN_STA_MON_QUIESCED &&
+ 	    ctrl->snapshot.generation == snapshot->generation) {
+@@ -294,7 +297,7 @@ bool wlan_mlme_sta_mon_quiesced(struct wlan_objmgr_psoc *psoc)
+ 		return false;
+ 	spin_lock_irqsave(&sta_mon_lock, flags);
+ 	ctrl->snapshot.generation++;
+-	ok = ctrl->attached && !ctrl->fw_uncertain &&
++	ok = ctrl->attached && !ctrl->fw_uncertain && !ctrl->scan_reserved &&
+ 		!ctrl->handoff_generation;
+ 	if (ok) {
+ 		/* Only HDD's proven native/DP teardown releases radio ownership. */
+@@ -600,6 +603,204 @@ bool wlan_mlme_sta_mon_admission_begin(struct wlan_objmgr_psoc *psoc)
+ 	return ok;
+ }
+ 
++static bool sta_mon_scan_tuple_matches(
++		const struct wlan_mlme_sta_mon_scan_reservation *reservation,
++		uint32_t vdev_id, uint32_t scan_id, uint32_t requester)
++{
++	return reservation->vdev_id == vdev_id &&
++		reservation->scan_id == scan_id &&
++		reservation->requester == requester;
++}
++
++bool wlan_mlme_sta_mon_scan_reserve(struct wlan_objmgr_psoc *psoc,
++		const struct wlan_mlme_sta_mon_scan_reservation *reservation,
++		wlan_mlme_sta_mon_scan_cb callback, void *arg)
++{
++	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
++	unsigned long flags;
++	bool ok = false;
++
++	if (!ctrl || !reservation || !callback || !reservation->generation ||
++	    !reservation->helper_cookie || !reservation->frequency ||
++	    reservation->frequency > 65535 ||
++	    reservation->vdev_id == WLAN_INVALID_VDEV_ID ||
++	    cds_is_driver_recovering() || cds_is_driver_unloading() ||
++	    cds_is_fw_down())
++		return false;
++	spin_lock_irqsave(&sta_mon_lock, flags);
++	if (ctrl->attached && ctrl->state == WLAN_STA_MON_READY &&
++	    !ctrl->fw_uncertain && !ctrl->updates && !ctrl->admissions &&
++	    !ctrl->exclusive_lease && !ctrl->handoff_generation &&
++	    !ctrl->snapshot.exclusive && !ctrl->snapshot.ap_owner &&
++	    !ctrl->scan_reserved &&
++	    ctrl->snapshot.mon_vdev_id == reservation->vdev_id &&
++	    ctrl->snapshot.generation == reservation->generation &&
++	    ctrl->snapshot.channel.ch_freq != reservation->frequency) {
++		ctrl->scan_reservation = *reservation;
++		ctrl->scan_callback = callback;
++		ctrl->scan_arg = arg;
++		ctrl->scan_submission_started = false;
++		ctrl->scan_fw_pending = false;
++		ctrl->scan_fw_observed = false;
++		ctrl->scan_reserved = true;
++		ok = true;
++	}
++	spin_unlock_irqrestore(&sta_mon_lock, flags);
++	return ok;
++}
++
++bool wlan_mlme_sta_mon_scan_admission_begin(struct wlan_objmgr_psoc *psoc,
++		uint32_t vdev_id, uint32_t scan_id, uint32_t requester,
++		uint32_t frequency, uint32_t channel_count, bool offchan_data_tx,
++		bool *reserved)
++{
++	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
++	unsigned long flags;
++	bool ok;
++
++	if (!reserved)
++		return false;
++	*reserved = false;
++	if (!ctrl)
++		return true;
++	spin_lock_irqsave(&sta_mon_lock, flags);
++	if (ctrl->scan_reserved &&
++	    sta_mon_scan_tuple_matches(&ctrl->scan_reservation, vdev_id,
++				      scan_id, requester)) {
++		*reserved = true;
++		ok = ctrl->attached && !ctrl->fw_uncertain &&
++			ctrl->state == WLAN_STA_MON_READY &&
++			ctrl->snapshot.generation == ctrl->scan_reservation.generation &&
++			!ctrl->scan_submission_started && !ctrl->updates &&
++			!ctrl->admissions && channel_count == 1 && offchan_data_tx &&
++			frequency == ctrl->scan_reservation.frequency;
++		if (ok) {
++			ctrl->scan_submission_started = true;
++			ctrl->admissions++;
++		}
++	} else {
++		/* Keep the normal admission behavior for every unrelated scan. */
++		ok = !ctrl->exclusive_lease && !ctrl->handoff_generation &&
++			!sta_mon_ap_lease_locked(ctrl) && ctrl->admissions != U32_MAX;
++		if (ok)
++			ctrl->admissions++;
++	}
++	spin_unlock_irqrestore(&sta_mon_lock, flags);
++	return ok;
++}
++
++bool wlan_mlme_sta_mon_scan_activate(struct wlan_objmgr_psoc *psoc,
++		uint32_t vdev_id, uint32_t scan_id, uint32_t requester,
++		uint32_t frequency, uint32_t channel_count, bool offchan_data_tx,
++		bool reserved_request)
++{
++	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
++	unsigned long flags;
++	bool ok = !reserved_request;
++
++	if (!ctrl)
++		return !reserved_request;
++	spin_lock_irqsave(&sta_mon_lock, flags);
++	if (ctrl->scan_reserved &&
++	    sta_mon_scan_tuple_matches(&ctrl->scan_reservation, vdev_id,
++				      scan_id, requester)) {
++		ok = reserved_request && ctrl->attached && !ctrl->fw_uncertain &&
++			ctrl->state == WLAN_STA_MON_READY && !ctrl->updates &&
++			ctrl->snapshot.generation == ctrl->scan_reservation.generation &&
++			ctrl->scan_submission_started && !ctrl->scan_fw_pending &&
++			channel_count == 1 && offchan_data_tx &&
++			frequency == ctrl->scan_reservation.frequency;
++		if (ok)
++			ctrl->scan_fw_pending = true;
++	}
++	spin_unlock_irqrestore(&sta_mon_lock, flags);
++	return ok;
++}
++
++/* Both notice producers supply borrowed, already-attributed event metadata. */
++static void sta_mon_scan_notice(struct wlan_objmgr_psoc *psoc,
++		const struct scan_event *event,
++		enum wlan_mlme_sta_mon_scan_notice notice)
++{
++	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
++	unsigned long flags;
++	bool terminal;
++
++	if (!ctrl || !event)
++		return;
++	spin_lock_irqsave(&sta_mon_lock, flags);
++	if (!ctrl->scan_reserved || !ctrl->scan_callback ||
++	    !sta_mon_scan_tuple_matches(&ctrl->scan_reservation, event->vdev_id,
++				       event->scan_id, event->requester))
++		goto out;
++	if (notice == WLAN_STA_MON_SCAN_FIRMWARE) {
++		if (!ctrl->scan_fw_pending)
++			goto out;
++		ctrl->scan_fw_observed = true;
++	} else if (ctrl->scan_fw_observed) {
++		/* A failed cancel or synthetic completion never retires firmware. */
++		goto out;
++	}
++	terminal = notice == WLAN_STA_MON_SCAN_NOT_SUBMITTED ||
++		event->type == SCAN_EVENT_TYPE_COMPLETED ||
++		event->type == SCAN_EVENT_TYPE_START_FAILED ||
++		event->type == SCAN_EVENT_TYPE_DEQUEUED;
++	ctrl->scan_callback(ctrl->scan_arg, event, notice,
++		ctrl->scan_reservation.generation,
++		ctrl->scan_reservation.helper_cookie);
++	if (terminal) {
++		ctrl->scan_reserved = false;
++		ctrl->scan_callback = NULL;
++		ctrl->scan_arg = NULL;
++		ctrl->scan_submission_started = false;
++		ctrl->scan_fw_pending = false;
++		ctrl->scan_fw_observed = false;
++	}
++out:
++	spin_unlock_irqrestore(&sta_mon_lock, flags);
++}
++
++void wlan_mlme_sta_mon_scan_fw_event(struct wlan_objmgr_psoc *psoc,
++				    const struct scan_event *event)
++{
++	sta_mon_scan_notice(psoc, event, WLAN_STA_MON_SCAN_FIRMWARE);
++}
++
++void wlan_mlme_sta_mon_scan_not_submitted(struct wlan_objmgr_psoc *psoc,
++					const struct scan_event *event)
++{
++	sta_mon_scan_notice(psoc, event, WLAN_STA_MON_SCAN_NOT_SUBMITTED);
++}
++
++bool wlan_mlme_sta_mon_scan_release_unsubmitted(struct wlan_objmgr_psoc *psoc,
++		const struct wlan_mlme_sta_mon_scan_reservation *reservation)
++{
++	struct wlan_mlme_sta_mon_control *ctrl = sta_mon_control(psoc);
++	unsigned long flags;
++	bool released = false;
++
++	if (!ctrl || !reservation)
++		return false;
++	spin_lock_irqsave(&sta_mon_lock, flags);
++	if (ctrl->scan_reserved &&
++	    sta_mon_scan_tuple_matches(&ctrl->scan_reservation,
++		reservation->vdev_id, reservation->scan_id, reservation->requester) &&
++	    ctrl->scan_reservation.generation == reservation->generation &&
++	    ctrl->scan_reservation.helper_cookie == reservation->helper_cookie) {
++		if (ctrl->scan_submission_started || ctrl->scan_fw_pending ||
++		    ctrl->scan_fw_observed)
++			goto out;
++		ctrl->scan_reserved = false;
++		ctrl->scan_callback = NULL;
++		ctrl->scan_arg = NULL;
++		ctrl->scan_submission_started = false;
++		released = true;
++	}
++out:
++	spin_unlock_irqrestore(&sta_mon_lock, flags);
++	return released;
++}
++
+ bool wlan_mlme_sta_mon_mgmt_admission_begin(struct wlan_objmgr_psoc *psoc,
+ 					  uint8_t vdev_id, uint32_t frequency,
+ 					  bool offchannel)
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h
+index c7d73a4ab6c9cc6c69a3d2a79378b148bb0bb0a5..f797300af6eeff8bd408765c45f72002e19ccb03 100644
+--- a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h
+@@ -7,6 +7,8 @@
+ struct hdd_context;
+ struct hdd_adapter;
+ struct net_device;
++struct sk_buff;
++struct cdp_tx_injection_params;
+ 
+ #ifdef FEATURE_WLAN_WONDER
+ void hdd_wonder_register(struct hdd_context *hdd_ctx);
+@@ -14,6 +16,10 @@ void hdd_wonder_unregister(struct hdd_context *hdd_ctx);
+ bool hdd_wonder_can_start(struct hdd_context *hdd_ctx);
+ bool hdd_wonder_transport_ready(struct hdd_adapter *adapter);
+ bool hdd_wonder_netdev_transport_ready(struct net_device *dev);
++bool hdd_wonder_netdev_is_owned(struct net_device *dev);
++/* Nonblocking netdev admission; success transfers the skb to WMA. */
++int hdd_wonder_injection_tx(struct hdd_adapter *adapter, struct sk_buff *skb,
++		const struct cdp_tx_injection_params *params);
+ bool hdd_wonder_vdev_admission(struct hdd_adapter *adapter);
+ int hdd_wonder_add_monitor(struct hdd_context *hdd_ctx,
+ 			   struct hdd_adapter **adapter, const char *name,
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_coex.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_coex.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbf23cfe5759aaad4e2ab257af2aa8e797d624c0
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_coex.h
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __WLAN_HDD_WONDER_COEX_H
++#define __WLAN_HDD_WONDER_COEX_H
++
++#include <linux/types.h>
++#include <wma_api.h>
++
++struct hdd_adapter;
++struct hdd_wonder_coex;
++
++#define HDD_WONDER_COEX_MAX_DWELL_NS (32ULL * 1000000ULL)
++
++struct hdd_wonder_coex *hdd_wonder_coex_create(struct hdd_adapter *adapter,
++		u32 home_frequency, u64 generation,
++		const struct wma_wonder_helper_snapshot *helper);
++/* Caller serializes process operations. No callback retains the adapter.
++ * Destroy revokes and requests cancellation; a firmware-owned reservation
++ * retains its context and module reference until a genuine terminal event.
++ */
++void hdd_wonder_coex_destroy(struct hdd_wonder_coex *coex);
++void hdd_wonder_coex_cancel(struct hdd_wonder_coex *coex);
++int hdd_wonder_coex_home(struct hdd_wonder_coex *coex);
++int hdd_wonder_coex_acquire(struct hdd_wonder_coex *coex, u32 frequency,
++		u64 slot_end_ns, u64 duration_ns, u64 *completion_ns);
++/* Final packet publication only: admission lock -> dwell lock. No sleeping,
++ * MLME reentry or helper mutation between successful begin and end.
++ * A zero packet frequency uses the explicitly selected logical channel.
++ */
++bool hdd_wonder_coex_publish_begin(struct hdd_wonder_coex *coex,
++		u32 packet_frequency, unsigned long *flags);
++void hdd_wonder_coex_publish_end(struct hdd_wonder_coex *coex,
++		unsigned long flags);
++bool hdd_wonder_coex_ready(struct hdd_wonder_coex *coex, u32 frequency);
++/* An immutable queued-packet token prevents a later dwell on the same
++ * frequency from authorizing packets accepted for an earlier scan tuple.
++ */
++void *hdd_wonder_coex_tx_token(struct hdd_wonder_coex *coex, u32 frequency);
++bool hdd_wonder_coex_tx_begin(void *token, unsigned long *flags);
++void hdd_wonder_coex_tx_end(void *token, unsigned long flags);
++void hdd_wonder_coex_tx_release(void *token);
++u32 hdd_wonder_coex_tx_frequency(void *token);
++/* Under MLME admission already, used by the measured monitor RX path. */
++bool hdd_wonder_coex_rx_begin_locked(struct hdd_wonder_coex *coex,
++		u64 generation, u32 frequency);
++void hdd_wonder_coex_rx_end_locked(struct hdd_wonder_coex *coex);
++u32 hdd_wonder_coex_home_frequency(struct hdd_wonder_coex *coex);
++const struct wma_wonder_helper_snapshot *
++hdd_wonder_coex_helper(struct hdd_wonder_coex *coex);
++u64 hdd_wonder_coex_generation(struct hdd_wonder_coex *coex);
++int hdd_wonder_coex_format(struct hdd_wonder_coex *coex, char *buffer,
++		size_t capacity);
++
++#endif
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_dwell.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_dwell.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6fde3debc692d7949ba5a2eb28494c64687ed6f
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_dwell.h
+@@ -0,0 +1,125 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __WLAN_HDD_WONDER_DWELL_H
++#define __WLAN_HDD_WONDER_DWELL_H
++
++#include <linux/types.h>
++
++/* All operations, including ready(), require the same caller-owned lock.
++ * This core neither submits scans nor owns their callback context. The caller
++ * must retain that context until real scan retirement, and attribute events to
++ * its saved owner rather than sampling a newer helper's live identity.
++ */
++struct hdd_wonder_dwell_owner {
++	u64 generation;
++	u64 helper_cookie;
++};
++
++struct hdd_wonder_dwell_scan {
++	u32 vdev_id;
++	u32 requester;
++	u32 scan_id;
++	u32 freq;
++};
++
++enum hdd_wonder_dwell_phase {
++	HDD_WONDER_DWELL_IDLE,
++	HDD_WONDER_DWELL_PENDING,
++	HDD_WONDER_DWELL_READY,
++	HDD_WONDER_DWELL_CANCEL_PENDING,
++};
++
++enum hdd_wonder_dwell_event_type {
++	HDD_WONDER_DWELL_STARTED,
++	HDD_WONDER_DWELL_FOREIGN_CHANNEL,
++	HDD_WONDER_DWELL_FOREIGN_CHANNEL_EXIT,
++	HDD_WONDER_DWELL_BSS_CHANNEL,
++	HDD_WONDER_DWELL_PREEMPTED,
++	HDD_WONDER_DWELL_SUSPENDED,
++	HDD_WONDER_DWELL_RESTARTED,
++	HDD_WONDER_DWELL_TERMINAL,
++};
++
++struct hdd_wonder_dwell_event {
++	struct hdd_wonder_dwell_owner owner;
++	u32 vdev_id;
++	u32 requester;
++	u32 scan_id;
++	u32 freq;
++	enum hdd_wonder_dwell_event_type type;
++	/* Optional target-local u32 microsecond observation. This is not TSF,
++	 * QTIMER or the clock used for deadline_ns. Zero may be a valid value.
++	 */
++	u32 target_timestamp;
++	bool target_timestamp_valid;
++};
++
++struct hdd_wonder_dwell {
++	struct hdd_wonder_dwell_owner owner;
++	struct hdd_wonder_dwell_scan scan;
++	u64 max_duration_ns;
++	u64 deadline_ns;
++	u64 last_now_ns;
++	u32 home_vdev_id;
++	u32 home_freq;
++	u32 target_timestamp;
++	enum hdd_wonder_dwell_phase phase;
++	bool home_valid;
++	bool revoked;
++	bool started;
++	bool target_timestamp_valid;
++};
++
++/* init() is for a fresh object only: never use it to erase a pending scan. */
++void hdd_wonder_dwell_init(struct hdd_wonder_dwell *dwell,
++			  u64 max_duration_ns);
++/* HOME changes revoke a pending dwell; HOME is never replaced by scan.freq. */
++bool hdd_wonder_dwell_set_home(struct hdd_wonder_dwell *dwell,
++			     u32 vdev_id, u32 freq);
++/* Caller preflights regulatory/channel admission and uses a fresh callback
++ * identity (owner plus scan tuple) for every accepted request. Success only
++ * reserves: no traffic is authorized. Host time must be monotonic nanoseconds.
++ * The deadline is min(slot_end_ns, now_ns + requested/max duration); duplicates
++ * and delayed entry events never extend it.
++ */
++bool hdd_wonder_dwell_reserve(struct hdd_wonder_dwell *dwell,
++			     const struct hdd_wonder_dwell_owner *owner,
++			     const struct hdd_wonder_dwell_scan *scan,
++			     u64 now_ns, u64 slot_end_ns,
++			     u64 requested_duration_ns);
++/* Returns true for an attributed/matching event, even if readiness is denied.
++ * Terminal may omit frequency. EXIT accepts requested frequency or zero; BSS
++ * accepts HOME or zero. A matching tuple with a conflicting nonzero FOREIGN,
++ * EXIT or BSS frequency rejects the event and latches revocation. Unmatched
++ * tuples remain ignored. All revocations latch until real terminal retirement.
++ */
++bool hdd_wonder_dwell_event(struct hdd_wonder_dwell *dwell,
++			   const struct hdd_wonder_dwell_event *event,
++			   u64 now_ns);
++/* Both TX and RX use this same readiness predicate with packet attribution. */
++bool hdd_wonder_dwell_ready(struct hdd_wonder_dwell *dwell,
++			   const struct hdd_wonder_dwell_owner *owner,
++			   const struct hdd_wonder_dwell_scan *scan,
++			   u64 now_ns);
++void hdd_wonder_dwell_expire(struct hdd_wonder_dwell *dwell, u64 now_ns);
++bool hdd_wonder_dwell_cancel(struct hdd_wonder_dwell *dwell,
++			    const struct hdd_wonder_dwell_owner *owner,
++			    const struct hdd_wonder_dwell_scan *scan);
++/* Teardown, SSR, PM or HOME loss: revoke and invalidate HOME, retain pending. */
++void hdd_wonder_dwell_invalidate(struct hdd_wonder_dwell *dwell);
++/* Only for a submission proven never accepted by scan management. Refuses an
++ * observed STARTED/FOREIGN or a cancelled/invalidated reservation. This is not
++ * a substitute for cancelling or waiting for completion of an accepted scan.
++ */
++bool hdd_wonder_dwell_submission_failed(struct hdd_wonder_dwell *dwell,
++			 const struct hdd_wonder_dwell_owner *owner,
++			 const struct hdd_wonder_dwell_scan *scan);
++/* Trusted scan-manager proof that this tuple never reached the target. Unlike
++ * submission_failed(), this may drain after local cancellation/invalidation.
++ * A synthetic completion, cancel send or timeout cannot supply that proof.
++ * Any observed STARTED/FOREIGN refuses this path; wait for real terminal then.
++ */
++bool hdd_wonder_dwell_not_submitted(struct hdd_wonder_dwell *dwell,
++			 const struct hdd_wonder_dwell_owner *owner,
++			 const struct hdd_wonder_dwell_scan *scan);
++
++#endif /* __WLAN_HDD_WONDER_DWELL_H */
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_sched.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_sched.h
+index 1f182051bb38275db89e7059a07d803a17f1b00c..1fc090189bb47d2f054bc88b377561a437ae7327 100644
+--- a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_sched.h
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_sched.h
+@@ -11,11 +11,16 @@ struct hdd_wonder_sched_ops {
+ 	/* Must not wait on provider/RTNL locks held by quiesce or destroy.
+ 	 * Check hdd_wonder_sched_generation_active() under the provider lock
+ 	 * before submitting a switch; return -EAGAIN on a temporary lock conflict.
+-	 * Success means firmware channel completion and helper/peer rebind finished.
++	 * slot_end_host_ns is an absolute CLOCK_MONOTONIC deadline derived from
++	 * the paired firmware clock; duration_ns is bounded by that slot's remaining
++	 * time. Both stay fixed across temporary retries. Success means firmware
++	 * channel completion. Standalone retunes rebind the helper/peer and clock;
++	 * shared off-channel acquisition must retain the HOME helper and TSF anchor.
+ 	 */
+ 	int (*set_channel)(void *context,
+ 			   const struct wondertap_set_freq_params *channel,
+-			   u64 generation, u64 *completion_host_ns);
++			   u64 generation, u64 slot_end_host_ns,
++			   u64 duration_ns, u64 *completion_host_ns);
+ 	/* Pure preflight: do not change the live monitor channel here. */
+ 	int (*validate_channel)(void *context,
+ 				const struct wondertap_set_freq_params *channel);
+@@ -46,7 +51,8 @@ void hdd_wonder_sched_note_channel(struct hdd_wonder_sched *sched, u32 freq,
+ 				  enum wondertap_rate_bw bandwidth,
+ 				  u64 completion_host_ns);
+ /* Caller holds a vdev/psoc operation and binds after helper preparation and
+- * every completed channel switch. A fresh FW capture verifies counter identity
++ * every completed standalone channel switch. Shared off-channel acquisition
++ * keeps the HOME helper binding. A fresh FW capture verifies counter identity
+  * and continuity before the plan can continue. No provider callback is made.
+  */
+ int hdd_wonder_sched_bind_tsf(struct hdd_wonder_sched *sched, u8 vdev_id,
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+index a680f63e4c6d224ce32bc877abdb93b879473fba..c00593cdcf9b37145a3bbf89a1a6888f8a651546 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+@@ -970,8 +970,14 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ 	skb->mark = 0;
+ 	skb_reset_mac_header(skb);
+ 
+-	status = wma_injection_tx((qdf_nbuf_t)skb,
+-				  adapter->deflink->vdev_id, &params);
++#ifdef FEATURE_WLAN_WONDER
++	if (READ_ONCE(adapter->wonder_owned)) {
++		ret = hdd_wonder_injection_tx(adapter, skb, &params);
++		status = ret ? QDF_STATUS_E_AGAIN : QDF_STATUS_SUCCESS;
++	} else
++#endif
++		status = wma_injection_tx((qdf_nbuf_t)skb,
++					  adapter->deflink->vdev_id, &params);
+ 	if (QDF_IS_STATUS_ERROR(status)) {
+ 		hdd_dp_warn_rl("monitor tx: injection failed vdev %u status %d",
+ 			       adapter->deflink->vdev_id, status);
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c
+index 1fd6b5694dc313558e5ebd7b077443dd65449f11..04c4a149d04855a15aaf785b664b07472548e550 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c
+@@ -16,6 +16,7 @@
+ #include <wlan_hdd_wonder.h>
+ #include <wlan_hdd_wonder_peer.h>
+ #include <wlan_hdd_wonder_sched.h>
++#include <wlan_hdd_wonder_coex.h>
+ #include <wma_api.h>
+ #include "wlan_mlme_sta_mon.h"
+ #include <cdp_txrx_cmn.h>
+@@ -33,6 +34,7 @@ struct hdd_wonder_session {
+ 	struct hdd_adapter *adapter;
+ 	struct hdd_wonder_peer_state *peer;
+ 	struct hdd_wonder_sched *sched;
++	struct hdd_wonder_coex *coex;
+ 	struct wondertap_set_freq_params channel;
+ 	struct wondertap_fixed_tx_rate_params tx_rate;
+ 	bool airtime_enabled;
+@@ -53,10 +55,36 @@ static DEFINE_MUTEX(hdd_wonder_lifecycle_lock);
+ static struct hdd_wonder_provider *hdd_wonder_provider;
+ static struct hdd_wonder_session __rcu *hdd_wonder_active;
+ static bool wonder_enabled = true;
++static bool wonder_sta_offchan_probe;
+ static bool hdd_wonder_standalone_active;
+ module_param(wonder_enabled, bool, 0444);
+ MODULE_PARM_DESC(wonder_enabled,
+ 	"Expose the Onyx Wonder/AWDL provider (default on)");
++module_param(wonder_sta_offchan_probe, bool, 0444);
++MODULE_PARM_DESC(wonder_sta_offchan_probe,
++	"Enable experimental STA off-channel dwell probes (default off; normal Wonder TX options remain unsupported)");
++
++static int hdd_wonder_coex_stats_get(char *buffer, const struct kernel_param *param)
++{
++	struct hdd_wonder_session *session;
++	int length;
++
++	(void)param;
++	rcu_read_lock();
++	session = rcu_dereference(hdd_wonder_active);
++	if (session && session->coex)
++		length = hdd_wonder_coex_format(session->coex, buffer, PAGE_SIZE);
++	else
++		length = scnprintf(buffer, PAGE_SIZE, "active=0\n");
++	rcu_read_unlock();
++	return length;
++}
++
++static const struct kernel_param_ops hdd_wonder_coex_stats_ops = {
++	.get = hdd_wonder_coex_stats_get,
++};
++module_param_cb(wonder_coex_stats, &hdd_wonder_coex_stats_ops, NULL, 0444);
++MODULE_PARM_DESC(wonder_coex_stats, "Wonder private scan ownership and target event observations");
+ 
+ static int hdd_wonder_validate_rate(
+ 		const struct wondertap_fixed_tx_rate_params *rate)
+@@ -109,8 +137,15 @@ static void hdd_wonder_close_session(struct hdd_wonder_provider *provider)
+ 	provider->session = NULL;
+ 	adapter = session->adapter;
+ 	WRITE_ONCE(session->failed, true);
++	if (adapter->sta_mon_coexist) {
++		/* Revoke radio admission before removing the RCU provider gate. */
++		wlan_mlme_sta_mon_update_begin(adapter->hdd_ctx->psoc);
++		wlan_mlme_sta_mon_update_end(adapter->hdd_ctx->psoc);
++	}
+ 	rcu_assign_pointer(hdd_wonder_active, NULL);
+ 	synchronize_rcu();
++	hdd_wonder_coex_destroy(session->coex);
++	session->coex = NULL;
+ 	if (hdd_wonder_airtime(session, false))
+ 		hdd_warn("Wonder airtime reporting could not be disabled before teardown");
+ 	hdd_wonder_sched_destroy(session->sched);
+@@ -178,7 +213,25 @@ static int hdd_wonder_validate_channel(void *context,
+ 		/* Shared ownership retains the real STA/AP's operating channel.
+ 		 * No intentional-disconnect handoff is allowed from Wonder.
+ 		 */
+-		if (shared.ch_freq != params->freq || shared.ch_cfreq2 ||
++		if (shared.ch_freq != params->freq) {
++			struct wlan_mlme_sta_mon_snapshot snapshot;
++			u64 generation = wlan_mlme_sta_mon_epoch(hdd_ctx->psoc);
++
++			/* Stock 7009 has no proven GI/NOSEQNO/NOACK encoding. Normal
++			 * Wonder traffic requests these options, so only an explicit
++			 * radio probe may reserve a foreign channel at this checkpoint.
++			 */
++			if (!READ_ONCE(wonder_sta_offchan_probe) || width != CH_WIDTH_20MHZ ||
++			    !wlan_mlme_sta_mon_get_snapshot(hdd_ctx->psoc,
++					adapter->deflink->vdev_id, generation, &snapshot) ||
++			    snapshot.ap_owner || snapshot.exclusive)
++				return -EOPNOTSUPP;
++			bonded.ch_width = width;
++			wlan_reg_set_channel_params_for_pwrmode(hdd_ctx->pdev, params->freq,
++						       0, &bonded, REG_CURRENT_PWR_MODE);
++			return bonded.ch_width == width ? 0 : -EOPNOTSUPP;
++		}
++		if (shared.ch_cfreq2 ||
+ 		    shared.ch_width < width || shared.ch_width > CH_WIDTH_80MHZ)
+ 			return -EBUSY;
+ 		return 0;
+@@ -196,6 +249,7 @@ static int hdd_wonder_validate_channel(void *context,
+ 
+ static int hdd_wonder_set_channel(struct hdd_wonder_session *session,
+ 				const struct wondertap_set_freq_params *params,
++				u64 slot_end_ns, u64 duration_ns,
+ 				u64 *completed_ns)
+ {
+ 	struct hdd_adapter *adapter = session->adapter;
+@@ -210,12 +264,50 @@ static int hdd_wonder_set_channel(struct hdd_wonder_session *session,
+ 	if (ret)
+ 		return ret;
+ 	if (adapter->sta_mon_coexist) {
++		struct wlan_mlme_sta_mon_snapshot snapshot;
++		struct wma_wonder_helper_snapshot helper;
++
+ 		ret = hdd_sta_mon_get_channel(adapter, &shared);
+ 		if (ret)
+ 			return ret;
+ 		generation = wlan_mlme_sta_mon_epoch(hdd_ctx->psoc);
+-		/* The live shared width can be wider than Wonder's requested rate. */
+-		*completed_ns = ktime_get_ns();
++		if (!wlan_mlme_sta_mon_get_snapshot(hdd_ctx->psoc,
++				adapter->deflink->vdev_id, generation, &snapshot))
++			return -EAGAIN;
++		ret = hdd_wonder_peer_prepare(session->peer, shared.ch_freq, generation);
++		if (ret)
++			goto failed;
++		if (!snapshot.ap_owner && !session->coex) {
++			ret = hdd_wonder_peer_get_helper(session->peer, &helper);
++			if (ret)
++				goto failed;
++			session->coex = hdd_wonder_coex_create(adapter, shared.ch_freq,
++							      generation, &helper);
++			if (IS_ERR(session->coex)) {
++				ret = PTR_ERR(session->coex);
++				session->coex = NULL;
++				goto failed;
++			}
++		}
++		if (shared.ch_freq != params->freq) {
++			status = wma_wonder_offchan_prepare(adapter->deflink->vdev_id,
++				shared.ch_freq, adapter->mac_addr.bytes, generation,
++				hdd_wonder_coex_helper(session->coex));
++			if (QDF_IS_STATUS_ERROR(status))
++				return qdf_status_to_os_return(status);
++			ret = hdd_wonder_coex_acquire(session->coex, params->freq,
++						    slot_end_ns, duration_ns, completed_ns);
++			if (ret)
++				return ret;
++		} else {
++			if (session->coex) {
++				ret = hdd_wonder_coex_home(session->coex);
++				if (ret)
++					return ret;
++			}
++			/* Shared HOME may be wider than Wonder's requested rate. */
++			*completed_ns = ktime_get_ns();
++		}
+ 	} else {
+ 		if (session->channel.freq != params->freq ||
+ 		    session->channel.bandwidth != params->bandwidth) {
+@@ -252,10 +344,12 @@ static int hdd_wonder_set_channel(struct hdd_wonder_session *session,
+ 		}
+ 	}
+ 	/* The receiving AWDL MAC belongs to the actual raw-injection helper. */
+-	ret = hdd_wonder_peer_prepare(session->peer, params->freq, generation);
+-	if (ret)
+-		goto failed;
+-	if (session->sched) {
++	if (!adapter->sta_mon_coexist) {
++		ret = hdd_wonder_peer_prepare(session->peer, params->freq, generation);
++		if (ret)
++			goto failed;
++	}
++	if (session->sched && !session->coex) {
+ 		ret = hdd_wonder_bind_clock(session, false);
+ 		if (ret)
+ 			goto failed;
+@@ -270,7 +364,8 @@ failed:
+ 
+ static int hdd_wonder_scheduled_channel(void *context,
+ 				const struct wondertap_set_freq_params *channel,
+-				u64 generation, u64 *completed_ns)
++				u64 generation, u64 slot_end_ns, u64 duration_ns,
++				u64 *completed_ns)
+ {
+ 	struct hdd_wonder_session *session = context;
+ 	struct hdd_wonder_provider *provider;
+@@ -291,7 +386,8 @@ static int hdd_wonder_scheduled_channel(void *context,
+ 		goto unlock;
+ 	ret = osif_vdev_sync_op_start(session->adapter->dev, &vdev_sync);
+ 	if (!ret) {
+-		ret = hdd_wonder_set_channel(session, channel, completed_ns);
++		ret = hdd_wonder_set_channel(session, channel, slot_end_ns,
++					     duration_ns, completed_ns);
+ 		osif_vdev_sync_op_stop(vdev_sync);
+ 	}
+ 	wiphy_unlock(provider->hdd_ctx->wiphy);
+@@ -331,14 +427,154 @@ bool hdd_wonder_transport_ready(struct hdd_adapter *adapter)
+ 	session = rcu_dereference(hdd_wonder_active);
+ 	ready = session && session->adapter == adapter &&
+ 		!smp_load_acquire(&session->suspended) && !READ_ONCE(session->failed) &&
+-		hdd_wonder_peer_ready(session->peer);
++		hdd_wonder_peer_ready(session->peer) &&
++		(!session->coex || hdd_wonder_coex_ready(session->coex, 0));
+ 	rcu_read_unlock();
+ 	return ready;
+ }
+ 
++bool hdd_wonder_netdev_is_owned(struct net_device *dev)
++{
++	struct hdd_adapter *adapter;
++
++	if (!dev)
++		return false;
++	adapter = WLAN_HDD_GET_PRIV_PTR(dev);
++	return READ_ONCE(adapter->wonder_owned);
++}
++
+ bool hdd_wonder_netdev_transport_ready(struct net_device *dev)
+ {
+-	return dev && hdd_wonder_transport_ready(WLAN_HDD_GET_PRIV_PTR(dev));
++	struct hdd_adapter *adapter;
++	struct hdd_wonder_session *session;
++	bool ready;
++
++	if (!dev)
++		return false;
++	adapter = WLAN_HDD_GET_PRIV_PTR(dev);
++	if (!READ_ONCE(adapter->wonder_owned))
++		return true;
++	/* RX enters here while final DP publication holds admission/dwell locks.
++	 * DP already checked frequency and dwell; only provider lifetime remains.
++	 */
++	rcu_read_lock();
++	session = rcu_dereference(hdd_wonder_active);
++	ready = session && session->adapter == adapter &&
++		!smp_load_acquire(&session->suspended) && !READ_ONCE(session->failed) &&
++		hdd_wonder_peer_ready(session->peer);
++	rcu_read_unlock();
++	return ready;
++}
++
++int hdd_wonder_injection_tx(struct hdd_adapter *adapter, struct sk_buff *skb,
++		const struct cdp_tx_injection_params *params)
++{
++	struct hdd_wonder_session *session;
++	QDF_STATUS status = QDF_STATUS_E_AGAIN;
++	void *token;
++
++	rcu_read_lock();
++	session = rcu_dereference(hdd_wonder_active);
++	if (!session || session->adapter != adapter ||
++	    smp_load_acquire(&session->suspended) || READ_ONCE(session->failed))
++		goto out;
++	if (!session->coex) {
++		status = wma_injection_tx(skb, adapter->deflink->vdev_id, params);
++		goto out;
++	}
++	token = hdd_wonder_coex_tx_token(session->coex, params->chanfreq);
++	if (IS_ERR(token)) {
++		if (PTR_ERR(token) == -EALREADY)
++			status = wma_injection_tx(skb, adapter->deflink->vdev_id, params);
++		goto out;
++	}
++	status = wma_wonder_offchan_tx(skb, adapter->deflink->vdev_id,
++			hdd_wonder_coex_home_frequency(session->coex),
++			hdd_wonder_coex_generation(session->coex),
++			hdd_wonder_coex_helper(session->coex),
++			hdd_wonder_coex_tx_frequency(token), params,
++			hdd_wonder_coex_tx_begin, hdd_wonder_coex_tx_end,
++			hdd_wonder_coex_tx_release, token);
++	if (QDF_IS_STATUS_ERROR(status))
++		hdd_wonder_coex_tx_release(token);
++out:
++	rcu_read_unlock();
++	return qdf_status_to_os_return(status);
++}
++
++static bool hdd_wonder_publish_begin_locked(void *arg, u8 monitor_id,
++		u64 generation, u32 frequency, u32 home_frequency, bool home_tx,
++		struct cdp_wonder_rx_lease *lease)
++{
++	struct hdd_wonder_session *session;
++
++	lease->coex = NULL;
++	rcu_read_lock();
++	session = rcu_dereference(hdd_wonder_active);
++	if (!session || session->adapter->hdd_ctx->psoc != arg ||
++	    session->adapter->deflink->vdev_id != monitor_id) {
++		if (home_tx || !frequency || frequency == home_frequency)
++			return true;
++		goto deny;
++	}
++	if (smp_load_acquire(&session->suspended) || READ_ONCE(session->failed) ||
++	    !hdd_wonder_peer_ready(session->peer))
++		goto deny;
++	if (session->coex) {
++		if (home_tx)
++			frequency = hdd_wonder_coex_home_frequency(session->coex);
++		else if (!frequency)
++			/* An unknown RX channel can only be treated as HOME. */
++			frequency = hdd_wonder_coex_home_frequency(session->coex);
++		if (!hdd_wonder_coex_rx_begin_locked(session->coex, generation, frequency))
++			goto deny;
++		lease->coex = session->coex;
++	} else if (!home_tx && frequency &&
++		   frequency != READ_ONCE(session->channel.freq)) {
++		goto deny;
++	}
++	return true;
++deny:
++	rcu_read_unlock();
++	return false;
++}
++
++bool wlan_injection_wonder_home_tx_begin_locked(void *arg, u8 monitor_id,
++		u64 generation, struct cdp_wonder_rx_lease *lease)
++{
++	return hdd_wonder_publish_begin_locked(arg, monitor_id, generation,
++					      0, 0, true, lease);
++}
++
++void wlan_injection_wonder_home_tx_end_locked(struct cdp_wonder_rx_lease *lease)
++{
++	if (lease->coex)
++		hdd_wonder_coex_rx_end_locked(lease->coex);
++	rcu_read_unlock();
++}
++
++bool wlan_injection_wonder_rx_begin(void *arg, u8 monitor_id, u64 generation,
++		u32 measured_frequency, struct cdp_wonder_rx_lease *lease)
++{
++	struct wlan_mlme_sta_mon_snapshot snapshot;
++
++	if (!arg || !lease ||
++	    !wlan_mlme_sta_mon_get_snapshot(arg, monitor_id, generation, &snapshot))
++		return false;
++	if (!wlan_mlme_sta_mon_tx_begin(arg, monitor_id, generation, &lease->flags))
++		return false;
++	if (hdd_wonder_publish_begin_locked(arg, monitor_id, generation,
++					    measured_frequency, snapshot.channel.ch_freq,
++					    false, lease))
++		return true;
++	wlan_mlme_sta_mon_tx_end(lease->flags);
++	return false;
++}
++
++void wlan_injection_wonder_rx_end(struct cdp_wonder_rx_lease *lease)
++{
++	wlan_injection_wonder_home_tx_end_locked(lease);
++	wlan_mlme_sta_mon_tx_end(lease->flags);
+ }
+ 
+ void wlan_injection_wonder_note_airtime(u32 pdev_id, u32 lmac_id, u32 frequency,
+@@ -459,7 +695,9 @@ static int hdd_wonder_init(void **handle,
+ 	if (ret)
+ 		goto close_session;
+ 	wiphy_lock(hdd_ctx->wiphy);
+-	ret = hdd_wonder_set_channel(session, &params->channel, &completed_ns);
++	ret = hdd_wonder_set_channel(session, &params->channel,
++			ktime_get_ns() + HDD_WONDER_COEX_MAX_DWELL_NS,
++			HDD_WONDER_COEX_MAX_DWELL_NS, &completed_ns);
+ 	wiphy_unlock(hdd_ctx->wiphy);
+ 	if (ret)
+ 		goto close_session;
+@@ -558,7 +796,9 @@ static int hdd_wonder_set_freq(void *handle,
+ 		/* Manual frequency control replaces any accepted hopping plan. */
+ 		ret = hdd_wonder_sched_request(session->sched, &cancel);
+ 		if (!ret) {
+-			ret = hdd_wonder_set_channel(session, params, &completed_ns);
++			ret = hdd_wonder_set_channel(session, params,
++				ktime_get_ns() + HDD_WONDER_COEX_MAX_DWELL_NS,
++				HDD_WONDER_COEX_MAX_DWELL_NS, &completed_ns);
+ 			/* The core retains its accepted cache after an error. A canceled
+ 			 * provider plan must not later be replayed by resuming this session.
+ 			 */
+@@ -660,8 +900,8 @@ static int hdd_wonder_capabilities(void *handle, struct wondertap_capability *ca
+ 	if (provider && provider->session &&
+ 	    !hdd_wonder_peer_get_limits(provider->session->peer, &limits))
+ 		caps->bits.nss = limits.max_nss;
+-	/* Off-channel concurrency has no supported admission path in this backend.
+-	 * Same-channel sharing is admitted separately without a STA disconnect.
++	/* Scoped 20 MHz STA dwell remains experimental; firmware role eligibility
++	 * and Apple interoperability require target radio measurements.
+ 	 */
+ 	mutex_unlock(&hdd_wonder_lock);
+ 	return 0;
+@@ -750,6 +990,7 @@ static int hdd_wonder_suspend(void *handle)
+ 		goto unlock;
+ 	}
+ 	WRITE_ONCE(session->suspended, true);
++	hdd_wonder_coex_cancel(session->coex);
+ 	netif_device_detach(session->adapter->dev);
+ 	netif_tx_disable(session->adapter->dev);
+ 	/* Retain the firmware clock witness so resume can prove TSF continuity. */
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_coex.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_coex.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5be6d167a8029482f6d28b614290e02b76f8ff64
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_coex.c
+@@ -0,0 +1,614 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* A private SCM scan reserves airtime without rewriting the STA's HOME BSS. */
++#include <linux/bitmap.h>
++#include <linux/completion.h>
++#include <linux/jiffies.h>
++#include <linux/kref.h>
++#include <linux/ktime.h>
++#include <linux/module.h>
++#include <linux/math64.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/workqueue.h>
++#include <wlan_hdd_main.h>
++#include <wlan_hdd_wonder_coex.h>
++#include <wlan_hdd_wonder_dwell.h>
++#include <wlan_mlme_sta_mon.h>
++#include <wlan_scan_api.h>
++
++#ifdef FEATURE_WLAN_WONDER
++
++struct hdd_wonder_coex {
++	struct kref ref;
++	spinlock_t lock;
++	struct wlan_objmgr_psoc *psoc;
++	struct hdd_wonder_dwell dwell;
++	struct hdd_wonder_dwell_owner owner;
++	struct wma_wonder_helper_snapshot helper;
++	struct completion entry;
++	struct delayed_work expiry;
++	struct work_struct free_work;
++	DECLARE_BITMAP(scan_ids, 4096);
++	u64 entry_ns;
++	u64 event_count;
++	u64 last_event_ns;
++	u32 last_event_type;
++	u32 last_event_reason;
++	u32 last_event_frequency;
++	u32 last_notice;
++	u32 logical_frequency;
++	u32 requester;
++	u8 monitor_id;
++	bool detached;
++	bool scan_ref;
++};
++
++struct hdd_wonder_coex_tx_token {
++	struct hdd_wonder_coex *coex;
++	struct hdd_wonder_dwell_owner owner;
++	struct hdd_wonder_dwell_scan scan;
++	u64 deadline_ns;
++};
++
++static void hdd_wonder_coex_free_work(struct work_struct *work)
++{
++	struct hdd_wonder_coex *coex = container_of(work, struct hdd_wonder_coex,
++						 free_work);
++
++	if (coex->requester)
++		wlan_scan_unregister_requester(coex->psoc, coex->requester);
++	wlan_objmgr_psoc_release_ref(coex->psoc, WLAN_SCAN_ID);
++	kfree(coex);
++	module_put(THIS_MODULE);
++}
++
++static void hdd_wonder_coex_release(struct kref *ref)
++{
++	struct hdd_wonder_coex *coex = container_of(ref, struct hdd_wonder_coex, ref);
++
++	/* The last reference can be released under the target admission lock. */
++	schedule_work(&coex->free_work);
++}
++
++/* SCM synthetic completion is deliberately not a firmware drain witness. */
++static void hdd_wonder_coex_scm_event(struct wlan_objmgr_vdev *vdev,
++		struct scan_event *event, void *arg)
++{
++	(void)vdev;
++	(void)event;
++	(void)arg;
++}
++
++static void hdd_wonder_coex_notice(void *arg, const struct scan_event *event,
++		enum wlan_mlme_sta_mon_scan_notice notice,
++		u64 generation, u64 helper_cookie)
++{
++	struct hdd_wonder_coex *coex = arg;
++	struct hdd_wonder_dwell_event observed = {
++		.owner = { generation, helper_cookie },
++		.vdev_id = event->vdev_id,
++		.requester = event->requester,
++		.scan_id = event->scan_id,
++		.freq = event->chan_freq,
++		.target_timestamp = event->timestamp,
++		.target_timestamp_valid = true,
++	};
++	u64 now_ns = ktime_get_ns();
++	bool retired = false;
++
++	/* MLME admission is already held. Never call back into MLME here. */
++	spin_lock(&coex->lock);
++	coex->event_count++;
++	coex->last_event_ns = now_ns;
++	coex->last_event_type = event->type;
++	coex->last_event_reason = event->reason;
++	coex->last_event_frequency = event->chan_freq;
++	coex->last_notice = notice;
++	if (notice == WLAN_STA_MON_SCAN_NOT_SUBMITTED) {
++		retired = hdd_wonder_dwell_not_submitted(&coex->dwell,
++				&observed.owner, &coex->dwell.scan);
++	} else {
++		switch (event->type) {
++		case SCAN_EVENT_TYPE_STARTED:
++			observed.type = HDD_WONDER_DWELL_STARTED;
++			break;
++		case SCAN_EVENT_TYPE_FOREIGN_CHANNEL:
++			observed.type = HDD_WONDER_DWELL_FOREIGN_CHANNEL;
++			break;
++		case SCAN_EVENT_TYPE_FOREIGN_CHANNEL_EXIT:
++			observed.type = HDD_WONDER_DWELL_FOREIGN_CHANNEL_EXIT;
++			break;
++		case SCAN_EVENT_TYPE_BSS_CHANNEL:
++			observed.type = HDD_WONDER_DWELL_BSS_CHANNEL;
++			break;
++		case SCAN_EVENT_TYPE_COMPLETED:
++		case SCAN_EVENT_TYPE_START_FAILED:
++		case SCAN_EVENT_TYPE_DEQUEUED:
++			observed.type = HDD_WONDER_DWELL_TERMINAL;
++			break;
++		case SCAN_EVENT_TYPE_PREEMPTED:
++			observed.type = HDD_WONDER_DWELL_PREEMPTED;
++			break;
++		case SCAN_EVENT_TYPE_SUSPENDED:
++			observed.type = HDD_WONDER_DWELL_SUSPENDED;
++			break;
++		default:
++			/* Resume/restart or unknown events cannot reopen an old lease. */
++			observed.type = HDD_WONDER_DWELL_RESTARTED;
++			break;
++		}
++		if (hdd_wonder_dwell_event(&coex->dwell, &observed, now_ns)) {
++			retired = observed.type == HDD_WONDER_DWELL_TERMINAL;
++			if (coex->dwell.phase == HDD_WONDER_DWELL_READY &&
++			    !coex->entry_ns)
++				coex->entry_ns = now_ns;
++		}
++	}
++	if (coex->entry_ns || retired || coex->dwell.revoked)
++		complete_all(&coex->entry);
++	if (retired && coex->scan_ref)
++		coex->scan_ref = false;
++	else
++		retired = false;
++	spin_unlock(&coex->lock);
++	if (retired)
++		kref_put(&coex->ref, hdd_wonder_coex_release);
++}
++
++static void hdd_wonder_coex_send_cancel(struct hdd_wonder_coex *coex,
++		const struct hdd_wonder_dwell_scan *scan)
++{
++	struct scan_cancel_request *req;
++	struct wlan_objmgr_vdev *vdev;
++
++	vdev = wlan_objmgr_get_vdev_by_id_from_psoc(coex->psoc,
++			scan->vdev_id, WLAN_SCAN_ID);
++	if (!vdev)
++		return;
++	req = qdf_mem_malloc(sizeof(*req));
++	if (req) {
++		req->vdev = vdev;
++		req->cancel_req.scan_id = scan->scan_id;
++		req->cancel_req.requester = scan->requester;
++		req->cancel_req.vdev_id = scan->vdev_id;
++		req->cancel_req.req_type = WLAN_SCAN_CANCEL_SINGLE;
++		wlan_scan_cancel(req);
++	}
++	wlan_objmgr_vdev_release_ref(vdev, WLAN_SCAN_ID);
++}
++
++void hdd_wonder_coex_cancel(struct hdd_wonder_coex *coex)
++{
++	struct hdd_wonder_dwell_scan scan;
++	unsigned long flags;
++	bool cancel;
++
++	if (!coex)
++		return;
++	spin_lock_irqsave(&coex->lock, flags);
++	scan = coex->dwell.scan;
++	cancel = hdd_wonder_dwell_cancel(&coex->dwell, &coex->owner, &scan);
++	complete_all(&coex->entry);
++	spin_unlock_irqrestore(&coex->lock, flags);
++	if (cancel)
++		hdd_wonder_coex_send_cancel(coex, &scan);
++}
++
++static void hdd_wonder_coex_expiry(struct work_struct *work)
++{
++	struct hdd_wonder_coex *coex = container_of(to_delayed_work(work),
++						struct hdd_wonder_coex, expiry);
++
++	struct hdd_wonder_dwell_scan scan;
++	unsigned long flags;
++	u64 now_ns = ktime_get_ns();
++	bool cancel = false;
++
++	spin_lock_irqsave(&coex->lock, flags);
++	/* An earlier scan may complete before its expiry work runs. Only the
++	 * current lease's unchanged deadline can cancel the current scan.
++	 */
++	if (!coex->detached && coex->dwell.phase != HDD_WONDER_DWELL_IDLE &&
++	    now_ns >= coex->dwell.deadline_ns) {
++		scan = coex->dwell.scan;
++		cancel = hdd_wonder_dwell_cancel(&coex->dwell, &coex->owner, &scan);
++		complete_all(&coex->entry);
++	}
++	spin_unlock_irqrestore(&coex->lock, flags);
++	if (cancel)
++		hdd_wonder_coex_send_cancel(coex, &scan);
++}
++
++struct hdd_wonder_coex *hdd_wonder_coex_create(struct hdd_adapter *adapter,
++		u32 home_frequency, u64 generation,
++		const struct wma_wonder_helper_snapshot *helper)
++{
++	struct hdd_wonder_coex *coex;
++	struct wlan_objmgr_psoc *psoc = adapter->hdd_ctx->psoc;
++	struct wlan_mlme_sta_mon_snapshot snapshot;
++
++	if (!helper || !generation || !helper->cookie ||
++	    !wlan_mlme_sta_mon_get_snapshot(psoc, adapter->deflink->vdev_id,
++					  generation, &snapshot) ||
++	    snapshot.ap_owner || snapshot.exclusive ||
++	    snapshot.channel.ch_freq != home_frequency)
++		return ERR_PTR(-EOPNOTSUPP);
++	if (!try_module_get(THIS_MODULE))
++		return ERR_PTR(-ESHUTDOWN);
++	if (QDF_IS_STATUS_ERROR(wlan_objmgr_psoc_try_get_ref(psoc, WLAN_SCAN_ID))) {
++		module_put(THIS_MODULE);
++		return ERR_PTR(-ESHUTDOWN);
++	}
++	coex = kzalloc(sizeof(*coex), GFP_KERNEL);
++	if (!coex) {
++		wlan_objmgr_psoc_release_ref(psoc, WLAN_SCAN_ID);
++		module_put(THIS_MODULE);
++		return ERR_PTR(-ENOMEM);
++	}
++	kref_init(&coex->ref);
++	spin_lock_init(&coex->lock);
++	init_completion(&coex->entry);
++	INIT_DELAYED_WORK(&coex->expiry, hdd_wonder_coex_expiry);
++	INIT_WORK(&coex->free_work, hdd_wonder_coex_free_work);
++	coex->psoc = psoc;
++	coex->helper = *helper;
++	coex->owner.generation = generation;
++	coex->owner.helper_cookie = helper->cookie;
++	coex->monitor_id = adapter->deflink->vdev_id;
++	coex->logical_frequency = home_frequency;
++	hdd_wonder_dwell_init(&coex->dwell, HDD_WONDER_COEX_MAX_DWELL_NS);
++	hdd_wonder_dwell_set_home(&coex->dwell, snapshot.sta_vdev_id, home_frequency);
++	coex->requester = wlan_scan_register_requester(psoc, (u8 *)"wonder-dwell",
++					hdd_wonder_coex_scm_event, NULL);
++	if (!coex->requester) {
++		kref_put(&coex->ref, hdd_wonder_coex_release);
++		return ERR_PTR(-ENOSPC);
++	}
++	return coex;
++}
++
++void hdd_wonder_coex_destroy(struct hdd_wonder_coex *coex)
++{
++	unsigned long flags;
++
++	if (!coex)
++		return;
++	spin_lock_irqsave(&coex->lock, flags);
++	coex->detached = true;
++	hdd_wonder_dwell_invalidate(&coex->dwell);
++	complete_all(&coex->entry);
++	spin_unlock_irqrestore(&coex->lock, flags);
++	cancel_delayed_work_sync(&coex->expiry);
++	hdd_wonder_coex_cancel(coex);
++	kref_put(&coex->ref, hdd_wonder_coex_release);
++}
++
++int hdd_wonder_coex_home(struct hdd_wonder_coex *coex)
++{
++	unsigned long flags;
++	int ret;
++
++	hdd_wonder_coex_cancel(coex);
++	spin_lock_irqsave(&coex->lock, flags);
++	coex->logical_frequency = coex->dwell.home_freq;
++	ret = coex->detached ? -ESHUTDOWN :
++		coex->dwell.phase == HDD_WONDER_DWELL_IDLE ? 0 : -EBUSY;
++	spin_unlock_irqrestore(&coex->lock, flags);
++	return ret;
++}
++
++int hdd_wonder_coex_acquire(struct hdd_wonder_coex *coex, u32 frequency,
++		u64 slot_end_ns, u64 duration_ns, u64 *completion_ns)
++{
++	struct wlan_mlme_sta_mon_scan_reservation reservation;
++	struct hdd_wonder_dwell_scan scan;
++	struct scan_start_request *req;
++	struct wlan_objmgr_vdev *vdev;
++	unsigned long flags;
++	u64 now_ns = ktime_get_ns(), deadline_ns, remaining_ns;
++	QDF_STATUS status;
++	int ret = -EBUSY;
++	bool released = false;
++
++	if (!coex || !frequency || !completion_ns || slot_end_ns <= now_ns)
++		return -EINVAL;
++	vdev = wlan_objmgr_get_vdev_by_id_from_psoc(coex->psoc,
++			coex->monitor_id, WLAN_SCAN_ID);
++	if (!vdev)
++		return -ESHUTDOWN;
++	req = qdf_mem_malloc(sizeof(*req));
++	if (!req) {
++		ret = -ENOMEM;
++		goto release_vdev;
++	}
++	status = wlan_scan_init_default_params(vdev, req);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		ret = qdf_status_to_os_return(status);
++		qdf_mem_free(req);
++		goto release_vdev;
++	}
++	scan.vdev_id = coex->monitor_id;
++	scan.requester = coex->requester;
++	scan.scan_id = wlan_scan_get_scan_id(coex->psoc);
++	scan.freq = frequency;
++	spin_lock_irqsave(&coex->lock, flags);
++	if (coex->detached || test_bit(scan.scan_id & 4095, coex->scan_ids) ||
++	    !hdd_wonder_dwell_reserve(&coex->dwell, &coex->owner, &scan,
++				now_ns, slot_end_ns, duration_ns)) {
++		spin_unlock_irqrestore(&coex->lock, flags);
++		qdf_mem_free(req);
++		goto release_vdev;
++	}
++	set_bit(scan.scan_id & 4095, coex->scan_ids);
++	coex->logical_frequency = frequency;
++	deadline_ns = coex->dwell.deadline_ns;
++	coex->entry_ns = 0;
++	reinit_completion(&coex->entry);
++	kref_get(&coex->ref);
++	coex->scan_ref = true;
++	spin_unlock_irqrestore(&coex->lock, flags);
++	reservation.generation = coex->owner.generation;
++	reservation.helper_cookie = coex->owner.helper_cookie;
++	reservation.vdev_id = scan.vdev_id;
++	reservation.scan_id = scan.scan_id;
++	reservation.requester = scan.requester;
++	reservation.frequency = frequency;
++	if (!wlan_mlme_sta_mon_scan_reserve(coex->psoc, &reservation,
++					 hdd_wonder_coex_notice, coex)) {
++		qdf_mem_free(req);
++		released = true;
++		goto submission_failed;
++	}
++	req->vdev = vdev;
++	req->scan_req.scan_id = scan.scan_id;
++	req->scan_req.scan_req_id = scan.requester;
++	req->scan_req.vdev_id = scan.vdev_id;
++	req->scan_req.scan_type = SCAN_TYPE_DEFAULT;
++	req->scan_req.chan_list.num_chan = 1;
++	req->scan_req.chan_list.chan[0].freq = frequency;
++	req->scan_req.scan_flags = 0;
++	req->scan_req.scan_f_passive = true;
++	req->scan_req.scan_f_offchan_data_tx = true;
++	req->scan_req.scan_f_offchan_mgmt_tx = true;
++	req->scan_req.scan_f_promisc_mode = true;
++	req->scan_req.scan_ev_started = true;
++	req->scan_req.scan_ev_completed = true;
++	req->scan_req.scan_ev_bss_chan = true;
++	req->scan_req.scan_ev_foreign_chan = true;
++	req->scan_req.scan_ev_foreign_chn_exit = true;
++	req->scan_req.scan_ev_dequeued = true;
++	req->scan_req.scan_ev_preempted = true;
++	req->scan_req.scan_ev_start_failed = true;
++	req->scan_req.scan_ev_restarted = true;
++	req->scan_req.scan_ev_suspended = true;
++	req->scan_req.adaptive_dwell_time_mode = SCAN_DWELL_MODE_STATIC;
++	/* Round down so firmware never receives a dwell longer than the lease. */
++	req->scan_req.dwell_time_passive = div_u64(deadline_ns - now_ns, NSEC_PER_MSEC);
++	req->scan_req.dwell_time_active = 0;
++	req->scan_req.dwell_time_active_2g = 0;
++	req->scan_req.dwell_time_active_6g = 0;
++	req->scan_req.max_scan_time = req->scan_req.dwell_time_passive;
++	req->scan_req.burst_duration = req->scan_req.dwell_time_passive;
++	if (!req->scan_req.dwell_time_passive) {
++		qdf_mem_free(req);
++		released = wlan_mlme_sta_mon_scan_release_unsubmitted(coex->psoc,
++							      &reservation);
++		goto submission_failed;
++	}
++	status = wlan_scan_start(req); /* owns req on every return */
++	if (QDF_IS_STATUS_ERROR(status)) {
++		ret = qdf_status_to_os_return(status);
++		released = wlan_mlme_sta_mon_scan_release_unsubmitted(coex->psoc,
++							      &reservation);
++		goto submission_failed;
++	}
++	wlan_objmgr_vdev_release_ref(vdev, WLAN_SCAN_ID);
++	now_ns = ktime_get_ns();
++	remaining_ns = deadline_ns > now_ns ? deadline_ns - now_ns : 0;
++	mod_delayed_work(system_wq, &coex->expiry,
++			nsecs_to_jiffies(remaining_ns) + 1);
++	if (remaining_ns)
++		wait_for_completion_timeout(&coex->entry,
++			nsecs_to_jiffies(remaining_ns) + 1);
++	spin_lock_irqsave(&coex->lock, flags);
++	if (!coex->detached && hdd_wonder_dwell_ready(&coex->dwell,
++			&coex->owner, &scan, ktime_get_ns())) {
++		*completion_ns = coex->entry_ns;
++		ret = 0;
++	} else {
++		ret = coex->detached ? -ESHUTDOWN : -EAGAIN;
++	}
++	spin_unlock_irqrestore(&coex->lock, flags);
++	if (ret)
++		hdd_wonder_coex_cancel(coex);
++	return ret;
++
++submission_failed:
++	if (released) {
++		spin_lock_irqsave(&coex->lock, flags);
++		released = hdd_wonder_dwell_not_submitted(&coex->dwell,
++						 &coex->owner, &scan) && coex->scan_ref;
++		if (released)
++			coex->scan_ref = false;
++		spin_unlock_irqrestore(&coex->lock, flags);
++		if (released)
++			kref_put(&coex->ref, hdd_wonder_coex_release);
++	}
++release_vdev:
++	wlan_objmgr_vdev_release_ref(vdev, WLAN_SCAN_ID);
++	return ret;
++}
++
++static bool hdd_wonder_coex_ready_locked(struct hdd_wonder_coex *coex, u32 freq)
++{
++	if (coex->detached || !coex->dwell.home_valid)
++		return false;
++	if (!freq)
++		freq = coex->logical_frequency;
++	if (freq != coex->logical_frequency)
++		return false;
++	if (freq == coex->dwell.home_freq)
++		return coex->dwell.phase == HDD_WONDER_DWELL_IDLE;
++	return freq == coex->dwell.scan.freq &&
++		hdd_wonder_dwell_ready(&coex->dwell, &coex->owner,
++				       &coex->dwell.scan, ktime_get_ns());
++}
++
++bool hdd_wonder_coex_publish_begin(struct hdd_wonder_coex *coex,
++		u32 packet_frequency, unsigned long *flags)
++{
++	if (!coex || !flags ||
++	    !wlan_mlme_sta_mon_tx_begin(coex->psoc, coex->monitor_id,
++				       coex->owner.generation, flags))
++		return false;
++	spin_lock(&coex->lock);
++	if (hdd_wonder_coex_ready_locked(coex, packet_frequency))
++		return true;
++	spin_unlock(&coex->lock);
++	wlan_mlme_sta_mon_tx_end(*flags);
++	return false;
++}
++
++void hdd_wonder_coex_publish_end(struct hdd_wonder_coex *coex,
++		unsigned long flags)
++{
++	spin_unlock(&coex->lock);
++	wlan_mlme_sta_mon_tx_end(flags);
++}
++
++bool hdd_wonder_coex_ready(struct hdd_wonder_coex *coex, u32 frequency)
++{
++	unsigned long flags;
++
++	if (!hdd_wonder_coex_publish_begin(coex, frequency, &flags))
++		return false;
++	hdd_wonder_coex_publish_end(coex, flags);
++	return true;
++}
++
++void *hdd_wonder_coex_tx_token(struct hdd_wonder_coex *coex, u32 frequency)
++{
++	struct hdd_wonder_coex_tx_token *token;
++	unsigned long flags;
++
++	token = kzalloc(sizeof(*token), GFP_ATOMIC);
++	if (!token)
++		return ERR_PTR(-ENOMEM);
++	if (!hdd_wonder_coex_publish_begin(coex, frequency, &flags)) {
++		kfree(token);
++		return ERR_PTR(-EAGAIN);
++	}
++	if (coex->logical_frequency == coex->dwell.home_freq) {
++		hdd_wonder_coex_publish_end(coex, flags);
++		kfree(token);
++		return ERR_PTR(-EALREADY);
++	}
++	token->coex = coex;
++	token->owner = coex->owner;
++	token->scan = coex->dwell.scan;
++	token->deadline_ns = coex->dwell.deadline_ns;
++	kref_get(&coex->ref);
++	hdd_wonder_coex_publish_end(coex, flags);
++	return token;
++}
++
++bool hdd_wonder_coex_tx_begin(void *arg, unsigned long *flags)
++{
++	struct hdd_wonder_coex_tx_token *token = arg;
++	struct hdd_wonder_coex *coex = token->coex;
++
++	if (!hdd_wonder_coex_publish_begin(coex, token->scan.freq, flags))
++		return false;
++	if (coex->dwell.deadline_ns == token->deadline_ns &&
++	    hdd_wonder_dwell_ready(&coex->dwell, &token->owner, &token->scan,
++				  ktime_get_ns()))
++		return true;
++	hdd_wonder_coex_publish_end(coex, *flags);
++	return false;
++}
++
++void hdd_wonder_coex_tx_end(void *arg, unsigned long flags)
++{
++	struct hdd_wonder_coex_tx_token *token = arg;
++
++	hdd_wonder_coex_publish_end(token->coex, flags);
++}
++
++void hdd_wonder_coex_tx_release(void *arg)
++{
++	struct hdd_wonder_coex_tx_token *token = arg;
++
++	kref_put(&token->coex->ref, hdd_wonder_coex_release);
++	kfree(token);
++}
++
++u32 hdd_wonder_coex_tx_frequency(void *arg)
++{
++	struct hdd_wonder_coex_tx_token *token = arg;
++
++	return token->scan.freq;
++}
++
++bool hdd_wonder_coex_rx_begin_locked(struct hdd_wonder_coex *coex,
++		u64 generation, u32 frequency)
++{
++	if (!coex || coex->owner.generation != generation)
++		return false;
++	spin_lock(&coex->lock);
++	if (hdd_wonder_coex_ready_locked(coex, frequency))
++		return true;
++	spin_unlock(&coex->lock);
++	return false;
++}
++
++void hdd_wonder_coex_rx_end_locked(struct hdd_wonder_coex *coex)
++{
++	spin_unlock(&coex->lock);
++}
++
++u32 hdd_wonder_coex_home_frequency(struct hdd_wonder_coex *coex)
++{
++	return coex->dwell.home_freq;
++}
++
++const struct wma_wonder_helper_snapshot *
++hdd_wonder_coex_helper(struct hdd_wonder_coex *coex)
++{
++	return &coex->helper;
++}
++
++u64 hdd_wonder_coex_generation(struct hdd_wonder_coex *coex)
++{
++	return coex->owner.generation;
++}
++
++int hdd_wonder_coex_format(struct hdd_wonder_coex *coex, char *buffer,
++		size_t capacity)
++{
++	unsigned long flags;
++	int length;
++
++	spin_lock_irqsave(&coex->lock, flags);
++	/* This is an observation, not a readiness claim or a firmware clock. */
++	length = scnprintf(buffer, capacity,
++		"home_vdev=%u home_mhz=%u monitor_vdev=%u helper_vdev=%u "
++		"generation=%llu cookie=%llu requester=%u scan_id=%u scan_mhz=%u "
++		"selected_mhz=%u phase=%u revoked=%u firmware_ref=%u "
++		"deadline_host_ns=%llu entry_host_ns=%llu "
++		"events=%llu last_type=%u last_reason=%u last_mhz=%u "
++		"last_notice=%u last_event_host_ns=%llu target_timestamp_us=%u\n",
++		coex->dwell.home_vdev_id, coex->dwell.home_freq,
++		coex->monitor_id, coex->helper.vdev_id,
++		coex->owner.generation, coex->owner.helper_cookie,
++		coex->dwell.scan.requester, coex->dwell.scan.scan_id,
++		coex->dwell.scan.freq, coex->logical_frequency,
++		coex->dwell.phase, coex->dwell.revoked, coex->scan_ref,
++		coex->dwell.deadline_ns, coex->entry_ns,
++		coex->event_count, coex->last_event_type, coex->last_event_reason,
++		coex->last_event_frequency, coex->last_notice, coex->last_event_ns,
++		coex->dwell.target_timestamp);
++	spin_unlock_irqrestore(&coex->lock, flags);
++	return length;
++}
++
++#endif
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_dwell.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_dwell.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..05d05555b50d7ac5d9b2c1b2e72e03f83efea6db
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_dwell.c
+@@ -0,0 +1,226 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Firmware-observed single dwell readiness; scan lifetime remains caller-owned. */
++#include <linux/string.h>
++#include <wlan_hdd_wonder_dwell.h>
++
++static bool hdd_wonder_dwell_owner_matches(
++	const struct hdd_wonder_dwell *dwell,
++	const struct hdd_wonder_dwell_owner *owner)
++{
++	return owner && dwell->owner.generation == owner->generation &&
++		dwell->owner.helper_cookie == owner->helper_cookie;
++}
++
++static bool hdd_wonder_dwell_scan_matches(
++	const struct hdd_wonder_dwell *dwell,
++	const struct hdd_wonder_dwell_scan *scan)
++{
++	return scan && dwell->scan.vdev_id == scan->vdev_id &&
++		dwell->scan.requester == scan->requester &&
++		dwell->scan.scan_id == scan->scan_id &&
++		dwell->scan.freq == scan->freq;
++}
++
++static void hdd_wonder_dwell_revoke(struct hdd_wonder_dwell *dwell)
++{
++	if (dwell->phase == HDD_WONDER_DWELL_IDLE)
++		return;
++	dwell->revoked = true;
++	if (dwell->phase == HDD_WONDER_DWELL_READY)
++		dwell->phase = HDD_WONDER_DWELL_PENDING;
++}
++
++static bool hdd_wonder_dwell_advance(struct hdd_wonder_dwell *dwell, u64 now_ns)
++{
++	if (now_ns < dwell->last_now_ns) {
++		hdd_wonder_dwell_revoke(dwell);
++		return false;
++	}
++	dwell->last_now_ns = now_ns;
++	if (dwell->phase != HDD_WONDER_DWELL_IDLE &&
++	    now_ns >= dwell->deadline_ns)
++		hdd_wonder_dwell_revoke(dwell);
++	return true;
++}
++
++void hdd_wonder_dwell_init(struct hdd_wonder_dwell *dwell, u64 max_duration_ns)
++{
++	memset(dwell, 0, sizeof(*dwell));
++	dwell->max_duration_ns = max_duration_ns;
++}
++
++bool hdd_wonder_dwell_set_home(struct hdd_wonder_dwell *dwell,
++			     u32 vdev_id, u32 freq)
++{
++	if (vdev_id > 255 || !freq || freq > 65535)
++		return false;
++	if (dwell->home_valid && (dwell->home_vdev_id != vdev_id ||
++				 dwell->home_freq != freq))
++		hdd_wonder_dwell_revoke(dwell);
++	dwell->home_vdev_id = vdev_id;
++	dwell->home_freq = freq;
++	dwell->home_valid = true;
++	return true;
++}
++
++bool hdd_wonder_dwell_reserve(struct hdd_wonder_dwell *dwell,
++			     const struct hdd_wonder_dwell_owner *owner,
++			     const struct hdd_wonder_dwell_scan *scan,
++			     u64 now_ns, u64 slot_end_ns,
++			     u64 requested_duration_ns)
++{
++	u64 duration, deadline;
++
++	if (dwell->phase != HDD_WONDER_DWELL_IDLE || !dwell->home_valid ||
++	    !owner || !owner->generation || !owner->helper_cookie || !scan ||
++	    scan->vdev_id > 255 || !scan->freq || scan->freq > 65535 ||
++	    scan->scan_id >= 0xfffffffeU || !dwell->max_duration_ns ||
++	    !requested_duration_ns || slot_end_ns <= now_ns ||
++	    !hdd_wonder_dwell_advance(dwell, now_ns))
++		return false;
++	duration = requested_duration_ns;
++	if (duration > dwell->max_duration_ns)
++		duration = dwell->max_duration_ns;
++	/* Reject overflow rather than silently wrap the readiness window. */
++	if (duration > ~0ULL - now_ns)
++		return false;
++	deadline = now_ns + duration;
++	if (slot_end_ns < deadline)
++		deadline = slot_end_ns;
++	dwell->owner = *owner;
++	dwell->scan = *scan;
++	dwell->deadline_ns = deadline;
++	dwell->phase = HDD_WONDER_DWELL_PENDING;
++	dwell->revoked = false;
++	dwell->started = false;
++	dwell->target_timestamp_valid = false;
++	return true;
++}
++
++bool hdd_wonder_dwell_event(struct hdd_wonder_dwell *dwell,
++			   const struct hdd_wonder_dwell_event *event,
++			   u64 now_ns)
++{
++	bool time_valid, newer = true;
++
++	if (!event || dwell->phase == HDD_WONDER_DWELL_IDLE ||
++	    !hdd_wonder_dwell_owner_matches(dwell, &event->owner) ||
++	    dwell->scan.vdev_id != event->vdev_id ||
++	    dwell->scan.requester != event->requester ||
++	    dwell->scan.scan_id != event->scan_id)
++		return false;
++	if ((event->type == HDD_WONDER_DWELL_FOREIGN_CHANNEL &&
++	     event->freq != dwell->scan.freq) ||
++	    (event->type == HDD_WONDER_DWELL_FOREIGN_CHANNEL_EXIT &&
++	     event->freq && event->freq != dwell->scan.freq) ||
++	    (event->type == HDD_WONDER_DWELL_BSS_CHANNEL &&
++	     event->freq && event->freq != dwell->home_freq)) {
++		/* This exact scan reported a contradictory measured channel.
++		 * Reject the event and latch revocation until real retirement.
++		 * A FOREIGN event without a frequency cannot authorize entry.
++		 */
++		if (event->freq)
++			hdd_wonder_dwell_revoke(dwell);
++		return false;
++	}
++	time_valid = hdd_wonder_dwell_advance(dwell, now_ns);
++	if (event->target_timestamp_valid && dwell->target_timestamp_valid)
++		newer = (s32)(event->target_timestamp -
++			       dwell->target_timestamp) > 0;
++	if (event->target_timestamp_valid && newer) {
++		dwell->target_timestamp = event->target_timestamp;
++		dwell->target_timestamp_valid = true;
++	}
++	switch (event->type) {
++	case HDD_WONDER_DWELL_STARTED:
++		dwell->started = true;
++		break;
++	case HDD_WONDER_DWELL_FOREIGN_CHANNEL:
++		dwell->started = true;
++		if (time_valid && newer && dwell->home_valid && !dwell->revoked &&
++		    dwell->phase == HDD_WONDER_DWELL_PENDING)
++			dwell->phase = HDD_WONDER_DWELL_READY;
++		break;
++	case HDD_WONDER_DWELL_TERMINAL:
++		/* A real terminal drains even after invalidation or clock regression.
++		 * Keep the old tuple for diagnostics; IDLE never authorizes traffic.
++		 */
++		dwell->revoked = true;
++		dwell->phase = HDD_WONDER_DWELL_IDLE;
++		break;
++	case HDD_WONDER_DWELL_FOREIGN_CHANNEL_EXIT:
++	case HDD_WONDER_DWELL_BSS_CHANNEL:
++	case HDD_WONDER_DWELL_PREEMPTED:
++	case HDD_WONDER_DWELL_SUSPENDED:
++	case HDD_WONDER_DWELL_RESTARTED:
++		hdd_wonder_dwell_revoke(dwell);
++		break;
++	default:
++		/* Unknown attributed event may never leave readiness armed. */
++		hdd_wonder_dwell_revoke(dwell);
++		return false;
++	}
++	return true;
++}
++
++bool hdd_wonder_dwell_ready(struct hdd_wonder_dwell *dwell,
++			   const struct hdd_wonder_dwell_owner *owner,
++			   const struct hdd_wonder_dwell_scan *scan, u64 now_ns)
++{
++	return hdd_wonder_dwell_advance(dwell, now_ns) && dwell->home_valid &&
++		dwell->phase == HDD_WONDER_DWELL_READY && !dwell->revoked &&
++		hdd_wonder_dwell_owner_matches(dwell, owner) &&
++		hdd_wonder_dwell_scan_matches(dwell, scan);
++}
++
++void hdd_wonder_dwell_expire(struct hdd_wonder_dwell *dwell, u64 now_ns)
++{
++	hdd_wonder_dwell_advance(dwell, now_ns);
++}
++
++bool hdd_wonder_dwell_cancel(struct hdd_wonder_dwell *dwell,
++			    const struct hdd_wonder_dwell_owner *owner,
++			    const struct hdd_wonder_dwell_scan *scan)
++{
++	if (dwell->phase == HDD_WONDER_DWELL_IDLE ||
++	    !hdd_wonder_dwell_owner_matches(dwell, owner) ||
++	    !hdd_wonder_dwell_scan_matches(dwell, scan))
++		return false;
++	hdd_wonder_dwell_revoke(dwell);
++	dwell->phase = HDD_WONDER_DWELL_CANCEL_PENDING;
++	return true;
++}
++
++void hdd_wonder_dwell_invalidate(struct hdd_wonder_dwell *dwell)
++{
++	dwell->home_valid = false;
++	hdd_wonder_dwell_revoke(dwell);
++	if (dwell->phase != HDD_WONDER_DWELL_IDLE)
++		dwell->phase = HDD_WONDER_DWELL_CANCEL_PENDING;
++}
++
++bool hdd_wonder_dwell_submission_failed(struct hdd_wonder_dwell *dwell,
++			 const struct hdd_wonder_dwell_owner *owner,
++			 const struct hdd_wonder_dwell_scan *scan)
++{
++	if (dwell->phase != HDD_WONDER_DWELL_PENDING || dwell->started ||
++	    dwell->revoked || !hdd_wonder_dwell_owner_matches(dwell, owner) ||
++	    !hdd_wonder_dwell_scan_matches(dwell, scan))
++		return false;
++	dwell->revoked = true;
++	dwell->phase = HDD_WONDER_DWELL_IDLE;
++	return true;
++}
++
++bool hdd_wonder_dwell_not_submitted(struct hdd_wonder_dwell *dwell,
++			 const struct hdd_wonder_dwell_owner *owner,
++			 const struct hdd_wonder_dwell_scan *scan)
++{
++	if (dwell->phase == HDD_WONDER_DWELL_IDLE || dwell->started ||
++	    !hdd_wonder_dwell_owner_matches(dwell, owner) ||
++	    !hdd_wonder_dwell_scan_matches(dwell, scan))
++		return false;
++	dwell->revoked = true;
++	dwell->phase = HDD_WONDER_DWELL_IDLE;
++	return true;
++}
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c
+index 2a2932881627e973ec0c898df63fbbab99b7ab34..78e529e2c2924df15ede7308d0cd1817be0b8ead 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c
+@@ -40,11 +40,14 @@ struct hdd_wonder_plan {
+ 	u64 dwell_us;
+ 	u64 next_tsf;
+ 	u64 next_host_ns;
++	u64 switch_end_host_ns;
++	u64 switch_duration_ns;
+ 	u32 request_tsf;
+ 	u32 next_index;
+ 	u32 current_index;
+ 	u8 count;
+ 	bool slot_active;
++	bool switch_pending;
+ 	struct wondertap_channel_list_params channels[HDD_WONDER_CHANNELS_MAX];
+ 	struct hdd_wonder_slot slots[HDD_WONDER_CHANNELS_MAX];
+ };
+@@ -317,7 +320,8 @@ static void hdd_wonder_sched_switch_work(struct work_struct *work)
+ 	struct hdd_wonder_slot *slot;
+ 	struct hdd_wonder_clock clock;
+ 	u64 now_ns = ktime_get_ns(), completion_ns = 0, completion_tsf, now_tsf;
+-	u64 skipped, target_tsf, generation, next_ns = 0;
++	u64 skipped, target_tsf, generation, slot_end_host_ns, duration_ns;
++	u64 next_ns = 0;
+ 	unsigned long flags;
+ 	u32 index;
+ 	int ret;
+@@ -327,29 +331,52 @@ static void hdd_wonder_sched_switch_work(struct work_struct *work)
+ 	if (!sched->running || !plan || plan->generation != sched->generation)
+ 		goto unlock;
+ 	kref_get(&plan->ref);
+-	if (now_ns < plan->next_host_ns) {
++	if (!plan->switch_pending && now_ns < plan->next_host_ns) {
+ 		next_ns = plan->next_host_ns;
+ 		goto release_locked;
+ 	}
++	/* A temporary acquisition conflict cannot advance or renew its slot. */
++	if (plan->switch_pending && now_ns >= plan->switch_end_host_ns) {
++		sched->last_error = -ETIMEDOUT;
++		sched->generation++;
++		goto release_locked;
++	}
+ 	clock = sched->clock;
+ 	if (!sched->tsf_bound || !clock.valid ||
+ 	    now_ns - clock.sample_host_ns > HDD_WONDER_TSF_MAX_AGE_NS) {
+ 		sched->last_error = -ENODATA;
++		if (plan->switch_pending)
++			next_ns = plan->switch_end_host_ns;
+ 		goto release_locked;
+ 	}
+-	/* Skip elapsed slots; do not burst old channel changes after a stall. */
++	/* Skip elapsed slots only before starting an acquisition. */
+ 	if (hdd_wonder_clock_tsf(&clock, now_ns, &now_tsf)) {
+ 		sched->last_error = -ERANGE;
+ 		goto release_locked;
+ 	}
+-	skipped = now_tsf > plan->next_tsf ?
+-		div64_u64(now_tsf - plan->next_tsf, plan->dwell_us) : 0;
+-	plan->next_index = (plan->next_index + skipped % plan->count) % plan->count;
+-	plan->next_tsf += skipped * plan->dwell_us;
+-	plan->next_host_ns = hdd_wonder_clock_host(&clock, plan->next_tsf);
++	if (!plan->switch_pending) {
++		skipped = now_tsf > plan->next_tsf ?
++			div64_u64(now_tsf - plan->next_tsf, plan->dwell_us) : 0;
++		plan->next_index = (plan->next_index + skipped % plan->count) % plan->count;
++		plan->next_tsf += skipped * plan->dwell_us;
++		plan->next_host_ns = hdd_wonder_clock_host(&clock, plan->next_tsf);
++		plan->switch_end_host_ns = hdd_wonder_clock_host(&clock,
++						plan->next_tsf + plan->dwell_us);
++		if (plan->switch_end_host_ns <= now_ns) {
++			sched->last_error = -ETIMEDOUT;
++			sched->generation++;
++			goto release_locked;
++		}
++		plan->switch_duration_ns = plan->dwell_us * NSEC_PER_USEC;
++		if (plan->switch_duration_ns > plan->switch_end_host_ns - now_ns)
++			plan->switch_duration_ns = plan->switch_end_host_ns - now_ns;
++		plan->switch_pending = true;
++	}
+ 	index = plan->next_index;
+ 	target_tsf = plan->next_tsf;
+ 	generation = plan->generation;
++	slot_end_host_ns = plan->switch_end_host_ns;
++	duration_ns = plan->switch_duration_ns;
+ 	channel.freq = plan->channels[index].freq ?: sched->current_freq;
+ 	channel.bandwidth = plan->channels[index].freq ?
+ 		plan->channels[index].bandwidth : sched->current_bandwidth;
+@@ -358,25 +385,30 @@ static void hdd_wonder_sched_switch_work(struct work_struct *work)
+ 	if (!hdd_wonder_sched_generation_active(sched, generation)) {
+ 		ret = -ESTALE;
+ 	} else {
+-		ret = sched->ops.set_channel(sched->context, &channel, generation, &completion_ns);
++		ret = sched->ops.set_channel(sched->context, &channel, generation,
++					    slot_end_host_ns, duration_ns, &completion_ns);
+ 	}
+ 	if (!completion_ns)
+ 		completion_ns = ktime_get_ns();
+ 	spin_lock_irqsave(&sched->lock, flags);
+ 	if (!sched->running || sched->plan != plan || generation != sched->generation)
+ 		goto release_locked;
+-	/* set_channel has now rebound and captured the actual prepared helper.
+-	 * Completion timestamps must use that fresh anchor, not the old MAC.
++	/* Standalone retunes publish a fresh helper clock; shared dwell completion
++	 * leaves the measured HOME clock intact. Use the provider's current anchor.
+ 	 */
+ 	clock = sched->clock;
+ 	if (!ret && (!sched->tsf_bound || !clock.valid))
+ 		ret = -ENODATA;
++	if (!ret && completion_ns >= slot_end_host_ns)
++		ret = -ETIMEDOUT;
+ 	if (!ret)
+ 		ret = hdd_wonder_clock_tsf(&clock, completion_ns, &completion_tsf);
+ 	if (ret) {
+ 		sched->last_error = ret;
+ 		if (ret == -EAGAIN || ret == -EBUSY) {
+ 			next_ns = ktime_get_ns() + HDD_WONDER_SWITCH_RETRY_NS;
++			if (next_ns > slot_end_host_ns)
++				next_ns = slot_end_host_ns;
+ 			goto release_locked;
+ 		}
+ 		/* Keep the last known channel active, but stop a failed sequence. */
+@@ -393,6 +425,7 @@ static void hdd_wonder_sched_switch_work(struct work_struct *work)
+ 	slot->status.channel_start_tsf = (u32)completion_tsf;
+ 	plan->current_index = index;
+ 	plan->slot_active = true;
++	plan->switch_pending = false;
+ 	sched->current_freq = channel.freq;
+ 	sched->current_bandwidth = channel.bandwidth;
+ 	sched->current_host_ns = completion_ns;
+diff --git a/qcacld-3.0/core/wma/inc/wma_api.h b/qcacld-3.0/core/wma/inc/wma_api.h
+index ef41ec4d61a6f99f47ebbbbf22eeeb6a990bee23..3e0c1773dd60fd8cc429c8d8c770c0191c0d9794 100644
+--- a/qcacld-3.0/core/wma/inc/wma_api.h
++++ b/qcacld-3.0/core/wma/inc/wma_api.h
+@@ -75,6 +75,29 @@ QDF_STATUS wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
+ 		const uint8_t *interface_mac, uint64_t generation,
+ 		const struct wma_wonder_helper_snapshot *snapshot,
+ 		struct wma_wonder_helper_limits *limits);
++/* Prepare at HOME before reserving a dwell; no helper channel mutation. */
++QDF_STATUS wma_wonder_offchan_prepare(uint8_t monitor_id,
++		uint32_t home_frequency, const uint8_t *interface_mac,
++		uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot);
++/* Nonblocking bounded enqueue; success transfers frame and arg reference to
++ * WMA. Worker invokes release(arg) once after send/drop, while a sent frame
++ * stays owned by WMA until its real matching TX completion. Errors retain an
++ * unmapped caller-owned frame and arg. begin/end are nonblocking and hold the
++ * caller's live admission and dwell guards across the final worker send.
++ */
++QDF_STATUS wma_wonder_offchan_tx(qdf_nbuf_t nbuf, uint8_t monitor_id,
++		uint32_t home_frequency, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot,
++		uint32_t frequency, const struct cdp_tx_injection_params *tx_params,
++		bool (*begin)(void *arg, unsigned long *flags),
++		void (*end)(void *arg, unsigned long flags),
++		void (*release)(void *arg), void *arg);
++/* WMI work-close must stop events before flushing its RX workqueue, then call
++ * events_drained. Neither hook returns firmware DMA ownership.
++ */
++void wma_wonder_offchan_event_stop(void *wma_context);
++void wma_wonder_offchan_events_drained(void *wma_context);
+ #else
+ static inline bool wma_wonder_standalone_helper_reserved(void)
+ {
+@@ -112,6 +135,29 @@ wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
+ {
+ 	return QDF_STATUS_E_NOSUPPORT;
+ }
++
++static inline QDF_STATUS
++wma_wonder_offchan_prepare(uint8_t monitor_id, uint32_t home_frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot)
++{
++	return QDF_STATUS_E_NOSUPPORT;
++}
++
++static inline QDF_STATUS
++wma_wonder_offchan_tx(qdf_nbuf_t nbuf, uint8_t monitor_id,
++		uint32_t home_frequency, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot,
++		uint32_t frequency, const struct cdp_tx_injection_params *tx_params,
++		bool (*begin)(void *arg, unsigned long *flags),
++		void (*end)(void *arg, unsigned long flags),
++		void (*release)(void *arg), void *arg)
++{
++	return QDF_STATUS_E_NOSUPPORT;
++}
++
++static inline void wma_wonder_offchan_event_stop(void *wma_context) { }
++static inline void wma_wonder_offchan_events_drained(void *wma_context) { }
+ #endif
+ #endif /* FEATURE_WLAN_WONDER */
+ 
+diff --git a/qcacld-3.0/core/wma/src/wma_data.c b/qcacld-3.0/core/wma/src/wma_data.c
+index 449a36bb333b0ae0dbd864ce2f190746db568d39..7d16722fcb40d0151e344cef03954af2d751ce3f 100644
+--- a/qcacld-3.0/core/wma/src/wma_data.c
++++ b/qcacld-3.0/core/wma/src/wma_data.c
+@@ -2238,6 +2238,655 @@ out:
+ 	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+ 	return status;
+ }
++#define WMA_WONDER_OFFCHAN_SLOTS 64
++
++/*
++ * This owner survives injection-context and provider teardown. A slot is never
++ * retired by a dwell event, host timeout, queue flush or helper DELETE.
++ */
++struct wma_wonder_offchan_slot {
++	qdf_nbuf_t nbuf;
++	struct __qdf_device dma_device;
++	uint32_t desc_id;
++	uint32_t pdev_id;
++	uint32_t completion_status;
++	bool publishing;
++	bool completion_seen;
++	bool releasing;
++};
++
++static DEFINE_SPINLOCK(wma_wonder_offchan_lock);
++static struct {
++	struct wma_wonder_offchan_slot slots[WMA_WONDER_OFFCHAN_SLOTS];
++	wmi_unified_t wmi_handle;
++	void *wma_context;
++	uint32_t next_desc;
++	unsigned int in_flight;
++	unsigned int queued;
++	uint64_t epoch;
++	uint64_t sent;
++	uint64_t failed;
++	uint64_t completed;
++	uint64_t descriptor_exhausted;
++	uint64_t pdev_mismatch;
++	uint64_t malformed;
++	uint64_t unknown_desc;
++	bool registered;
++	bool accepting;
++	bool stopped;
++} wma_wonder_offchan;
++
++static int wma_wonder_offchan_stats_get(char *buffer,
++				       const struct kernel_param *kp)
++{
++	unsigned long flags;
++	unsigned int i, mapped = 0, publishing = 0, quarantined = 0;
++	int length;
++
++	(void)kp;
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	for (i = 0; i < WMA_WONDER_OFFCHAN_SLOTS; i++) {
++		struct wma_wonder_offchan_slot *slot = &wma_wonder_offchan.slots[i];
++
++		if (!slot->nbuf || slot->releasing)
++			continue;
++		if (slot->publishing) {
++			publishing++;
++		} else {
++			mapped++;
++			if (!wma_wonder_offchan.accepting)
++				quarantined++;
++		}
++	}
++	length = scnprintf(buffer, PAGE_SIZE,
++		"registered=%u quiesced=%u epoch=%llu queued=%u sent=%llu failed=%llu completed=%llu pending_mapped=%u publishing=%u quarantined=%u descriptor_exhausted=%llu pdev_mismatch=%llu malformed=%llu unknown_desc=%llu\n",
++		wma_wonder_offchan.registered, !wma_wonder_offchan.accepting,
++		(unsigned long long)wma_wonder_offchan.epoch, wma_wonder_offchan.queued,
++		(unsigned long long)wma_wonder_offchan.sent,
++		(unsigned long long)wma_wonder_offchan.failed,
++		(unsigned long long)wma_wonder_offchan.completed, mapped, publishing,
++		quarantined, (unsigned long long)wma_wonder_offchan.descriptor_exhausted,
++		(unsigned long long)wma_wonder_offchan.pdev_mismatch,
++		(unsigned long long)wma_wonder_offchan.malformed,
++		(unsigned long long)wma_wonder_offchan.unknown_desc);
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	return length;
++}
++
++static const struct kernel_param_ops wma_wonder_offchan_stats_ops = {
++	.get = wma_wonder_offchan_stats_get,
++};
++module_param_cb(wonder_offchan_stats, &wma_wonder_offchan_stats_ops, NULL, 0444);
++MODULE_PARM_DESC(wonder_offchan_stats,
++		"Offchannel queue and DMA ownership counters; sent is not an RF receipt");
++
++struct wma_wonder_offchan_packet {
++	struct list_head node;
++	qdf_nbuf_t nbuf;
++	struct wma_wonder_helper_snapshot snapshot;
++	struct cdp_tx_injection_params params;
++	uint64_t generation;
++	uint32_t home_frequency;
++	uint32_t frequency;
++	uint8_t monitor_id;
++	bool (*begin)(void *arg, unsigned long *flags);
++	void (*end)(void *arg, unsigned long flags);
++	void (*release)(void *arg);
++	void *arg;
++};
++
++static LIST_HEAD(wma_wonder_offchan_queue);
++static void wma_wonder_offchan_worker(struct work_struct *work);
++static DECLARE_WORK(wma_wonder_offchan_work, wma_wonder_offchan_worker);
++
++/* Both lifecycle_lock and helper_lock are held by this process-context caller. */
++static bool wma_wonder_offchan_helper_valid(tp_wma_handle wma,
++		uint8_t monitor_id, uint32_t home_frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot)
++{
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++	struct wma_injection_helper_snapshot helper_snapshot;
++
++	return wma && wma->wmi_handle && wma->qdf_dev &&
++		wma->qdf_dev->dev && wma_injection_ctx.active &&
++		!wma_injection_ctx.paused &&
++		!wma_injection_ctx.channel_change_paused &&
++		monitor_id < wma->max_bssid &&
++		wma->interfaces[monitor_id].vdev &&
++		wma->interfaces[monitor_id].ch_freq == home_frequency &&
++		helper->wonder_owned && !helper->wonder_delete_sent &&
++		helper->wonder_cookie == snapshot->cookie &&
++		helper->vdev_id == snapshot->vdev_id &&
++		wma_injection_get_helper_snapshot(monitor_id, home_frequency,
++				interface_mac, generation, &helper_snapshot) &&
++		helper_snapshot.direct_dp &&
++		(generation ?
++		 wlan_mlme_sta_mon_token_valid(wma->psoc, monitor_id, generation) :
++		 !wlan_mlme_sta_mon_is_owner(wma->psoc, monitor_id));
++}
++
++/* Completion/failed-publication owns a slot after setting releasing. */
++static void wma_wonder_offchan_release(struct wma_wonder_offchan_slot *slot,
++				       bool mapped)
++{
++	struct wma_wonder_offchan_slot released = *slot;
++	unsigned long flags;
++
++	if (mapped) {
++		qdf_nbuf_unmap_single(&released.dma_device, released.nbuf,
++				     QDF_DMA_TO_DEVICE);
++		qdf_nbuf_free(released.nbuf);
++		atomic64_inc(&injection_completed);
++		if (released.completion_status != WMI_MGMT_TX_COMP_TYPE_COMPLETE_OK)
++			atomic64_inc(&injection_completion_failed);
++	}
++	put_device(released.dma_device.dev);
++
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	qdf_mem_zero(slot, sizeof(*slot));
++	wma_wonder_offchan.in_flight--;
++	if (mapped)
++		wma_wonder_offchan.completed++;
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	/* Shared idle accounting keeps helper destruction behind the DMA return. */
++	spin_lock_irqsave(&wma_injection_ctx.lock, flags);
++	if (wma_injection_ctx.in_flight)
++		wma_injection_ctx.in_flight--;
++	spin_unlock_irqrestore(&wma_injection_ctx.lock, flags);
++	wake_up_all(&wma_injection_ctx.idle_wait);
++	wma_injection_queue_work();
++	module_put(THIS_MODULE);
++}
++
++static int wma_wonder_offchan_completion(void *context, uint8_t *buf, uint32_t len)
++{
++	struct wmi_host_offchan_data_tx_compl_event event;
++	struct wma_wonder_offchan_slot *slot;
++	wmi_unified_t wmi;
++	unsigned long flags;
++	unsigned int i;
++	bool release = false;
++
++	(void)len;
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	wmi = context == wma_wonder_offchan.wma_context ?
++		wma_wonder_offchan.wmi_handle : NULL;
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	if (!wmi)
++		return -EINVAL;
++	if (QDF_IS_STATUS_ERROR(wmi_extract_offchan_data_tx_compl_param(wmi, buf, &event))) {
++		spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++		wma_wonder_offchan.malformed++;
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		return -EINVAL;
++	}
++
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	for (i = 0; i < WMA_WONDER_OFFCHAN_SLOTS; i++) {
++		slot = &wma_wonder_offchan.slots[i];
++		if (!slot->nbuf || slot->desc_id != event.desc_id || slot->releasing)
++			continue;
++		if (slot->pdev_id != event.pdev_id) {
++			wma_wonder_offchan.pdev_mismatch++;
++			break;
++		}
++		/* Ignore duplicates while the send is returning on another CPU. */
++		if (!slot->completion_seen) {
++			slot->completion_status = event.status;
++			slot->completion_seen = true;
++		}
++		if (!slot->publishing) {
++			slot->releasing = true;
++			release = true;
++		}
++		break;
++	}
++	if (i == WMA_WONDER_OFFCHAN_SLOTS)
++		wma_wonder_offchan.unknown_desc++;
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	if (release)
++		wma_wonder_offchan_release(slot, true);
++	return 0;
++}
++
++QDF_STATUS wma_wonder_offchan_prepare(uint8_t monitor_id,
++		uint32_t home_frequency, const uint8_t *interface_mac,
++		uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot)
++{
++	tp_wma_handle wma;
++	unsigned long flags;
++	QDF_STATUS status = QDF_STATUS_E_CANCELED;
++
++	if (!home_frequency || !interface_mac || !snapshot || !snapshot->cookie ||
++	    !READ_ONCE(wma_injection_ctx.active))
++		return QDF_STATUS_E_INVAL;
++	mutex_lock(&wma_injection_ctx.lifecycle_lock);
++	mutex_lock(&wma_injection_ctx.helper_lock);
++	wma = wma_injection_ctx.wma;
++	if (!wma_wonder_offchan_helper_valid(wma, monitor_id, home_frequency,
++					    interface_mac, generation, snapshot))
++		goto out;
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	/* Stock 7009 consumes only the low 16 bits of the wire descriptor ID. */
++	if (wma_wonder_offchan.next_desc >= U16_MAX) {
++		wma_wonder_offchan.descriptor_exhausted++;
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		status = QDF_STATUS_E_NOSUPPORT;
++		goto out;
++	}
++	if (wma_wonder_offchan.registered) {
++		status = wma_wonder_offchan.wmi_handle == wma->wmi_handle &&
++			wma_wonder_offchan.wma_context == wma &&
++			wma_wonder_offchan.accepting ?
++			QDF_STATUS_SUCCESS : QDF_STATUS_E_BUSY;
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		goto out;
++	}
++	if (wma_wonder_offchan.in_flight || wma_wonder_offchan.wmi_handle) {
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		status = QDF_STATUS_E_BUSY;
++		goto out;
++	}
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	status = wmi_offchan_data_tx_completion_register(wma->wmi_handle,
++				wma_wonder_offchan_completion, WMI_RX_WORK_CTX);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto out;
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	wma_wonder_offchan.wmi_handle = wma->wmi_handle;
++	wma_wonder_offchan.wma_context = wma;
++	wma_wonder_offchan.registered = true;
++	wma_wonder_offchan.accepting = true;
++	wma_wonder_offchan.stopped = false;
++	wma_wonder_offchan.epoch++;
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++out:
++	mutex_unlock(&wma_injection_ctx.helper_lock);
++	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
++	return status;
++}
++
++/* WMI has no established encoding for GI/LTF, NOACK or NOSEQNO overrides. */
++static QDF_STATUS wma_wonder_offchan_encode(
++		const struct cdp_tx_injection_params *input,
++		const struct wma_injection_helper *helper,
++		uint32_t frequency, int16_t power_dbm, struct tx_send_params *output)
++{
++	uint16_t allowed_mcs;
++
++	qdf_mem_zero(output, sizeof(*output));
++	if (!input->rate_valid || !input->bandwidth_valid || input->gi_valid ||
++	    input->no_ack || input->tx_flags || input->he_ltf ||
++	    input->bw_mask != BIT(2) || !(helper->channel_bw_mask & BIT(2)) ||
++	    !helper->max_nss || helper->max_nss > 8 || !input->nss_mask ||
++	    (input->nss_mask & ~GENMASK(helper->max_nss - 1, 0)) ||
++	    (input->chanfreq && input->chanfreq != frequency) ||
++	    power_dbm < -64 || power_dbm > 63 ||
++	    (input->retries_valid && (!input->retries || input->retries > 15)))
++		return QDF_STATUS_E_NOSUPPORT;
++	switch (input->preamble) {
++	case CDP_INJECTION_OFDM:
++		allowed_mcs = GENMASK(11, 4);
++		if (input->nss_mask != 1)
++			return QDF_STATUS_E_NOSUPPORT;
++		break;
++	case CDP_INJECTION_CCK:
++		allowed_mcs = GENMASK(3, 0);
++		if (!wlan_reg_is_24ghz_ch_freq(frequency) || input->nss_mask != 1)
++			return QDF_STATUS_E_NOSUPPORT;
++		break;
++	case CDP_INJECTION_HT:
++		if (!helper->ht_supported)
++			return QDF_STATUS_E_NOSUPPORT;
++		allowed_mcs = GENMASK(7, 0);
++		break;
++	case CDP_INJECTION_VHT:
++		if (!helper->vht_supported)
++			return QDF_STATUS_E_NOSUPPORT;
++		allowed_mcs = GENMASK(8, 0);
++		break;
++	default:
++		return QDF_STATUS_E_NOSUPPORT;
++	}
++	if (!input->mcs_mask || (input->mcs_mask & ~allowed_mcs))
++		return QDF_STATUS_E_NOSUPPORT;
++	output->pwr = (uint8_t)(power_dbm * 2);
++	output->mcs_mask = input->mcs_mask;
++	output->nss_mask = input->nss_mask;
++	output->bw_mask = input->bw_mask;
++	output->preamble_type = BIT(input->preamble);
++	output->frame_type = input->is_data;
++	output->retry_limit = input->retries_valid ? input->retries : 1;
++	return QDF_STATUS_SUCCESS;
++}
++
++static QDF_STATUS wma_wonder_offchan_send(qdf_nbuf_t nbuf, uint8_t monitor_id,
++		uint32_t home_frequency, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot,
++		uint32_t frequency, const struct cdp_tx_injection_params *tx_params,
++		bool (*begin)(void *arg, unsigned long *flags),
++		void (*end)(void *arg, unsigned long flags), void *arg)
++{
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++	struct wma_wonder_offchan_slot *slot = NULL;
++	struct wmi_offchan_data_tx_params cmd = { 0 };
++	struct vdev_mlme_obj *monitor_mlme;
++	tp_wma_handle wma;
++	QDF_STATUS status = QDF_STATUS_E_CANCELED;
++	unsigned long flags, guard_flags;
++	unsigned int i;
++	uint8_t reg_power;
++	uint32_t pdev_id;
++	int16_t power_dbm;
++	__le16 frame_control;
++	bool release = false;
++
++	if (!nbuf || !snapshot || !snapshot->cookie || !tx_params || !begin || !end ||
++	    !home_frequency || !frequency || frequency == home_frequency ||
++	    frequency > U16_MAX || qdf_nbuf_len(nbuf) < 24 ||
++	    qdf_nbuf_len(nbuf) > U16_MAX || qdf_nbuf_is_nonlinear(nbuf) ||
++	    qdf_nbuf_get_num_frags(nbuf) != 1 ||
++	    !READ_ONCE(wma_injection_ctx.active))
++		return QDF_STATUS_E_INVAL;
++	frame_control = cpu_to_le16(get_unaligned_le16(qdf_nbuf_data(nbuf)));
++	if ((!ieee80211_is_mgmt(frame_control) && !ieee80211_is_data(frame_control)) ||
++	    tx_params->is_data != ieee80211_is_data(frame_control))
++		return QDF_STATUS_E_NOSUPPORT;
++
++	mutex_lock(&wma_injection_ctx.lifecycle_lock);
++	mutex_lock(&wma_injection_ctx.helper_lock);
++	wma = wma_injection_ctx.wma;
++	if (!wma_wonder_offchan_helper_valid(wma, monitor_id, home_frequency,
++				tx_params->interface_mac, generation, snapshot))
++		goto out;
++	if ((!wlan_reg_is_24ghz_ch_freq(frequency) &&
++	     !wlan_reg_is_5ghz_ch_freq(frequency)) ||
++	    wlan_reg_get_bonded_channel_state_for_pwrmode(wma->pdev, frequency,
++			CH_WIDTH_20MHZ, 0, REG_CURRENT_PWR_MODE) != CHANNEL_STATE_ENABLE) {
++		status = QDF_STATUS_E_NOSUPPORT;
++		goto out;
++	}
++	reg_power = wlan_reg_get_channel_reg_power_for_freq(wma->pdev, frequency);
++	if (reg_power == REG_INVALID_TXPOWER || reg_power > 127) {
++		status = QDF_STATUS_E_NOSUPPORT;
++		goto out;
++	}
++	if (helper->native) {
++		power_dbm = (int8_t)helper->start.channel.maxpower;
++	} else {
++		monitor_mlme = wlan_vdev_mlme_get_cmpt_obj(wma->interfaces[monitor_id].vdev);
++		if (!monitor_mlme)
++			goto out;
++		power_dbm = (int8_t)monitor_mlme->mgmt.generic.maxpower;
++	}
++	power_dbm = QDF_MIN(power_dbm, reg_power);
++	status = wma_wonder_offchan_encode(tx_params, helper, frequency, power_dbm,
++					 &cmd.tx_param);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto out;
++	/* Stock completion encodes its raw callback's MAC-like argument + 1.
++	 * Its physical-MAC meaning is inferred; the one-based encoding is proven.
++	 * Use the exact same current WMI map as completion decoding.
++	 */
++	status = wmi_offchan_data_tx_pdev_id(wma->wmi_handle,
++			(helper->native ? helper->expected_mac_id : 0) + 1,
++			&pdev_id);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto out;
++
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	if (!wma_wonder_offchan.registered || !wma_wonder_offchan.accepting ||
++	    wma_wonder_offchan.wmi_handle != wma->wmi_handle ||
++	    wma_wonder_offchan.wma_context != wma ||
++	    wma_wonder_offchan.next_desc >= U16_MAX) {
++		if (wma_wonder_offchan.next_desc >= U16_MAX)
++			wma_wonder_offchan.descriptor_exhausted++;
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		status = QDF_STATUS_E_CANCELED;
++		goto out;
++	}
++	for (i = 0; i < WMA_WONDER_OFFCHAN_SLOTS; i++) {
++		if (!wma_wonder_offchan.slots[i].nbuf) {
++			slot = &wma_wonder_offchan.slots[i];
++			break;
++		}
++	}
++	if (!slot) {
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		status = QDF_STATUS_E_BUSY;
++		goto out;
++	}
++	if (!try_module_get(THIS_MODULE)) {
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		status = QDF_STATUS_E_CANCELED;
++		goto out;
++	}
++	slot->dma_device.dev = get_device(wma->qdf_dev->dev);
++	slot->nbuf = nbuf;
++	slot->desc_id = ++wma_wonder_offchan.next_desc;
++	slot->pdev_id = pdev_id;
++	slot->publishing = true;
++	wma_wonder_offchan.in_flight++;
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	spin_lock_irqsave(&wma_injection_ctx.lock, flags);
++	wma_injection_ctx.in_flight++;
++	spin_unlock_irqrestore(&wma_injection_ctx.lock, flags);
++
++	cmd.tx_frame = nbuf;
++	cmd.frm_len = qdf_nbuf_len(nbuf);
++	cmd.vdev_id = snapshot->vdev_id;
++	cmd.desc_id = slot->desc_id;
++	cmd.chanfreq = frequency;
++	cmd.pdata = qdf_nbuf_data(nbuf);
++	cmd.qdf_ctx = &slot->dma_device;
++	cmd.tx_params_valid = true;
++	/* No blocking operation is allowed after the caller's publication guard. */
++	if (!begin(arg, &guard_flags)) {
++		status = QDF_STATUS_E_CANCELED;
++	} else {
++		status = wmi_offchan_data_tx_cmd_send(wma->wmi_handle, &cmd);
++		end(arg, guard_flags);
++	}
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	slot->publishing = false;
++	if (QDF_IS_STATUS_ERROR(status) || slot->completion_seen) {
++		slot->releasing = true;
++		release = true;
++	}
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	if (release)
++		wma_wonder_offchan_release(slot, !QDF_IS_STATUS_ERROR(status));
++out:
++	mutex_unlock(&wma_injection_ctx.helper_lock);
++	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
++	return status;
++}
++
++static void wma_wonder_offchan_packet_done(
++		struct wma_wonder_offchan_packet *packet, bool free_frame)
++{
++	if (free_frame) {
++		unsigned long flags;
++
++		qdf_nbuf_reset_ctxt(packet->nbuf);
++		qdf_nbuf_free(packet->nbuf);
++		atomic64_inc(&injection_send_failed);
++		spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++		wma_wonder_offchan.failed++;
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	}
++	packet->release(packet->arg);
++	qdf_mem_free(packet);
++	module_put(THIS_MODULE);
++}
++
++static void wma_wonder_offchan_worker(struct work_struct *work)
++{
++	struct wma_wonder_offchan_packet *packet;
++	unsigned long flags;
++	QDF_STATUS status;
++
++	(void)work;
++	for (;;) {
++		spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++		if (list_empty(&wma_wonder_offchan_queue)) {
++			spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++			break;
++		}
++		packet = list_first_entry(&wma_wonder_offchan_queue,
++					struct wma_wonder_offchan_packet, node);
++		list_del(&packet->node);
++		wma_wonder_offchan.queued--;
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		status = wma_wonder_offchan_send(packet->nbuf, packet->monitor_id,
++				packet->home_frequency, packet->generation,
++				&packet->snapshot, packet->frequency, &packet->params,
++				packet->begin, packet->end, packet->arg);
++		if (!QDF_IS_STATUS_ERROR(status)) {
++			spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++			wma_wonder_offchan.sent++;
++			spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++			atomic64_inc(&injection_submitted);
++			if (packet->params.is_data)
++				atomic64_inc(&injection_data_submitted);
++		}
++		wma_wonder_offchan_packet_done(packet, QDF_IS_STATUS_ERROR(status));
++	}
++}
++
++QDF_STATUS wma_wonder_offchan_tx(qdf_nbuf_t nbuf, uint8_t monitor_id,
++		uint32_t home_frequency, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot,
++		uint32_t frequency, const struct cdp_tx_injection_params *tx_params,
++		bool (*begin)(void *arg, unsigned long *flags),
++		void (*end)(void *arg, unsigned long flags),
++		void (*release)(void *arg), void *arg)
++{
++	struct wma_wonder_offchan_packet *packet;
++	unsigned long flags;
++	QDF_STATUS status;
++
++	if (!nbuf || !snapshot || !snapshot->cookie || !tx_params ||
++	    !begin || !end || !release || !home_frequency || !frequency ||
++	    frequency == home_frequency || frequency > U16_MAX ||
++	    !READ_ONCE(wma_injection_ctx.active))
++		return QDF_STATUS_E_INVAL;
++	/* Reject unrepresentable metadata at the caller's nonblocking boundary. */
++	if (!tx_params->rate_valid || !tx_params->bandwidth_valid ||
++	    tx_params->gi_valid || tx_params->he_ltf || tx_params->no_ack ||
++	    tx_params->tx_flags || tx_params->bw_mask != BIT(2) ||
++	    tx_params->preamble > CDP_INJECTION_VHT)
++		return QDF_STATUS_E_NOSUPPORT;
++	packet = qdf_mem_malloc_atomic(sizeof(*packet));
++	if (!packet)
++		return QDF_STATUS_E_NOMEM;
++	qdf_mem_zero(packet, sizeof(*packet));
++	packet->nbuf = nbuf;
++	packet->monitor_id = monitor_id;
++	packet->home_frequency = home_frequency;
++	packet->generation = generation;
++	packet->snapshot = *snapshot;
++	packet->frequency = frequency;
++	packet->params = *tx_params;
++	packet->begin = begin;
++	packet->end = end;
++	packet->release = release;
++	packet->arg = arg;
++
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	if (!wma_wonder_offchan.registered || !wma_wonder_offchan.accepting) {
++		status = QDF_STATUS_E_CANCELED;
++	} else if (wma_wonder_offchan.queued >= WMA_WONDER_OFFCHAN_SLOTS) {
++		status = QDF_STATUS_E_BUSY;
++	} else if (!try_module_get(THIS_MODULE)) {
++		status = QDF_STATUS_E_CANCELED;
++	} else {
++		list_add_tail(&packet->node, &wma_wonder_offchan_queue);
++		wma_wonder_offchan.queued++;
++		/* Serialize scheduling with stop+cancel, preventing orphaned work. */
++		schedule_work(&wma_wonder_offchan_work);
++		atomic64_inc(&injection_accepted);
++		status = QDF_STATUS_SUCCESS;
++	}
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	if (QDF_IS_STATUS_ERROR(status))
++		qdf_mem_free(packet);
++	return status;
++}
++
++static void wma_wonder_offchan_drop_queue(void)
++{
++	struct wma_wonder_offchan_packet *packet;
++	unsigned long flags;
++
++	for (;;) {
++		spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++		if (list_empty(&wma_wonder_offchan_queue)) {
++			spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++			break;
++		}
++		packet = list_first_entry(&wma_wonder_offchan_queue,
++					struct wma_wonder_offchan_packet, node);
++		list_del(&packet->node);
++		wma_wonder_offchan.queued--;
++		spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		/* These queued frames were never submitted or DMA mapped. */
++		wma_wonder_offchan_packet_done(packet, true);
++	}
++}
++void wma_wonder_offchan_event_stop(void *wma_context)
++{
++	wmi_unified_t wmi = NULL;
++	unsigned long flags;
++	QDF_STATUS status;
++
++	mutex_lock(&wma_injection_ctx.lifecycle_lock);
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	if (wma_wonder_offchan.wma_context == wma_context &&
++	    wma_wonder_offchan.registered) {
++		wma_wonder_offchan.accepting = false;
++		wmi = wma_wonder_offchan.wmi_handle;
++	}
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
++	/* A worker may be awaiting lifecycle_lock; never hold it during join. */
++	if (!wmi)
++		return;
++	cancel_work_sync(&wma_wonder_offchan_work);
++	wma_wonder_offchan_drop_queue();
++	if (wmi) {
++		status = wmi_offchan_data_tx_completion_unregister(wmi);
++		if (QDF_IS_STATUS_ERROR(status))
++			wma_err("Offchan completion unregister failed: %d", status);
++		else {
++			spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++			wma_wonder_offchan.stopped = true;
++			spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++		}
++	}
++}
++
++/* WMI RX workqueue has been drained after event_stop; never infer DMA return. */
++void wma_wonder_offchan_events_drained(void *wma_context)
++{
++	unsigned long flags;
++	unsigned int retained = 0;
++
++	spin_lock_irqsave(&wma_wonder_offchan_lock, flags);
++	if (wma_wonder_offchan.wma_context == wma_context &&
++	    !wma_wonder_offchan.accepting && wma_wonder_offchan.stopped) {
++		retained = wma_wonder_offchan.in_flight;
++		wma_wonder_offchan.registered = false;
++		wma_wonder_offchan.wmi_handle = NULL;
++		wma_wonder_offchan.wma_context = NULL;
++	}
++	spin_unlock_irqrestore(&wma_wonder_offchan_lock, flags);
++	if (retained)
++		wma_err("Retaining %u offchan DMA frames and module pins after event drain; real TX completion unavailable",
++			retained);
++}
+ #endif /* FEATURE_WLAN_WONDER */
+ 
+ static bool wma_injection_wait_for_idle(void)
+@@ -2632,6 +3281,9 @@ bool wma_injection_tx_begin(qdf_nbuf_t nbuf,
+ 	unsigned long flags;
+ 
+ 	guard->held = false;
++#ifdef FEATURE_WLAN_WONDER
++	guard->wonder_held = false;
++#endif
+ 	if (!cdp_nbuf_is_injection(nbuf))
+ 		return true;
+ 	slot = &wma_injection_ctx.slots[desc_id % WMA_INJECTION_SLOT_COUNT];
+@@ -2649,11 +3301,27 @@ bool wma_injection_tx_begin(qdf_nbuf_t nbuf,
+ 		return true;
+ 	guard->held = wlan_mlme_sta_mon_tx_begin(psoc, monitor_vdev_id,
+ 						generation, &guard->flags);
++#ifdef FEATURE_WLAN_WONDER
++	if (guard->held) {
++		guard->wonder_held = wlan_injection_wonder_home_tx_begin_locked(
++				psoc, monitor_vdev_id, generation, &guard->wonder_lease);
++		if (!guard->wonder_held) {
++			wlan_mlme_sta_mon_tx_end(guard->flags);
++			guard->held = false;
++		}
++	}
++#endif
+ 	return guard->held;
+ }
+ 
+ void wma_injection_tx_end(struct cdp_injection_tx_guard *guard)
+ {
++#ifdef FEATURE_WLAN_WONDER
++	if (guard->wonder_held) {
++		wlan_injection_wonder_home_tx_end_locked(&guard->wonder_lease);
++		guard->wonder_held = false;
++	}
++#endif
+ 	if (guard->held) {
+ 		wlan_mlme_sta_mon_tx_end(guard->flags);
+ 		guard->held = false;
+diff --git a/qcacld-3.0/core/wma/src/wma_main.c b/qcacld-3.0/core/wma/src/wma_main.c
+index f40bf8a60ee9fa0faad8465cc10e411e4bccaf30..8a64c1fe77593942d507600db473bd04e028941f 100644
+--- a/qcacld-3.0/core/wma/src/wma_main.c
++++ b/qcacld-3.0/core/wma/src/wma_main.c
+@@ -5228,8 +5228,12 @@ QDF_STATUS wma_wmi_work_close(void)
+ 
+ 	/* remove the wmi work */
+ 	wma_debug("calling wmi_unified_remove_work");
++#ifdef FEATURE_WLAN_WONDER
++	wma_wonder_offchan_event_stop(wma_handle);
++#endif
+ 	wmi_unified_remove_work(wmi_handle);
+ #ifdef FEATURE_WLAN_WONDER
++	wma_wonder_offchan_events_drained(wma_handle);
+ 	wma_wonder_tsf_reset();
+ #endif
+ 

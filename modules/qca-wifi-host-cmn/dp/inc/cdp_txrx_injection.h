@@ -11,6 +11,8 @@ enum cdp_tx_injection_preamble {
 	CDP_INJECTION_OFDM,
 	CDP_INJECTION_CCK,
 	CDP_INJECTION_HT,
+	CDP_INJECTION_VHT,
+	CDP_INJECTION_HE_SU,
 };
 
 struct cdp_tx_injection_params {
@@ -21,10 +23,12 @@ struct cdp_tx_injection_params {
 	uint8_t interface_mac[QDF_MAC_ADDR_SIZE];
 	uint8_t nss_mask;
 	uint8_t preamble;
-	/* HTT bandwidth bitmap: bit 2 = 20 MHz, bit 3 = 40 MHz. */
+	/* HTT bandwidth bitmap: bits 2/3/4 = 20/40/80 MHz. */
 	uint8_t bw_mask;
-	/* HTT guard interval: 0 = 0.4 us, 1 = 0.8 us. */
+	/* HTT guard interval: 0/1/2/3 = 0.4/0.8/1.6/3.2 us. */
 	uint8_t guard_interval;
+	/* HE SU LTF subtype: 0/1/2 = 1x/2x/4x. */
+	uint8_t he_ltf;
 	/* Total attempts, including the initial transmission (1..15). */
 	uint8_t retries;
 	uint8_t tid;
@@ -101,6 +105,44 @@ static inline void wma_injection_power_override(uint8_t vdev_id)
 }
 #endif
 
+#ifdef FEATURE_WLAN_WONDER
+struct cdp_wonder_rx_lease {
+	void *coex;
+	unsigned long flags;
+};
+
+bool wlan_injection_wonder_rx_begin(void *arg, uint8_t monitor_id,
+		uint64_t generation, uint32_t measured_frequency,
+		struct cdp_wonder_rx_lease *lease);
+void wlan_injection_wonder_rx_end(struct cdp_wonder_rx_lease *lease);
+/* Caller already holds MLME TX admission. These take only the dwell lock. */
+bool wlan_injection_wonder_home_tx_begin_locked(void *arg, uint8_t monitor_id,
+		uint64_t generation, struct cdp_wonder_rx_lease *lease);
+void wlan_injection_wonder_home_tx_end_locked(struct cdp_wonder_rx_lease *lease);
+
+bool wlan_injection_wonder_vdev_admission(uint8_t opmode);
+/* Genuine per-PPDU airtime and MAC TSF, never packet-count estimates. */
+void wlan_injection_wonder_note_airtime(uint32_t pdev_id, uint32_t lmac_id,
+				       uint32_t frequency,
+				       uint32_t mac_tsf, bool tx,
+				       uint32_t duration_us);
+
+struct cdp_soc_t;
+#if defined(WIFI_MONITOR_SUPPORT) && defined(WDI_EVENT_ENABLE)
+/* Caller serializes monitor lifetime. Disable relinquishes ownership even
+ * when restoring the firmware upload mask fails, and returns that error.
+ */
+QDF_STATUS dp_mon_wonder_set_airtime(struct cdp_soc_t *soc, uint8_t monitor_id,
+				     bool enabled);
+#else
+static inline QDF_STATUS
+dp_mon_wonder_set_airtime(struct cdp_soc_t *soc, uint8_t monitor_id, bool enabled)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+#endif
+#endif
+
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 bool wma_injection_get_tx_params(qdf_nbuf_t nbuf,
 				struct cdp_tx_injection_params *params);
@@ -108,6 +150,10 @@ bool wma_injection_get_tx_params(qdf_nbuf_t nbuf,
 struct cdp_injection_tx_guard {
 	unsigned long flags;
 	bool held;
+#ifdef FEATURE_WLAN_WONDER
+	struct cdp_wonder_rx_lease wonder_lease;
+	bool wonder_held;
+#endif
 };
 
 bool wma_injection_tx_begin(qdf_nbuf_t nbuf,

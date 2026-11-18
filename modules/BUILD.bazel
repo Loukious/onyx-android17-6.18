@@ -43,6 +43,7 @@ _SHARED_WLAN_DEPS_1 = [
     ":qmi_helpers",
     ":icnss2",
     ":onyx_relay",
+    ":wonder_headers",
 ]
 
 _SHARED_WLAN_DEPS_1_DDK = [
@@ -69,6 +70,7 @@ _SHARED_WLAN_DEPS_1_DDK = [
     ":qmi_helpers",
     ":icnss2",
     ":onyx_relay",
+    ":wonder_headers",
 ]
 
 _SHARED_IPCLITE_DEPS_2 = [
@@ -631,6 +633,7 @@ _SHARED_WLAN_COPTS_5 = [
     "$(location qcacld-3.0/configs/default_config.h)",
     "-include",
     "$(location :qcom/opensource/dataipa/config/dataipa_vendor.h)",
+    "-DFEATURE_WLAN_WONDER",
 ]
 
 ddk_headers(
@@ -7764,6 +7767,12 @@ ddk_module(
         "qcacld-3.0/core/pld/src/pld_ipci.c",
         "qcacld-3.0/configs/default_config.h",
         ":qcom/opensource/dataipa/config/dataipa_vendor.h",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_coex.c",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_dwell.c",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c",
+        "qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c",
+        "qcacld-3.0/core/wma/src/wma_wonder_tsf.c",
     ],
     kconfig = "Kconfig",
     defconfig = "platform_defconfig",
@@ -7793,6 +7802,7 @@ ddk_module(
         ":onyx_relay",
         ":wlan_main_extra_0",
         ":wlan_main_extra_1",
+        ":wonder_headers",
     ],
     copts = _SHARED_WLAN_COPTS_5,
     visibility = ["//visibility:public"],
@@ -10117,6 +10127,34 @@ ddk_module(
     kernel_build = "//common:kernel_aarch64",
 )
 
+ddk_headers(
+    name = "wonder_headers",
+    hdrs = glob(["wonder/include/**/*.h"]),
+    includes = ["wonder/include"],
+    visibility = ["//visibility:public"],
+)
+
+ddk_module(
+    name = "wonder",
+    srcs = glob(["wonder/**/*.h"]) + [
+        "wonder/band_config.c",
+        "wonder/mac80211.c",
+        "wonder/mac80211_txs.c",
+        "wonder/main.c",
+        "wonder/nl80211_ven_cmd.c",
+        "wonder/ssr.c",
+        "wonder/wondertap.c",
+        "wonder/debugfs.c",
+    ],
+    out = "wonder.ko",
+    kconfig = "wonder/Kconfig",
+    defconfig = "wonder/wonder_fragment",
+    deps = [":wonder_headers"],
+    copts = ["-DDYNAMIC_DEBUG_MODULE"],
+    visibility = ["//visibility:public"],
+    kernel_build = "//common:kernel_aarch64",
+)
+
 exports_files(["kmi-symbols", "native-kmi-symbols", "native_wireless.fragment"])
 
 filegroup(
@@ -10516,6 +10554,7 @@ kernel_module_group(
         ":mtd",
         ":block2mtd",
         ":mtdoops",
+        ":wonder",
     ],
 )
 

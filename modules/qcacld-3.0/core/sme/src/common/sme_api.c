@@ -1,3 +1,4 @@
+#include <cdp_txrx_injection.h>
 /*
  * Copyright (c) 2012-2021 The Linux Foundation. All rights reserved.
  * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
@@ -5156,6 +5157,11 @@ struct wlan_objmgr_vdev
 {
 	struct mac_context *mac_ctx = MAC_CONTEXT(mac_handle);
 	struct wlan_objmgr_vdev *vdev;
+
+#ifdef FEATURE_WLAN_WONDER
+	if (!wlan_injection_wonder_vdev_admission(vdev_params->opmode))
+		return NULL;
+#endif
 
 	sme_debug("addr:"QDF_MAC_ADDR_FMT" opmode:%d",
 		  QDF_MAC_ADDR_REF(vdev_params->macaddr),

@@ -15,6 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 #include <dp_types.h>
+#include <cdp_txrx_injection.h>
 #include "dp_rx.h"
 #include "dp_tx.h"
 #include "dp_peer.h"
@@ -48,6 +49,127 @@
 
 #define DP_INTR_POLL_TIMER_MS	5
 #define INVALID_FREE_BUFF 0xffffffff
+
+#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE)
+QDF_STATUS dp_mon_wonder_set_airtime(struct cdp_soc_t *soc_hdl,
+				     uint8_t monitor_id, bool enabled)
+{
+	struct dp_soc *soc;
+	struct dp_vdev *vdev;
+	struct dp_pdev *pdev;
+	QDF_STATUS status;
+
+	if (!soc_hdl)
+		return QDF_STATUS_E_INVAL;
+	soc = cdp_soc_t_to_dp_soc(soc_hdl);
+	if (!soc->monitor_soc ||
+	    hal_get_target_type(soc->hal_soc) != TARGET_TYPE_WCN7750 ||
+	    dp_mon_mode_local_pkt_capture(soc))
+		return QDF_STATUS_E_NOSUPPORT;
+	vdev = dp_vdev_get_ref_by_id(soc, monitor_id, DP_MOD_ID_CDP);
+	if (!vdev)
+		return QDF_STATUS_E_INVAL;
+	pdev = vdev->pdev;
+	if (!pdev || !pdev->monitor_pdev ||
+	    vdev->opmode != wlan_op_mode_monitor) {
+		status = QDF_STATUS_E_INVAL;
+		goto release;
+	}
+	if (enabled && !pdev->monitor_pdev->monitor_configured) {
+		status = QDF_STATUS_E_AGAIN;
+		goto release;
+	}
+	status = dp_htt_wonder_set_airtime(pdev, monitor_id, enabled);
+release:
+	dp_vdev_unref_delete(soc, vdev, DP_MOD_ID_CDP);
+	return status;
+}
+
+static void dp_mon_wonder_note_ppdu(struct dp_pdev *pdev, uint32_t mac_id,
+				   uint32_t frequency, uint64_t tsf,
+				   uint32_t ppdu_id, bool tx,
+				   uint32_t duration_us)
+{
+	struct dp_mon_pdev *mon_pdev = pdev->monitor_pdev;
+	unsigned int direction = tx ? 1 : 0;
+	bool report = false;
+
+	if (!mon_pdev || mac_id >= MAX_NUM_LMAC_HW || !frequency ||
+	    !duration_us || !READ_ONCE(mon_pdev->wonder_airtime_enabled))
+		return;
+	qdf_spin_lock_bh(&mon_pdev->ppdu_stats_lock);
+	/* Common TX TLVs and RX status rings are ordered within each MAC.
+	 * Reject duplicate and stale observations without multiplying MU users.
+	 */
+	if (mon_pdev->wonder_airtime_enabled &&
+	    (!mon_pdev->wonder_airtime_last[mac_id][direction].valid ||
+	     tsf > mon_pdev->wonder_airtime_last[mac_id][direction].tsf)) {
+		mon_pdev->wonder_airtime_last[mac_id][direction].valid = true;
+		mon_pdev->wonder_airtime_last[mac_id][direction].tsf = tsf;
+		mon_pdev->wonder_airtime_last[mac_id][direction].ppdu_id = ppdu_id;
+		report = true;
+	}
+	qdf_spin_unlock_bh(&mon_pdev->ppdu_stats_lock);
+	if (report)
+		wlan_injection_wonder_note_airtime(pdev->pdev_id, mac_id, frequency,
+					       (uint32_t)tsf, tx, duration_us);
+}
+
+void dp_mon_wonder_rx_ppdu(struct dp_pdev *pdev, uint32_t mac_id,
+			 struct hal_rx_ppdu_info *ppdu_info)
+{
+	dp_mon_wonder_note_ppdu(pdev, mac_id, ppdu_info->rx_status.chan_freq,
+			       ppdu_info->rx_status.tsft, ppdu_info->com_info.ppdu_id,
+			       false, ppdu_info->rx_status.duration);
+}
+
+void dp_mon_wonder_tx_ppdu(struct htt_soc *soc, uint32_t *msg_word,
+			 qdf_nbuf_t htt_t2h_msg)
+{
+	struct dp_pdev *pdev;
+	uint32_t remaining, length, tag, frequency, duration, ppdu_id, mac_id;
+	uint64_t tsf;
+	uint8_t pdev_id;
+
+	if (qdf_nbuf_len(htt_t2h_msg) < HTT_T2H_PPDU_STATS_IND_HDR_SIZE)
+		return;
+	remaining = HTT_T2H_PPDU_STATS_PAYLOAD_SIZE_GET(*msg_word);
+	if (remaining > qdf_nbuf_len(htt_t2h_msg) - HTT_T2H_PPDU_STATS_IND_HDR_SIZE)
+		return;
+	pdev_id = dp_get_host_pdev_id_for_target_pdev_id(soc->dp_soc,
+				HTT_T2H_PPDU_STATS_PDEV_ID_GET(*msg_word));
+	pdev = dp_get_pdev_from_soc_pdev_id_wifi3(soc->dp_soc, pdev_id);
+	if (!pdev || !pdev->monitor_pdev ||
+	    !READ_ONCE(pdev->monitor_pdev->wonder_airtime_enabled))
+		return;
+	mac_id = HTT_T2H_PPDU_STATS_MAC_ID_GET(*msg_word);
+	ppdu_id = HTT_T2H_PPDU_STATS_PPDU_ID_GET(msg_word[1]);
+	msg_word += HTT_T2H_PPDU_STATS_IND_HDR_SIZE / sizeof(*msg_word);
+	while (remaining >= sizeof(*msg_word)) {
+		tag = HTT_STATS_TLV_TAG_GET(*msg_word);
+		length = HTT_STATS_TLV_LENGTH_GET(*msg_word) + sizeof(*msg_word);
+		if (length > remaining || length % sizeof(*msg_word))
+			return;
+		if (tag == HTT_PPDU_STATS_COMMON_TLV) {
+			/* Need the real PHY duration and both MAC timestamp halves. */
+			if (length < (HTT_GET_STATS_CMN_INDEX(START_TSTMP_U32_US) + 1) *
+				     sizeof(*msg_word))
+				return;
+			frequency = HTT_PPDU_STATS_COMMON_TLV_CHAN_MHZ_GET(
+				msg_word[HTT_GET_STATS_CMN_INDEX(CHAN_MHZ_PHY_MODE)]);
+			duration = HTT_PPDU_STATS_COMMON_TLV_PHY_PPDU_TX_TIME_US_GET(
+				msg_word[HTT_GET_STATS_CMN_INDEX(RESV_NUM_UL_BEAM)]);
+			tsf = msg_word[HTT_GET_STATS_CMN_INDEX(START_TSTMP_U32_US)];
+			tsf = (tsf << 32) |
+				msg_word[HTT_GET_STATS_CMN_INDEX(START_TSTMP_L32_US)];
+			dp_mon_wonder_note_ppdu(pdev, mac_id, frequency, tsf,
+					       ppdu_id, true, duration);
+		}
+		remaining -= length;
+		msg_word += length / sizeof(*msg_word);
+	}
+}
+#endif
 
 #if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
 bool dp_mon_sta_coex_supported(struct cdp_soc_t *soc_hdl)

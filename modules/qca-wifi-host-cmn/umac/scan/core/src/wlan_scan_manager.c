@@ -36,6 +36,7 @@
 #endif
 #include <wlan_dfs_utils_api.h>
 #include <cfg_scan.h>
+#include "wlan_mlme_sta_mon.h"
 
 QDF_STATUS
 scm_scan_free_scan_request_mem(struct scan_start_request *req)
@@ -252,13 +253,37 @@ scm_update_last_scan_time(struct scan_start_request *req)
 	return QDF_STATUS_SUCCESS;
 }
 
+static void scm_scan_not_submitted(struct scan_start_request *req)
+{
+	struct scan_event event = {0};
+
+	event.type = SCAN_EVENT_TYPE_COMPLETED;
+	event.vdev_id = req->scan_req.vdev_id;
+	event.requester = req->scan_req.scan_req_id;
+	event.scan_id = req->scan_req.scan_id;
+	wlan_mlme_sta_mon_scan_not_submitted(wlan_vdev_get_psoc(req->vdev),
+					    &event);
+}
+
 static QDF_STATUS
 scm_activate_scan_request(struct scan_start_request *req)
 {
 	QDF_STATUS status;
 
-	status = tgt_scan_start(req);
+	if (!wlan_mlme_sta_mon_scan_activate(wlan_vdev_get_psoc(req->vdev),
+			req->scan_req.vdev_id, req->scan_req.scan_id,
+			req->scan_req.scan_req_id,
+			req->scan_req.chan_list.chan[0].freq,
+			req->scan_req.chan_list.num_chan,
+			req->scan_req.scan_f_offchan_data_tx,
+			req->sta_mon_reserved))
+		status = QDF_STATUS_E_BUSY;
+	else {
+		req->target_start_attempted = true;
+		status = tgt_scan_start(req);
+	}
 	if (status != QDF_STATUS_SUCCESS) {
+		scm_scan_not_submitted(req);
 		scm_err("tgt_scan_start failed, status: %d", status);
 		/* scan could not be started and hence
 		 * we will not receive any completions.
@@ -338,6 +363,8 @@ scm_scan_serialize_callback(struct wlan_serialization_command *cmd,
 		 * notify registered scan event handlers with
 		 * status completed and reason cancelled.
 		 */
+		if (!req->target_start_attempted)
+			scm_scan_not_submitted(req);
 		status = scm_post_internal_scan_complete_event(req,
 				SCAN_REASON_CANCELLED);
 		break;
@@ -1404,7 +1431,12 @@ scm_scan_start_req(struct scheduler_msg *msg)
 		goto err;
 	}
 
-	scm_scan_req_update_params(req->vdev, req, scan_obj);
+	/* A private reservation carries an exact passive single-channel request.
+	 * Global custom/aux/low-latency scan settings must not rewrite its channel
+	 * or suppress public action reception. Activation validates it again.
+	 */
+	if (!req->sta_mon_reserved)
+		scm_scan_req_update_params(req->vdev, req, scan_obj);
 	scm_print_scan_req_info(&req->scan_req);
 
 	if (!req->scan_req.chan_list.num_chan) {
@@ -1440,11 +1472,13 @@ scm_scan_start_req(struct scheduler_msg *msg)
 		break;
 	default:
 		scm_debug("ser cmd status %d", ser_cmd_status);
+		status = QDF_STATUS_E_FAILURE;
 		goto err;
 	}
 
 	return status;
 err:
+	scm_scan_not_submitted(req);
 	/*
 	 * notify registered scan event handlers
 	 * about internal error
@@ -1894,6 +1928,7 @@ QDF_STATUS scm_scan_start_flush_callback(struct scheduler_msg *msg)
 	}
 
 	req = msg->bodyptr;
+	scm_scan_not_submitted(req);
 	scm_post_internal_scan_complete_event(req, SCAN_REASON_CANCELLED);
 	wlan_objmgr_vdev_release_ref(req->vdev, WLAN_SCAN_ID);
 	scm_scan_free_scan_request_mem(req);

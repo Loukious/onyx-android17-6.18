@@ -455,11 +455,50 @@ static QDF_STATUS sta_mon_scan_start_flush(struct scheduler_msg *msg)
 	return scm_scan_start_flush_callback(msg);
 }
 
+static void sta_mon_scan_rejected(struct scan_start_request *req)
+{
+	struct scan_event event = {0};
+
+	event.type = SCAN_EVENT_TYPE_COMPLETED;
+	event.reason = SCAN_REASON_INTERNAL_FAILURE;
+	event.vdev_id = req->scan_req.vdev_id;
+	event.requester = req->scan_req.scan_req_id;
+	event.scan_id = req->scan_req.scan_id;
+	wlan_mlme_sta_mon_scan_not_submitted(wlan_vdev_get_psoc(req->vdev),
+					    &event);
+}
+
+static QDF_STATUS sta_mon_reserved_scan_start_req(struct scheduler_msg *msg)
+{
+	struct scan_start_request *req = msg->bodyptr;
+	struct wlan_objmgr_psoc *psoc = wlan_vdev_get_psoc(req->vdev);
+	QDF_STATUS status;
+
+	status = wlan_objmgr_psoc_try_get_ref(psoc, WLAN_SCAN_ID);
+	if (QDF_IS_STATUS_ERROR(status)) {
+		wlan_mlme_sta_mon_admission_end(psoc);
+		return scm_scan_start_flush_callback(msg);
+	}
+	status = scm_scan_start_req(msg);
+	wlan_mlme_sta_mon_admission_end(psoc);
+	wlan_objmgr_psoc_release_ref(psoc, WLAN_SCAN_ID);
+	return status;
+}
+
+static QDF_STATUS sta_mon_reserved_scan_start_flush(struct scheduler_msg *msg)
+{
+	struct scan_start_request *req = msg->bodyptr;
+
+	wlan_mlme_sta_mon_admission_end(wlan_vdev_get_psoc(req->vdev));
+	return scm_scan_start_flush_callback(msg);
+}
+
 QDF_STATUS wlan_scan_start(struct scan_start_request *req)
 {
 	struct scheduler_msg msg = {0};
 	struct wlan_objmgr_psoc *psoc;
 	QDF_STATUS status;
+	bool reserved;
 
 	if (!req || !req->vdev) {
 		scm_err("req or vdev within req is NULL");
@@ -468,12 +507,19 @@ QDF_STATUS wlan_scan_start(struct scan_start_request *req)
 	}
 
 	psoc = wlan_vdev_get_psoc(req->vdev);
-	if (!wlan_mlme_sta_mon_admission_begin(psoc)) {
+	if (!wlan_mlme_sta_mon_scan_admission_begin(psoc,
+			req->scan_req.vdev_id, req->scan_req.scan_id,
+			req->scan_req.scan_req_id,
+			req->scan_req.chan_list.chan[0].freq,
+			req->scan_req.chan_list.num_chan,
+			req->scan_req.scan_f_offchan_data_tx, &reserved)) {
 		scm_scan_free_scan_request_mem(req);
 		return QDF_STATUS_E_BUSY;
 	}
 	if (!scm_is_scan_allowed(req->vdev)) {
 		scm_err_rl("scan disabled, rejecting the scan req");
+		if (reserved)
+			sta_mon_scan_rejected(req);
 		wlan_mlme_sta_mon_admission_end(psoc);
 		scm_scan_free_scan_request_mem(req);
 		return QDF_STATUS_E_AGAIN;
@@ -487,22 +533,31 @@ QDF_STATUS wlan_scan_start(struct scan_start_request *req)
 	status = wlan_objmgr_vdev_try_get_ref(req->vdev, WLAN_SCAN_ID);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		scm_info("unable to get reference");
+		if (reserved)
+			sta_mon_scan_rejected(req);
 		wlan_mlme_sta_mon_admission_end(psoc);
 		scm_scan_free_scan_request_mem(req);
 		return status;
 	}
 
 	msg.bodyptr = req;
-	msg.callback = sta_mon_scan_start_req;
-	msg.flush_callback = sta_mon_scan_start_flush;
+	req->sta_mon_reserved = reserved;
+	msg.callback = reserved ? sta_mon_reserved_scan_start_req :
+				 sta_mon_scan_start_req;
+	msg.flush_callback = reserved ? sta_mon_reserved_scan_start_flush :
+				       sta_mon_scan_start_flush;
 	/* The scheduler callback owns admission until scan serialization. */
-	wlan_mlme_sta_mon_update_begin(psoc);
+	if (!reserved)
+		wlan_mlme_sta_mon_update_begin(psoc);
 
 	status = scheduler_post_message(QDF_MODULE_ID_OS_IF,
 					QDF_MODULE_ID_SCAN,
 					QDF_MODULE_ID_OS_IF, &msg);
 	if (QDF_IS_STATUS_ERROR(status)) {
-		wlan_mlme_sta_mon_update_end(psoc);
+		if (reserved)
+			sta_mon_scan_rejected(req);
+		else
+			wlan_mlme_sta_mon_update_end(psoc);
 		wlan_mlme_sta_mon_admission_end(psoc);
 		wlan_objmgr_vdev_release_ref(req->vdev, WLAN_SCAN_ID);
 		scm_scan_free_scan_request_mem(req);

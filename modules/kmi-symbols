@@ -23,3 +23,7 @@
   hvc_backend_poll
   hvc_backend_publish
   hvc_backend_remove
+  __auxiliary_device_add
+  __auxiliary_driver_register
+  auxiliary_device_init
+  auxiliary_driver_unregister

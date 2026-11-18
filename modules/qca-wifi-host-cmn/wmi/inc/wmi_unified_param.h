@@ -1944,7 +1944,7 @@ struct wmi_mgmt_params {
  * @vdev_id: vdev id
  * @tx_params_valid: Flag that indicates if TX params are valid
  * @chanfreq: channel frequency
- * @desc_id: descriptor id relyaed back by target
+ * @desc_id: descriptor ID, bounded to the stock target's 16-bit echo
  * @pdata: frame data
  * @macaddr: macaddr of peer
  * @qdf_ctx: qdf context for qdf_nbuf_map
@@ -1956,11 +1956,25 @@ struct wmi_offchan_data_tx_params {
 	uint8_t vdev_id;
 	bool tx_params_valid;
 	uint16_t chanfreq;
-	uint16_t desc_id;
+	uint32_t desc_id;
 	void *pdata;
 	uint8_t *macaddr;
 	void *qdf_ctx;
 	struct tx_send_params tx_param;
+};
+
+/**
+ * struct wmi_host_offchan_data_tx_compl_event - off-channel TX completion
+ * @desc_id: descriptor ID supplied by the sender
+ * @status: target TX completion status
+ * @pdev_id: host pdev ID of the completing MAC
+ *
+ * The off-channel completion does not establish a valid hardware PPDU ID.
+ */
+struct wmi_host_offchan_data_tx_compl_event {
+	uint32_t desc_id;
+	uint32_t status;
+	uint32_t pdev_id;
 };
 
 /**

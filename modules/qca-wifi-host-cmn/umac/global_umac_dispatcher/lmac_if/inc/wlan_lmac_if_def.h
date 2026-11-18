@@ -2920,6 +2920,11 @@ struct wlan_lmac_if_mlme_rx_ops {
 	QDF_STATUS (*vdev_mgr_csa_received)(struct wlan_objmgr_psoc *psoc,
 					    uint8_t vdev_id,
 					    struct csa_offload_params *csa_event);
+	/* Optional raw injection owner, invoked only for genuine FW DELETE events.
+	 * Its vdev has no objmgr response timer; false preserves normal MLME flow.
+	 */
+	bool (*raw_injection_delete_response)(struct wlan_objmgr_psoc *psoc,
+					      uint8_t vdev_id);
 };
 
 #ifdef WLAN_SUPPORT_GREEN_AP

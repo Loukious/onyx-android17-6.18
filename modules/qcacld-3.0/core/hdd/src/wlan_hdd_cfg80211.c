@@ -26369,6 +26369,11 @@ static int __wlan_hdd_cfg80211_change_iface(struct wiphy *wiphy,
 
 	hdd_enter();
 
+#ifdef FEATURE_WLAN_WONDER
+	if (READ_ONCE(adapter->wonder_owned))
+		return -EBUSY;
+#endif
+
 	if (hdd_get_conparam() == QDF_GLOBAL_FTM_MODE) {
 		hdd_err("Command not allowed in FTM mode");
 		return -EINVAL;

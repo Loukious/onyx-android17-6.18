@@ -246,6 +246,8 @@ static void radiotap_fixtures(void)
     b[9] = 0;
     CHECK(parse(b, n, 0, &p, NULL, NULL) == 0 && p.guard_interval == 1 && p.bw_mask == 4);
     b[10] = 8;
+    CHECK(parse(b, n, 0, &p, NULL, NULL) == 0 && p.nss_mask == 2 && p.mcs_mask == 1);
+    b[10] = 16; /* The Onyx transport supports at most two streams. */
     CHECK(parse(b, n, 0, &p, NULL, NULL) == -EOPNOTSUPP);
     b[10] = 7; b[8] |= 8; b[9] = 8; /* Greenfield. */
     CHECK(parse(b, n, 0, &p, NULL, NULL) == -EOPNOTSUPP);
@@ -338,6 +340,106 @@ static void metadata_fixtures(void)
     queued_nbuf = NULL;
 }
 
+static void valid_he(uint8_t *he)
+{
+    memset(he, 0, sizeof(struct ieee80211_radiotap_he));
+    put16(he, IEEE80211_RADIOTAP_HE_DATA1_DATA_MCS_KNOWN |
+              IEEE80211_RADIOTAP_HE_DATA1_BW_RU_ALLOC_KNOWN);
+    put16(he + 2, IEEE80211_RADIOTAP_HE_DATA2_GI_KNOWN);
+    put16(he + 4, 7 << 8);
+    put16(he + 8, 2 | (1 << 4) | (2 << 6)); /* HE80, 1.6 us, 2x LTF. */
+    put16(he + 10, 2);
+}
+
+static void he_radiotap_fixtures(void)
+{
+    uint8_t b[128] = {0};
+    struct cdp_tx_injection_params p;
+    unsigned int n;
+
+    put16(b + 2, 20); put32(b + 4, BIT(IEEE80211_RADIOTAP_HE));
+    valid_he(b + 8);
+    n = 20 + frame(b + 20, 0x0108, true);
+    for (unsigned int skew = 0; skew < 8; skew++) {
+        CHECK(parse(b, n, skew, &p, NULL, NULL) == 0);
+        CHECK(p.rate_valid && p.preamble == CDP_INJECTION_HE_SU);
+        CHECK(p.mcs_mask == BIT(7) && p.nss_mask == BIT(1));
+        CHECK(p.bandwidth_valid && p.bw_mask == BIT(4));
+        CHECK(p.gi_valid && p.guard_interval == 2 && p.he_ltf == 1);
+    }
+    /* A FLAGS byte makes the HE field require header-relative padding. */
+    memset(b, 0, sizeof(b));
+    put16(b + 2, 22);
+    put32(b + 4, BIT(IEEE80211_RADIOTAP_FLAGS) | BIT(IEEE80211_RADIOTAP_HE));
+    b[9] = 0xa5;
+    valid_he(b + 10);
+    n = 22 + frame(b + 22, 0x0108, true);
+    for (unsigned int skew = 0; skew < 8; skew++)
+        CHECK(parse(b, n, skew, &p, NULL, NULL) == 0 && p.rate_valid);
+    for (unsigned int length = 8; length < 22; length++) {
+        put16(b + 2, length);
+        CHECK(parse(b, n, length & 1, &p, NULL, NULL) == -EINVAL);
+    }
+    put16(b + 2, 22);
+
+    /* All six HE words remain subject to the production SU validation. */
+    const struct { unsigned int offset; uint16_t value; } invalid[] = {
+        {0, 0}, {0, IEEE80211_RADIOTAP_HE_DATA1_DATA_MCS_KNOWN |
+                       IEEE80211_RADIOTAP_HE_DATA1_BW_RU_ALLOC_KNOWN | 1},
+        {2, 0}, {4, 12 << 8}, {6, 1},
+        {8, 3 | (1 << 4) | (2 << 6)},
+        {8, 2 | (3 << 4) | (2 << 6)},
+        {8, 2 | (1 << 4) | (1 << 6)},
+        {10, 0}, {10, 3}, {10, 0x12},
+    };
+    for (unsigned int i = 0; i < ARRAY_SIZE(invalid); i++) {
+        valid_he(b + 10);
+        put16(b + 10 + invalid[i].offset, invalid[i].value);
+        CHECK(parse(b, n, i & 1, &p, NULL, NULL) == -EOPNOTSUPP);
+    }
+
+    /* Empty extension words keep HE in the first standard namespace. */
+    memset(b, 0, sizeof(b));
+    put16(b + 2, 24);
+    put32(b + 4, BIT(IEEE80211_RADIOTAP_HE) | BIT(IEEE80211_RADIOTAP_EXT));
+    valid_he(b + 12);
+    n = 24 + frame(b + 24, 0x0108, true);
+    CHECK(parse(b, n, 1, &p, NULL, NULL) == 0 && p.rate_valid);
+    put32(b + 8, BIT(IEEE80211_RADIOTAP_HE)); /* Bit 55 has no HE semantics. */
+    CHECK(parse(b, n, 0, &p, NULL, NULL) == -EOPNOTSUPP);
+
+    /* A reset after HE must not hide later TX settings or malformed data. */
+    put32(b + 4, BIT(IEEE80211_RADIOTAP_HE) |
+                 BIT(IEEE80211_RADIOTAP_RADIOTAP_NAMESPACE) |
+                 BIT(IEEE80211_RADIOTAP_EXT));
+    put32(b + 8, BIT(IEEE80211_RADIOTAP_TX_FLAGS) |
+                 BIT(IEEE80211_RADIOTAP_DATA_RETRIES));
+    put16(b + 2, 27); put16(b + 24, IEEE80211_RADIOTAP_F_TX_NOACK); b[26] = 9;
+    n = 27 + frame(b + 27, 0x0108, true);
+    CHECK(parse(b, n, 1, &p, NULL, NULL) == 0 && p.rate_valid);
+    CHECK(p.no_ack && p.tx_flags == IEEE80211_RADIOTAP_F_TX_NOACK && p.retries == 1);
+    put16(b + 2, 25);
+    CHECK(parse(b, n, 0, &p, NULL, NULL) == -EINVAL);
+    put16(b + 2, 27); put16(b + 24, 1);
+    CHECK(parse(b, n, 1, &p, NULL, NULL) == -EOPNOTSUPP);
+    put32(b + 8, BIT(IEEE80211_RADIOTAP_RATE)); b[24] = 12;
+    CHECK(parse(b, n, 0, &p, NULL, NULL) == -EINVAL); /* Conflicting rates. */
+    put32(b + 8, BIT(IEEE80211_RADIOTAP_HE));
+    put16(b + 2, 36); valid_he(b + 24);
+    n = 36 + frame(b + 36, 0x0108, true);
+    CHECK(parse(b, n, 1, &p, NULL, NULL) == -EINVAL); /* Duplicate HE. */
+    put32(b + 8, BIT(24));
+    CHECK(parse(b, n, 0, &p, NULL, NULL) == -EOPNOTSUPP);
+
+    /* HE after a reset follows the TSFT's alignment and payload, not bitmaps. */
+    put32(b + 4, BIT(IEEE80211_RADIOTAP_TSFT) |
+                 BIT(IEEE80211_RADIOTAP_RADIOTAP_NAMESPACE) |
+                 BIT(IEEE80211_RADIOTAP_EXT));
+    put32(b + 8, BIT(IEEE80211_RADIOTAP_HE));
+    memset(b + 12, 0, 12); valid_he(b + 24);
+    CHECK(parse(b, n, 1, &p, NULL, NULL) == 0 && p.rate_valid);
+}
+
 static void malformed_corpus(void)
 {
     uint8_t seed[64] = {0}, b[128];
@@ -361,13 +463,17 @@ static void malformed_corpus(void)
     }
 }
 
+/* EXTRA_PACKET_HELPERS */
+
 int main(void)
 {
     protocol_fixtures();
     control_fixtures();
     radiotap_fixtures();
     metadata_fixtures();
+    he_radiotap_fixtures();
     malformed_corpus();
+    /* EXTRA_PACKET_TESTS */
     printf("%u\n", cases);
     return 0;
 }

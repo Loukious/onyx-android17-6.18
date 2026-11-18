@@ -1,0 +1,357 @@
+diff --git a/qcacld-3.0/core/wma/src/wma_data.c b/qcacld-3.0/core/wma/src/wma_data.c
+index d4d435930..4205636c8 100644
+--- a/qcacld-3.0/core/wma/src/wma_data.c
++++ b/qcacld-3.0/core/wma/src/wma_data.c
+@@ -222,6 +222,10 @@ struct wma_injection_helper {
+ 	uint8_t peer_addr[QDF_MAC_ADDR_SIZE];
+ 	uint8_t max_nss;
+ 	uint8_t channel_bw_mask;
++	uint32_t phy_mode;
++	bool ht_supported;
++	bool vht_supported;
++	bool he_supported;
+ #ifdef FEATURE_WLAN_WONDER
+ 	uint64_t wonder_cookie;
+ 	bool wonder_owned;
+@@ -1205,6 +1209,38 @@ static uint8_t wma_injection_channel_bw_mask(enum phy_ch_width width)
+ 	}
+ }
+ 
++static void wma_injection_set_phy_limits(struct wma_injection_helper *helper,
++					uint32_t mode, bool ht, bool vht)
++{
++	helper->phy_mode = mode;
++	helper->ht_supported = ht && helper->chanfreq < 5925;
++	helper->vht_supported = vht && helper->chanfreq < 5925 &&
++		mode >= WMI_HOST_MODE_11AC_VHT20 && mode < WMI_HOST_MODE_UNKNOWN;
++	switch (mode) {
++	case WMI_HOST_MODE_11AX_HE20:
++	case WMI_HOST_MODE_11AX_HE40:
++	case WMI_HOST_MODE_11AX_HE80:
++	case WMI_HOST_MODE_11AX_HE80_80:
++	case WMI_HOST_MODE_11AX_HE160:
++	case WMI_HOST_MODE_11AX_HE20_2G:
++	case WMI_HOST_MODE_11AX_HE40_2G:
++	case WMI_HOST_MODE_11AX_HE80_2G:
++#ifdef WLAN_FEATURE_11BE
++	case WMI_HOST_MODE_11BE_EHT20:
++	case WMI_HOST_MODE_11BE_EHT40:
++	case WMI_HOST_MODE_11BE_EHT80:
++	case WMI_HOST_MODE_11BE_EHT160:
++	case WMI_HOST_MODE_11BE_EHT320:
++	case WMI_HOST_MODE_11BE_EHT20_2G:
++	case WMI_HOST_MODE_11BE_EHT40_2G:
++#endif
++		helper->he_supported = true;
++		break;
++	default:
++		helper->he_supported = false;
++	}
++}
++
+ static void wma_injection_select_mac(uint8_t *helper_mac,
+ 				     const uint8_t *interface_mac,
+ 				     const uint8_t *monitor_mac)
+@@ -1316,6 +1352,7 @@ static bool wma_injection_destroy_native(tp_wma_handle wma)
+ 	if (helper->start_requested &&
+ 	    !wait_for_completion_timeout(&helper->start_done, 6 * HZ))
+ 		return false;
++	wma_wonder_clear_helper(wma);
+ 	if (helper->wmi_started || helper->wmi_up) {
+ 		if (!helper->stop_requested) {
+ 			reinit_completion(&helper->stop_done);
+@@ -1342,7 +1379,6 @@ static bool wma_injection_destroy_native(tp_wma_handle wma)
+ 				    helper->vdev_id);
+ 		helper->flow_pool_mapped = false;
+ 	}
+-	wma_wonder_clear_helper(wma);
+ 	helper->delete_requested = true;
+ 	status = sme_vdev_delete(cds_get_context(QDF_MODULE_ID_SME), vdev);
+ 	if (QDF_IS_STATUS_ERROR(status))
+@@ -1467,6 +1503,8 @@ wma_injection_native_channel(tp_wma_handle wma,
+ 	start->channel.allow_ht = owner_mlme->proto.ht_info.allow_ht;
+ 	start->channel.allow_vht = owner_mlme->proto.vht_info.allow_vht;
+ 	start->channel.phy_mode = owner_mlme->mgmt.generic.phy_mode;
++	wma_injection_set_phy_limits(helper, start->channel.phy_mode,
++				     start->channel.allow_ht, start->channel.allow_vht);
+ 	start->channel.cfreq1 = channel->ch_cfreq1;
+ 	start->channel.cfreq2 = channel->ch_cfreq2;
+ 	start->channel.maxpower = power_limit;
+@@ -1952,6 +1990,8 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
+ 	start.channel.allow_vht = monitor_mlme->proto.vht_info.allow_vht;
+ 	/* MLME stores the firmware/WMI phymode required by vdev_start. */
+ 	start.channel.phy_mode = monitor_mlme->mgmt.generic.phy_mode;
++	wma_injection_set_phy_limits(helper, start.channel.phy_mode,
++				     start.channel.allow_ht, start.channel.allow_vht);
+ 	start.channel.cfreq1 = monitor_chan->ch_cfreq1 ?: chanfreq;
+ 	start.channel.cfreq2 = monitor_chan->ch_cfreq2;
+ 	start.channel.maxpower = monitor_mlme->mgmt.generic.maxpower;
+@@ -2118,6 +2158,44 @@ out:
+ 	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
+ 	return status;
+ }
++
++QDF_STATUS wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot,
++		struct wma_wonder_helper_limits *limits)
++{
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++	struct wma_injection_helper_snapshot current;
++	tp_wma_handle wma;
++	QDF_STATUS status = QDF_STATUS_E_AGAIN;
++
++	if (!snapshot || !interface_mac || !limits ||
++	    !READ_ONCE(wma_injection_ctx.active))
++		return QDF_STATUS_E_INVAL;
++	mutex_lock(&wma_injection_ctx.lifecycle_lock);
++	mutex_lock(&wma_injection_ctx.helper_lock);
++	wma = wma_injection_ctx.wma;
++	if (!wma || !wma_injection_ctx.active || wma_injection_ctx.paused ||
++	    !helper->wonder_owned || helper->wonder_cookie != snapshot->cookie ||
++	    helper->vdev_id != snapshot->vdev_id ||
++	    !wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
++					      generation, &current) || !current.direct_dp ||
++	    (generation && !wlan_mlme_sta_mon_token_valid(wma->psoc, monitor_id,
++							  generation)))
++		goto out;
++	limits->frequency = helper->chanfreq;
++	limits->phy_mode = helper->phy_mode;
++	limits->max_nss = current.max_nss;
++	limits->bandwidth_mask = current.channel_bw_mask;
++	limits->ht_supported = helper->ht_supported;
++	limits->vht_supported = helper->vht_supported;
++	limits->he_supported = helper->he_supported;
++	status = QDF_STATUS_SUCCESS;
++out:
++	mutex_unlock(&wma_injection_ctx.helper_lock);
++	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
++	return status;
++}
+ #endif /* FEATURE_WLAN_WONDER */
+ 
+ static bool wma_injection_wait_for_idle(void)
+diff --git a/qcacld-3.0/core/wma/inc/wma_api.h b/qcacld-3.0/core/wma/inc/wma_api.h
+index 7d5794120..af128c338 100644
+--- a/qcacld-3.0/core/wma/inc/wma_api.h
++++ b/qcacld-3.0/core/wma/inc/wma_api.h
+@@ -49,6 +49,16 @@ struct wma_wonder_helper_snapshot {
+ 	uint64_t cookie;
+ };
+ 
++struct wma_wonder_helper_limits {
++	uint32_t frequency;
++	uint32_t phy_mode;
++	uint8_t max_nss;
++	uint8_t bandwidth_mask;
++	bool ht_supported;
++	bool vht_supported;
++	bool he_supported;
++};
++
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
+ QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+ 		const uint8_t *interface_mac, uint64_t generation,
+@@ -56,6 +66,10 @@ QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+ QDF_STATUS wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
+ 		const uint8_t *interface_mac, uint64_t generation,
+ 		const struct wma_wonder_helper_snapshot *snapshot, bool set);
++QDF_STATUS wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot,
++		struct wma_wonder_helper_limits *limits);
+ #else
+ static inline QDF_STATUS
+ wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+@@ -72,6 +86,15 @@ wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
+ {
+ 	return QDF_STATUS_E_NOSUPPORT;
+ }
++
++static inline QDF_STATUS
++wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
++		const uint8_t *interface_mac, uint64_t generation,
++		const struct wma_wonder_helper_snapshot *snapshot,
++		struct wma_wonder_helper_limits *limits)
++{
++	return QDF_STATUS_E_NOSUPPORT;
++}
+ #endif
+ #endif /* FEATURE_WLAN_WONDER */
+ 
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c
+index 48c8a49f8..90933ffac 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c
+@@ -11,6 +11,7 @@
+ #include <wlan_hdd_wonder_peer.h>
+ #include <wlan_vdev_mgr_tgt_if_tx_defs.h>
+ #include <wma_api.h>
++#include <wondertap_monitor.h>
+ 
+ #ifdef FEATURE_WLAN_WONDER
+ 
+@@ -357,6 +358,71 @@ bool hdd_wonder_peer_ready(struct hdd_wonder_peer_state *state)
+ 	return ready;
+ }
+ 
++int hdd_wonder_peer_get_limits(struct hdd_wonder_peer_state *state,
++			       struct hdd_wonder_peer_limits *limits)
++{
++	struct wma_wonder_helper_snapshot helper;
++	struct wma_wonder_helper_limits prepared;
++	unsigned long flags;
++	QDF_STATUS status;
++	int error;
++
++	if (!state || !limits)
++		return -EINVAL;
++	mutex_lock(&state->operation_lock);
++	if (!hdd_wonder_peer_ready(state)) {
++		error = -EAGAIN;
++		goto out;
++	}
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	helper.vdev_id = state->bound_id;
++	helper.cookie = state->helper_cookie;
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	status = wma_wonder_helper_get_limits(state->adapter->deflink->vdev_id,
++			state->frequency, state->adapter->mac_addr.bytes,
++			state->generation, &helper, &prepared);
++	error = qdf_status_to_os_return(status);
++	if (error)
++		goto out;
++	limits->frequency = prepared.frequency;
++	limits->phy_mode = prepared.phy_mode;
++	limits->max_nss = prepared.max_nss;
++	limits->bandwidth = prepared.bandwidth_mask & BIT(4) ? WONDERTAP_RATE_BW_80 :
++		prepared.bandwidth_mask & BIT(3) ? WONDERTAP_RATE_BW_40 : WONDERTAP_RATE_BW_20;
++	limits->ht_supported = prepared.ht_supported;
++	limits->vht_supported = prepared.vht_supported;
++	limits->he_supported = prepared.he_supported;
++out:
++	mutex_unlock(&state->operation_lock);
++	return error;
++}
++
++int hdd_wonder_peer_validate_rate(struct hdd_wonder_peer_state *state,
++				 const struct wondertap_fixed_tx_rate_params *rate)
++{
++	struct hdd_wonder_peer_limits limits;
++	int error;
++
++	error = wondertap_monitor_validate_rate(rate);
++	if (error)
++		return error;
++	error = hdd_wonder_peer_get_limits(state, &limits);
++	if (error)
++		return error;
++	if (rate->nss > limits.max_nss || rate->bw > limits.bandwidth)
++		return -EOPNOTSUPP;
++	switch (rate->preamble) {
++	case WONDERTAP_RATE_PREAMBLE_HT:
++		return limits.ht_supported ? 0 : -EOPNOTSUPP;
++	case WONDERTAP_RATE_PREAMBLE_VHT:
++		return limits.vht_supported ? 0 : -EOPNOTSUPP;
++	case WONDERTAP_RATE_PREAMBLE_HE:
++		return limits.he_supported ? 0 : -EOPNOTSUPP;
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
+ void hdd_wonder_peer_cancel(struct hdd_wonder_peer_state *state)
+ {
+ 	unsigned long flags;
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h
+index ae599dc85..081023aa4 100644
+--- a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h
+@@ -12,6 +12,16 @@ struct set_rx_mac_filter;
+ #ifdef FEATURE_WLAN_WONDER
+ #include <wondertap.h>
+ 
++struct hdd_wonder_peer_limits {
++	u32 frequency;
++	u32 phy_mode;
++	u8 max_nss;
++	enum wondertap_rate_bw bandwidth;
++	bool ht_supported;
++	bool vht_supported;
++	bool he_supported;
++};
++
+ struct hdd_wonder_peer_state *
+ hdd_wonder_peer_create(struct hdd_adapter *adapter);
+ int hdd_wonder_peer_prepare(struct hdd_wonder_peer_state *state,
+@@ -21,6 +31,10 @@ int hdd_wonder_peer_clear(struct hdd_wonder_peer_state *state);
+ void hdd_wonder_peer_cancel(struct hdd_wonder_peer_state *state);
+ void hdd_wonder_peer_destroy(struct hdd_wonder_peer_state *state);
+ bool hdd_wonder_peer_ready(struct hdd_wonder_peer_state *state);
++int hdd_wonder_peer_get_limits(struct hdd_wonder_peer_state *state,
++			       struct hdd_wonder_peer_limits *limits);
++int hdd_wonder_peer_validate_rate(struct hdd_wonder_peer_state *state,
++				 const struct wondertap_fixed_tx_rate_params *rate);
+ int hdd_wonder_peer_station(struct hdd_wonder_peer_state *state,
+ 			    enum wondertap_station_action action,
+ 			    struct wondertap_station_info *info);
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+index a36dfda30..cb0bc1587 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+@@ -65,6 +65,7 @@
+ #include "wlan_ipa_ucfg_api.h"
+ #include "wlan_hdd_stats.h"
+ #include "wlan_hdd_main.h"
++#include "wlan_hdd_wonder.h"
+ 
+ #ifdef TX_MULTIQ_PER_AC
+ #if defined(QCA_LL_TX_FLOW_CONTROL_V2) || defined(QCA_LL_PDEV_TX_FLOW_CONTROL)
+@@ -897,6 +898,11 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ 		kfree_skb(skb);
+ 		return;
+ 	}
++#ifdef FEATURE_WLAN_WONDER
++	if (READ_ONCE(adapter->wonder_owned) &&
++	    !hdd_wonder_transport_ready(adapter))
++		goto drop;
++#endif
+ 
+ 	if (skb_is_gso(skb)) {
+ 		ret = -EOPNOTSUPP;
+diff --git a/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c b/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
+index 98cd4da3c..3a7737306 100644
+--- a/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
++++ b/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
+@@ -51,6 +51,10 @@
+ #include <hif_napi.h>
+ #endif
+ #include "p2phc.h"
++#ifdef FEATURE_WLAN_WONDER
++#include "wlan_hdd_main.h"
++#include "wlan_hdd_wonder.h"
++#endif
+ 
+ 
+ uint32_t wlan_dp_intf_get_pkt_type_bitmap_value(void *link_ctx)
+@@ -898,6 +902,20 @@ QDF_STATUS dp_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
+ 	nbuf =  rxbuf;
+ 	while (nbuf) {
+ 		nbuf_next = qdf_nbuf_next(nbuf);
++#ifdef FEATURE_WLAN_WONDER
++		if (dp_intf->dev) {
++			struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dp_intf->dev);
++
++			if (READ_ONCE(adapter->wonder_owned) &&
++			    !hdd_wonder_transport_ready(adapter)) {
++				qdf_nbuf_set_next(nbuf, NULL);
++				qdf_nbuf_free(nbuf);
++				++stats->per_cpu[cpu_index].rx_refused;
++				nbuf = nbuf_next;
++				continue;
++			}
++		}
++#endif
+ 		qdf_nbuf_set_dev(nbuf, dp_intf->dev);
+ 
+ 		++stats->per_cpu[cpu_index].rx_packets;

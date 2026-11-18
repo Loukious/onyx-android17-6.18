@@ -1,0 +1,668 @@
+diff --git a/wonder/include/wondertap_monitor.h b/wonder/include/wondertap_monitor.h
+new file mode 100644
+--- /dev/null
++++ b/wonder/include/wondertap_monitor.h
+@@ -0,0 +1,76 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __WONDERTAP_MONITOR_H__
++#define __WONDERTAP_MONITOR_H__
++
++#include <linux/unaligned.h>
++#include <net/ieee80211_radiotap.h>
++#include <wondertap.h>
++
++/* Bounds for the existing Onyx monitor injection transport. */
++#define WONDERTAP_MONITOR_RTAP_MAX 17
++
++static inline int wondertap_monitor_validate_rate(
++		const struct wondertap_fixed_tx_rate_params *rate)
++{
++	if (!rate)
++		return -EINVAL;
++	if (rate->preamble != WONDERTAP_RATE_PREAMBLE_HT ||
++	    rate->bw != WONDERTAP_RATE_BW_20 || rate->nss != 1 ||
++	    rate->mcs > 7 || rate->gi < WONDERTAP_RATE_GI_DEFAULT ||
++	    rate->gi > WONDERTAP_RATE_GI_0_8_US)
++		return -EOPNOTSUPP;
++	return 0;
++}
++
++/* Emit only fields accepted by the production HDD radiotap parser. */
++static inline int wondertap_monitor_radiotap(u8 *buffer, size_t size,
++		const struct wondertap_fixed_tx_rate_params *rate, u32 freq,
++		bool data, bool no_ack)
++{
++	struct ieee80211_radiotap_header *header;
++	u32 present = BIT(IEEE80211_RADIOTAP_CHANNEL) |
++		      BIT(IEEE80211_RADIOTAP_TX_FLAGS);
++	u16 channel_flags, tx_flags = IEEE80211_RADIOTAP_F_TX_NOSEQNO;
++	unsigned int offset = sizeof(*header);
++	int ret;
++
++	if (!buffer || size < WONDERTAP_MONITOR_RTAP_MAX ||
++	    !freq || freq > 65535)
++		return -EINVAL;
++	ret = wondertap_monitor_validate_rate(rate);
++	if (ret)
++		return ret;
++
++	memset(buffer, 0, WONDERTAP_MONITOR_RTAP_MAX);
++	header = (struct ieee80211_radiotap_header *)buffer;
++	channel_flags = IEEE80211_CHAN_OFDM |
++		(freq < 3000 ? IEEE80211_CHAN_2GHZ : IEEE80211_CHAN_5GHZ);
++	if (no_ack)
++		tx_flags |= IEEE80211_RADIOTAP_F_TX_NOACK;
++	if (!data) {
++		/* Discovery/action frames use the mandatory 6 Mbps OFDM rate. */
++		present |= BIT(IEEE80211_RADIOTAP_RATE);
++		buffer[offset++] = 12;
++		offset = ALIGN(offset, 2);
++	} else {
++		present |= BIT(IEEE80211_RADIOTAP_MCS);
++	}
++	put_unaligned_le16(freq, buffer + offset);
++	put_unaligned_le16(channel_flags, buffer + offset + 2);
++	offset += 4;
++	put_unaligned_le16(tx_flags, buffer + offset);
++	offset += 2;
++	if (data) {
++		buffer[offset++] = IEEE80211_RADIOTAP_MCS_HAVE_BW |
++			IEEE80211_RADIOTAP_MCS_HAVE_MCS |
++			IEEE80211_RADIOTAP_MCS_HAVE_GI;
++		buffer[offset++] = rate->gi == WONDERTAP_RATE_GI_SHORT ?
++			IEEE80211_RADIOTAP_MCS_SGI : 0;
++		buffer[offset++] = rate->mcs;
++	}
++	header->it_len = cpu_to_le16(offset);
++	header->it_present = cpu_to_le32(present);
++	return offset;
++}
++
++#endif /* __WONDERTAP_MONITOR_H__ */
+diff --git a/wonder/mac80211.c b/wonder/mac80211.c
+--- a/wonder/mac80211.c
++++ b/wonder/mac80211.c
+@@ -20,9 +20,11 @@
+ #include <linux/limits.h>
+ 
+ #include "wondertap.h"
++#include <wondertap_monitor.h>
+ #include "core.h"
+ #include "mac80211.h"
+ #include "mac80211_txs.h"
++#include "monitor_rx.h"
+ #include "wondertap_internal.h"
+ #include "reg.h"
+ #include "nl80211_ven_cmd.h"
+@@ -213,7 +215,7 @@
+ }
+ 
+ static int wonder_fill_rx_status(struct ieee80211_radiotap_header *rth,
+-	struct ieee80211_rx_status *status)
++	struct ieee80211_rx_status *status, u8 *rtap_flags)
+ {
+ 	struct ieee80211_radiotap_iterator iterator;
+ 	int ret;
+@@ -221,6 +223,7 @@
+ 
+ 	/* Read the total length from the header (Radiotap fields are little-endian) */
+ 	rtap_len = le16_to_cpu(rth->it_len);
++	*rtap_flags = 0;
+ 
+ 	/* Initialize the radiotap iterator */
+ 	ret = ieee80211_radiotap_iterator_init(&iterator,
+@@ -236,7 +239,7 @@
+ 	 * The iterator automatically handles the 'it_present' bitmap,
+ 	 * field alignment, and field skipping.
+ 	 */
+-	while (ieee80211_radiotap_iterator_next(&iterator) == 0) {
++	while ((ret = ieee80211_radiotap_iterator_next(&iterator)) == 0) {
+ 
+ 		/* Check 'iterator.this_arg_index' to identify the current field */
+ 		switch (iterator.this_arg_index) {
+@@ -246,9 +249,8 @@
+ 			 * Radiotap channel field contains 2 bytes freq (MHz)
+ 			 * and 2 bytes flags
+ 			 */
+-			__le16 *chan_data = (__le16 *)iterator.this_arg;
+-			u16 freq = le16_to_cpu(chan_data[0]);
+-			u16 flags = le16_to_cpu(chan_data[1]);
++			u16 freq = get_unaligned_le16(iterator.this_arg);
++			u16 flags = get_unaligned_le16(iterator.this_arg + 2);
+ 
+ 			status->freq = freq;
+ 			/* Infer band from radiotap channel flags */
+@@ -261,11 +263,12 @@
+ 		case IEEE80211_RADIOTAP_TSFT:
+ 			/* TSF (MAC Timestamp) */
+ 			/* Radiotap unit is microseconds */
+-			status->mactime = le64_to_cpu(*(__le64 *)iterator.this_arg);
++			status->mactime = get_unaligned_le64(iterator.this_arg);
+ 			status->flag |= RX_FLAG_MACTIME_START; // Indicate mactime is valid
+ 			break;
+ 		case IEEE80211_RADIOTAP_FLAGS:
+ 			/* Detection flags */
++			*rtap_flags = *iterator.this_arg;
+ 			if (*iterator.this_arg & IEEE80211_RADIOTAP_F_BADFCS)
+ 				status->flag |= RX_FLAG_FAILED_FCS_CRC;
+ 
+@@ -364,6 +367,8 @@
+ 			break;
+ 		}
+ 	}
++	if (ret != -ENOENT)
++		return ret;
+ 
+ 	if (IS_ENABLED(CONFIG_ANDROID_WONDER_RX_DEBUG)) {
+ 		pr_debug("%s(): signal %d\n", __func__, status->signal);
+@@ -416,7 +421,9 @@
+ 	struct ieee80211_radiotap_header *radhdr;
+ 	struct net_device *vdev;
+ 	struct ieee80211_rx_status *rx_status = IEEE80211_SKB_RXCB(skb);
++	unsigned int hdrlen;
+ 	u16 it_len;
++	u8 rtap_flags;
+ 
+ 	if (!wonder || !wonder->vdev) {
+ 		pr_err_ratelimited("RX received but interface not active. Dropping.\n");
+@@ -445,14 +452,25 @@
+ 
+ 	/* Fill RX status for mac80211 operation before pulling radiotap */
+ 	memset(rx_status, 0, sizeof(*rx_status));
+-	wonder_fill_rx_status(radhdr, rx_status);
++	if (wonder_fill_rx_status(radhdr, rx_status, &rtap_flags)) {
++		pr_err_ratelimited("Dropping frame with invalid radiotap metadata.\n");
++		vdev->stats.rx_length_errors++;
++		goto drop;
++	}
+ 
+ 	/* Pull radiotap since this frame is preparing forwarded to mac80211. */
+ 	skb_pull(skb, it_len);
+ 	hdr = (struct ieee80211_hdr_3addr *)(skb->data);
+ 
+-	if (!pskb_may_pull(skb, ieee80211_hdrlen(hdr->frame_control))) {
++	hdrlen = ieee80211_hdrlen(hdr->frame_control);
++	if (!pskb_may_pull(skb, hdrlen)) {
+ 		pr_err_ratelimited("Dropping frame with invalid 802.11 header length.\n");
++		vdev->stats.rx_length_errors++;
++		goto drop;
++	}
++	if (wonder_normalize_monitor_rx(skb, hdrlen, rtap_flags,
++			wonder->wondertap_data->cap.bits.fcs_not_support)) {
++		pr_err_ratelimited("Dropping frame with invalid FCS/padding.\n");
+ 		vdev->stats.rx_length_errors++;
+ 		goto drop;
+ 	}
+@@ -548,8 +566,8 @@
+ {
+ 	struct net_device *dev = wonder->vdev;
+ 
+-	dev_set_mtu(dev, dev->max_mtu ? 1500 : INT_MAX);
+-	return 0;
++	return dev_set_mtu(dev, wonder->wondertap_data->monitor_backend ?
++			  1500 : (dev->max_mtu ? 1500 : INT_MAX));
+ }
+ 
+ static void wonder_mac_expire_work_cb(struct work_struct *work)
+@@ -630,7 +648,7 @@
+ 	wonder->vdev = NULL;
+ }
+ 
+-#define WONDER_TX_ROOM (sizeof(struct ieee80211_radiotap_header) + 1 + sizeof(struct wonder_txd))
++#define WONDER_TX_ROOM (WONDERTAP_MONITOR_RTAP_MAX + sizeof(struct wonder_txd))
+ 
+ /**
+  * wonder_tx_clone_and_consume - Early buffer release for upper-layer I/O
+@@ -674,6 +692,8 @@
+ 	struct ieee80211_radiotap_header *radhdr;
+ 	struct ieee80211_hdr *hdr;
+ 	struct wonder_txd *txd;
++	u8 monitor_rtap[WONDERTAP_MONITOR_RTAP_MAX];
++	int monitor_rtap_len = 0;
+ 
+ 	atomic64_inc(&wonder->stats.tx_entry_cnt);
+ 	if (unlikely(!pdev) || unlikely(!vdev)) {
+@@ -693,6 +713,24 @@
+ 	}
+ 
+ 	hdr = (struct ieee80211_hdr *)skb->data;
++	if (wonder->wondertap_data->monitor_backend) {
++		struct wondertap_data *tap = wonder->wondertap_data;
++		struct wondertap_fixed_tx_rate_params rate;
++		struct wondertap_set_freq_params channel;
++		unsigned long flags;
++		bool no_ack = IEEE80211_SKB_CB(skb)->flags & IEEE80211_TX_CTL_NO_ACK;
++
++		spin_lock_irqsave(&tap->tx_config_lock, flags);
++		rate = tap->cached_tx_rate;
++		channel = tap->cached_freq;
++		spin_unlock_irqrestore(&tap->tx_config_lock, flags);
++		monitor_rtap_len = wondertap_monitor_radiotap(monitor_rtap,
++			sizeof(monitor_rtap), &rate, channel.freq,
++			ieee80211_is_data(hdr->frame_control), no_ack);
++		if (monitor_rtap_len < 0 || skb_cow_head(skb, WONDER_TX_ROOM))
++			goto drop;
++		hdr = (struct ieee80211_hdr *)skb->data;
++	}
+ 	if (unlikely(!pskb_may_pull(skb, ieee80211_hdrlen(hdr->frame_control)))) {
+ 		pr_err_ratelimited("Packet too short for 802.11 header, dropping packet.\n");
+ 		goto drop;
+@@ -728,7 +766,13 @@
+ 	}
+ 
+ 	/* Require head room for radiotap and wonder_txd */
+-	skb_push(skb, WONDER_TX_ROOM);
++	if (wonder->wondertap_data->monitor_backend) {
++		skb_push(skb, monitor_rtap_len);
++		memcpy(skb->data, monitor_rtap, monitor_rtap_len);
++		goto submit;
++	}
++	skb_push(skb, sizeof(struct ieee80211_radiotap_header) + 1 +
++		 sizeof(struct wonder_txd));
+ 	txd = (struct wonder_txd *)skb->data;
+ 	/* Assign wonder txd */
+ 	txd->frame_type = le16_to_cpu(hdr->frame_control) & IEEE80211_FCTL_FTYPE;
+@@ -744,16 +788,16 @@
+ 	skb_pull(skb, sizeof(struct wonder_txd));
+ 	/* The monitor mode request non-zero length of radiotap. */
+ 	radhdr = (struct ieee80211_radiotap_header *)skb->data;
++	memset(radhdr, 0, sizeof(*radhdr) + 1);
+ 	radhdr->it_version = 0;
+ 	radhdr->it_pad = 0;
+ 	radhdr->it_len = cpu_to_le16(sizeof(struct ieee80211_radiotap_header) + 1);
++submit:
+ 	/* Assign the skb to the physical device for transmission */
+ 	skb->dev = pdev;
+-	/* Report Fake TX status to adjust Rate and AMSDU length */
+-	if (1)
++	/* The monitor backend has no per-packet radio ACK callback. */
++	if (!wonder->wondertap_data->monitor_backend)
+ 		wonder_txs_direct_report(hw, control->sta, skb);
+-	else
+-		wonder_txs_enqueue(control->sta, skb);
+ 
+ 	if (unlikely(!netif_running(pdev) || !netif_device_present(pdev))) {
+ 		goto drop;
+@@ -868,6 +912,9 @@
+ 	return 0;
+ 
+ WONDER_PREPARATION_ERROR:
++	/* Drop the netdev reference before the vendor deletes its owned VIF. */
++	wonder_pdev_put(wonder);
++	wonder->vdev = NULL;
+ 	wondertap_deinit(wondertap);
+ 	return ret;
+ }
+@@ -880,6 +927,20 @@
+ 	wonder_pdev_put(wonder);
+ 	wondertap_deinit(wonder->wondertap_data);
+ }
++
++#ifdef CONFIG_PM
++static int wonder_suspend(struct ieee80211_hw *hw,
++			  struct cfg80211_wowlan *wowlan)
++{
++	struct wonder_data *wonder = hw->priv;
++
++	/* Vendor VIF creation/deletion currently requires the netdev RTNL path. */
++	if (wonder->wondertap_data->monitor_backend)
++		return -EBUSY;
++	/* Preserve mac80211's normal full shutdown for other providers. */
++	return 1;
++}
++#endif
+ 
+ static int wonder_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
+ {
+@@ -1267,6 +1328,9 @@
+ 	.tx                 = wonder_tx,
+ 	.start              = wonder_start,
+ 	.stop               = wonder_stop,
++#ifdef CONFIG_PM
++	.suspend            = wonder_suspend,
++#endif
+ 	.config             = wonder_config,
+ 	.add_interface      = wonder_add_interface,
+ 	.remove_interface   = wonder_remove_interface,
+@@ -1301,6 +1365,12 @@
+ 	int ret;
+ 	struct ieee80211_hw *hw = wonder->hw;
+ 
++	/* Initialize control state before publishing the wiphy to userspace. */
++	wondertap_prep(wonder->wondertap_data);
++	INIT_DELAYED_WORK(&wonder->tx_work, wonder_flush_worker);
++	wonder->mac_expired = false;
++	INIT_DELAYED_WORK(&wonder->mac_expire_work, wonder_mac_expire_work_cb);
++
+ 	/* Set Regulator before register_hw */
+ 	wonder_set_custom_regulator(hw);
+ 	/* Register with mac80211 */
+@@ -1313,12 +1383,6 @@
+ 	wonder_get_regulator_domain(hw);
+ 	/* Initial tx status queue */
+ 	wonder_txs_queue_init();
+-	/* Initialize Delayed Work for TX Aggregation */
+-	INIT_DELAYED_WORK(&wonder->tx_work, wonder_flush_worker);
+-	/* Prepare wondertap structure */
+-	wondertap_prep(wonder->wondertap_data);
+-	wonder->mac_expired = false;
+-	INIT_DELAYED_WORK(&wonder->mac_expire_work, wonder_mac_expire_work_cb);
+ 	return 0;
+ }
+ 
+@@ -1387,12 +1451,14 @@
+ 	ieee80211_hw_set(hw, SUPPORTS_PS);
+ 	ieee80211_hw_set(hw, SINGLE_SCAN_ON_ALL_BANDS);
+ 	ieee80211_hw_set(hw, SIGNAL_DBM);
+-	/* Support AMSDU */
+-	ieee80211_hw_set(hw, TX_AMSDU);
+-	ieee80211_hw_set(hw, SUPPORT_FAST_XMIT);
+-	/* Support AMPDU */
+-	ieee80211_hw_set(hw, AMPDU_AGGREGATION);
+-	ieee80211_hw_set(hw, TX_AMPDU_SETUP_IN_HW);
++	if (wondertap->cap.bits.amsdu_aggregation) {
++		ieee80211_hw_set(hw, TX_AMSDU);
++		ieee80211_hw_set(hw, SUPPORT_FAST_XMIT);
++	}
++	if (wondertap->cap.bits.ampdu_aggregation) {
++		ieee80211_hw_set(hw, AMPDU_AGGREGATION);
++		ieee80211_hw_set(hw, TX_AMPDU_SETUP_IN_HW);
++	}
+ 	/* Tell mac80211 that RX frames include FCS so it trims them correctly */
+ 	if (!wondertap->cap.bits.fcs_not_support)
+ 		ieee80211_hw_set(hw, RX_INCLUDES_FCS);
+@@ -1411,7 +1477,7 @@
+ 	SET_IEEE80211_DEV(hw, dev);
+ 	pr_debug("Set MAC addrs from wlan0: %pM\n", random_mac_addr);
+ 
+-	hw->extra_tx_headroom = 0; /* The frame is fully formed by mac80211 */
++	hw->extra_tx_headroom = WONDER_TX_ROOM;
+ 
+ 	/* Tell mac80211 which interface types we support by setting the bits
+ 	 * in the wiphy structure.
+@@ -1421,6 +1487,9 @@
+ 		BIT(NL80211_IFTYPE_MONITOR) |
+ 		BIT(NL80211_IFTYPE_NAN) |           /* Added NAN mode support */
+ 		BIT(NL80211_IFTYPE_STATION);        /* Added STATION mode support */
++	if (wondertap->monitor_backend)
++		hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_ADHOC) |
++					    BIT(NL80211_IFTYPE_MONITOR);
+ 
+ 	/* Set the band that supports NAN, mandatory if NL80211_IFTYPE_NAN is supported */
+ 	hw->wiphy->nan_supported_bands |= BIT(NL80211_BAND_2GHZ);
+diff --git a/wonder/main.c b/wonder/main.c
+--- a/wonder/main.c
++++ b/wonder/main.c
+@@ -63,6 +63,7 @@
+ 	wondertap = devm_kzalloc(dev, sizeof(*wondertap), GFP_KERNEL);
+ 	if (!wondertap)
+ 		return -ENOMEM;
++	wondertap->monitor_backend = id->driver_data;
+ 
+ 	/* Assign wondertap interface version will be used in the match process. */
+ 	wondertap->ver = WONDER_VERSION_3_6_6;
+@@ -90,7 +91,12 @@
+ 		return -ENODEV;
+ 
+ 	auxiliary_set_drvdata(&wonder_adev->adev, wonder);
+-	return wonder_debugfs_init(wonder);
++	ret = wonder_debugfs_init(wonder);
++	if (ret) {
++		wonder_mac80211_exit(wonder);
++		auxiliary_set_drvdata(&wonder_adev->adev, NULL);
++	}
++	return ret;
+ }
+ 
+ static void wonder_remove(struct auxiliary_device *adev)
+diff --git a/wonder/monitor_rx.h b/wonder/monitor_rx.h
+new file mode 100644
+--- /dev/null
++++ b/wonder/monitor_rx.h
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __WONDER_MONITOR_RX_H__
++#define __WONDER_MONITOR_RX_H__
++
++#include <linux/errno.h>
++#include <linux/ieee80211.h>
++#include <linux/skbuff.h>
++#include <net/ieee80211_radiotap.h>
++
++/* Only normalize frames entering mac80211; raw monitor capture keeps its FCS. */
++static inline int wonder_normalize_monitor_rx(struct sk_buff *skb,
++		unsigned int hdrlen, u8 rtap_flags, bool fcs_not_support)
++{
++	unsigned int pad = 0;
++	unsigned int fcs_len = 0;
++	int ret;
++
++	if (rtap_flags & IEEE80211_RADIOTAP_F_DATAPAD)
++		pad = (4 - (hdrlen & 3)) & 3;
++	if (rtap_flags & IEEE80211_RADIOTAP_F_FCS)
++		fcs_len = FCS_LEN;
++
++	/* The advertised padding and FCS must not consume the 802.11 header. */
++	if (hdrlen > skb->len || pad > skb->len - hdrlen ||
++	    fcs_len > skb->len - hdrlen - pad)
++		return -EINVAL;
++
++	/* Onyx mixes RAW MPDUs with FCS and management frames without FCS. */
++	if (fcs_not_support && fcs_len) {
++		ret = pskb_trim(skb, skb->len - fcs_len);
++		if (ret)
++			return ret;
++	}
++
++	if (pad) {
++		ret = skb_ensure_writable(skb, hdrlen + pad);
++		if (ret)
++			return ret;
++		/* Move only the header, leaving a possibly fragmented payload in place. */
++		memmove(skb->data + pad, skb->data, hdrlen);
++		skb_pull(skb, pad);
++	}
++
++	return 0;
++}
++
++#endif /* __WONDER_MONITOR_RX_H__ */
+diff --git a/wonder/nl80211_ven_cmd.c b/wonder/nl80211_ven_cmd.c
+--- a/wonder/nl80211_ven_cmd.c
++++ b/wonder/nl80211_ven_cmd.c
+@@ -385,9 +385,7 @@
+ 	pr_debug("Apply TX rate: max_preamble=%u, max_bw=%u, max_nss=%u, max_mcs=%u\n",
+ 		tx_rate_params.max_preamble, tx_rate_params.max_bw, tx_rate_params.max_nss,
+ 		tx_rate_params.max_mcs);
+-	wondertap_set_tx_rate_mask(wonder->wondertap_data, &tx_rate_params);
+-
+-	return 0;
++	return wondertap_set_tx_rate_mask(wonder->wondertap_data, &tx_rate_params);
+ }
+ 
+ static int wonder_vendor_cmd_set_reg(struct wiphy *wiphy,
+@@ -457,7 +455,8 @@
+ 	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
+ 	struct wonder_data *wonder = hw->priv;
+ 	struct sk_buff *skb;
+-	const size_t reply_skb_size = sizeof(u32) * 2 + sizeof(u8) * 6;
++	const size_t reply_skb_size = nla_total_size(sizeof(u32)) * 2 +
++				      nla_total_size(sizeof(u8)) * 6;
+ 	struct wondertap_capability cap;
+ 	bool is_monitor_mode = (wdev && wdev->iftype == NL80211_IFTYPE_MONITOR) ? true : false;
+ 	u32 mtu_size = is_monitor_mode ? INT_MAX : WONDER_NORMAL_MODE_MTU_SIZE;
+@@ -470,6 +469,9 @@
+ 	u32 max_ch_switch_time_us = 0;
+ 	int ret;
+ 
++	if (wonder->wondertap_data->monitor_backend)
++		mtu_size = 1500;
++
+ 	ret = wondertap_get_capabilities(wonder->wondertap_data, &cap);
+ 
+ 	if (ret) {
+@@ -490,7 +492,7 @@
+ 		is_monitor_mode, mtu_size, hw_amsdu, hw_ampdu, hw_ra,
+ 		ch_hopping, hbs_support, nss, max_ch_switch_time_us);
+ 
+-	skb = cfg80211_vendor_cmd_alloc_reply_skb(wiphy, nla_total_size(reply_skb_size));
++	skb = cfg80211_vendor_cmd_alloc_reply_skb(wiphy, reply_skb_size);
+ 	if (!skb) {
+ 		pr_err("Failed to allocate reply skb\n");
+ 		return -ENOMEM;
+@@ -653,10 +655,10 @@
+ 		}
+ 	}
+ 
+-	wondertap_channel_schedule_request(wonder->wondertap_data, &params);
++	i = wondertap_channel_schedule_request(wonder->wondertap_data, &params);
+ 
+ 	kfree(params.channel_list);
+-	return 0;
++	return i;
+ }
+ 
+ static int wonder_vendor_cmd_get_mac_tsf(struct wiphy *wiphy,
+@@ -910,8 +912,7 @@
+ 	pr_debug("SET_STATION_INFO: action=%u, mac=%pM, aid=%u, cap_mask=0x%x\n",
+ 		    action, sta_info.mac, sta_info.aid, sta_info.capability_mask);
+ 
+-	wondertap_set_station_info(wonder->wondertap_data, action, &sta_info);
+-	return 0;
++	return wondertap_set_station_info(wonder->wondertap_data, action, &sta_info);
+ }
+ 
+ static int wonder_vendor_cmd_set_features(struct wiphy *wiphy,
+diff --git a/wonder/ssr.c b/wonder/ssr.c
+--- a/wonder/ssr.c
++++ b/wonder/ssr.c
+@@ -28,6 +28,9 @@
+ 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+ 	struct wonder_data *wonder = container_of(nb, struct wonder_data, netdev_notifier);
+ 
++	/* Onyx unbinds/rebinds this auxiliary device around its WLAN SSR. */
++	if (wonder->wondertap_data->monitor_backend)
++		return NOTIFY_DONE;
+ 	if (!wonder || !wonder->pdev || dev != wonder->pdev)
+ 		return NOTIFY_DONE;
+ 
+diff --git a/wonder/wondertap.c b/wonder/wondertap.c
+--- a/wonder/wondertap.c
++++ b/wonder/wondertap.c
+@@ -12,6 +12,7 @@
+ #include <linux/export.h>
+ #include <linux/etherdevice.h>
+ #include <wondertap.h>
++#include <wondertap_monitor.h>
+ #include <linux/delay.h>
+ #include <linux/slab.h>
+ #include <net/mac80211.h>
+@@ -196,6 +197,7 @@
+ 		pr_debug("    Country: %.2s\n", params.country_code);
+ 		pr_debug("=================================================\n");
+ 		wondertap->wonder_ops->deinit(wondertap->vendor_handle, &params);
++		wondertap->vendor_handle = NULL;
+ 	} else {
+ 		pr_err("Vendor operation 'deinit' is not implemented\n");
+ 	}
+@@ -212,10 +214,9 @@
+ 		       const struct wondertap_set_freq_params *params)
+ {
+ 	int ret = -EOPNOTSUPP;
+-
+-	mutex_lock(&wondertap->lock);
+-	wondertap->cached_freq = *params;
+-	wondertap->cache_flags |= WONDERTAP_CACHE_FREQ_SET;
++	unsigned long flags;
++
++	mutex_lock(&wondertap->lock);
+ 	if (wondertap_is_up(wondertap)) {
+ 		if (wondertap->wonder_ops && wondertap->wonder_ops->set_freq) {
+ 			ret = wondertap->wonder_ops->set_freq(wondertap->vendor_handle, params);
+@@ -226,6 +227,12 @@
+ 	} else {
+ 		pr_warn("wondertap is not active; caching incoming channel settings.\n");
+ 		ret = 0;
++	}
++	if (!ret) {
++		spin_lock_irqsave(&wondertap->tx_config_lock, flags);
++		wondertap->cached_freq = *params;
++		spin_unlock_irqrestore(&wondertap->tx_config_lock, flags);
++		wondertap->cache_flags |= WONDERTAP_CACHE_FREQ_SET;
+ 	}
+ 
+ 	mutex_unlock(&wondertap->lock);
+@@ -259,10 +266,15 @@
+ 				const struct wondertap_fixed_tx_rate_params *params)
+ {
+ 	int ret = -EOPNOTSUPP;
+-
+-	mutex_lock(&wondertap->lock);
+-	wondertap->cached_tx_rate = *params;
+-	wondertap->cache_flags |= WONDERTAP_CACHE_TX_RATE_SET;
++	unsigned long flags;
++
++	if (wondertap->monitor_backend) {
++		ret = wondertap_monitor_validate_rate(params);
++		if (ret)
++			return ret;
++	}
++
++	mutex_lock(&wondertap->lock);
+ 	if (wondertap_is_up(wondertap)) {
+ 		if (wondertap->wonder_ops && wondertap->wonder_ops->set_fixed_tx_rate) {
+ 			ret = wondertap->wonder_ops->set_fixed_tx_rate(wondertap->vendor_handle,
+@@ -275,6 +287,12 @@
+ 		pr_warn("wondertap is not active; caching incoming fixed TX rate settings.\n");
+ 		ret = 0;
+ 	}
++	if (!ret) {
++		spin_lock_irqsave(&wondertap->tx_config_lock, flags);
++		wondertap->cached_tx_rate = *params;
++		spin_unlock_irqrestore(&wondertap->tx_config_lock, flags);
++		wondertap->cache_flags |= WONDERTAP_CACHE_TX_RATE_SET;
++	}
+ 
+ 	mutex_unlock(&wondertap->lock);
+ 	return ret;
+@@ -284,6 +302,9 @@
+ 			       const struct wondertap_tx_rate_mask_params *params)
+ {
+ 	int ret = -EOPNOTSUPP;
++
++	if (wondertap->monitor_backend)
++		return -EOPNOTSUPP;
+ 
+ 	mutex_lock(&wondertap->lock);
+ 	wondertap->cached_tx_rate.preamble = params->max_preamble;
+@@ -376,6 +397,9 @@
+ 	int i;
+ 	int ret = 0;
+ 	size_t list_size;
++
++	if (wondertap->monitor_backend && request->channel_list_len)
++		return -EOPNOTSUPP;
+ 
+ 	mutex_lock(&wondertap->lock);
+ 
+diff --git a/wonder/wondertap_internal.h b/wonder/wondertap_internal.h
+--- a/wonder/wondertap_internal.h
++++ b/wonder/wondertap_internal.h
+@@ -47,6 +47,9 @@
+ 	void *vendor_handle;
+ 	enum wondertap_state state;
+ 	struct mutex lock;
++	/* Packet TX snapshots cannot take the sleeping control-operation lock. */
++	spinlock_t tx_config_lock;
++	bool monitor_backend;
+ 	u8 mac_addr[ETH_ALEN];
+ 	u32 cache_flags;
+ 	struct wondertap_set_freq_params cached_freq;
+@@ -79,6 +82,7 @@
+ 	wondertap->state = WONDERTAP_STATE_DOWN;
+ 	memset(wondertap->station_table, 0, sizeof(wondertap->station_table));
+ 	mutex_init(&wondertap->lock);
++	spin_lock_init(&wondertap->tx_config_lock);
+ }
+ 
+ /**

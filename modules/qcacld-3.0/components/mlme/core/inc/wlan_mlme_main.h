@@ -155,6 +155,9 @@ struct wlan_mlme_tx_ops {
 
 struct wlan_mlme_sta_mon_control {
 	struct wlan_mlme_sta_mon_snapshot snapshot;
+	struct wlan_mlme_sta_mon_scan_reservation scan_reservation;
+	wlan_mlme_sta_mon_scan_cb scan_callback;
+	void *scan_arg;
 	enum wlan_mlme_sta_mon_state state;
 	wlan_mlme_sta_mon_stop_cb stop;
 	void *arg;
@@ -167,6 +170,12 @@ struct wlan_mlme_sta_mon_control {
 	bool exclusive_lease;
 	bool attached;
 	bool fw_uncertain;
+	bool scan_reserved;
+	bool scan_submission_started;
+	bool scan_fw_pending;
+	bool scan_fw_observed;
+	/* Fits the control tail padding; snapshot layout remains unchanged. */
+	bool wonder_scan_lease;
 };
 
 /**

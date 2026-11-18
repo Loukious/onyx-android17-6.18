@@ -51,6 +51,9 @@
 #include <hif_napi.h>
 #endif
 #include "p2phc.h"
+#ifdef FEATURE_WLAN_WONDER
+#include "wlan_hdd_wonder.h"
+#endif
 
 
 uint32_t wlan_dp_intf_get_pkt_type_bitmap_value(void *link_ctx)
@@ -867,6 +870,19 @@ void dp_sta_notify_tx_comp_cb(qdf_nbuf_t nbuf, void *ctx, uint16_t flag)
 }
 
 #ifdef FEATURE_MONITOR_MODE_SUPPORT
+static enum dp_nbuf_push_type dp_mon_rx_push_type(struct net_device *dev)
+{
+#ifdef FEATURE_WLAN_WONDER
+	/* Final publication holds radio admission. Wonder's mac80211 RX handler
+	 * can transmit a reply, so enqueue it instead of calling it recursively
+	 * through netif_receive_skb while the admission lock is still held.
+	 */
+	if (hdd_wonder_netdev_is_owned(dev))
+		return DP_NBUF_PUSH_SIMPLE;
+#endif
+	return qdf_in_atomic() ? DP_NBUF_PUSH_NAPI : DP_NBUF_PUSH_BH_DISABLE;
+}
+
 QDF_STATUS dp_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
 {
 	struct wlan_dp_intf *dp_intf;
@@ -898,7 +914,24 @@ QDF_STATUS dp_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
 	nbuf =  rxbuf;
 	while (nbuf) {
 		nbuf_next = qdf_nbuf_next(nbuf);
+#ifdef FEATURE_WLAN_WONDER
+		if (dp_intf->dev && !hdd_wonder_netdev_transport_ready(dp_intf->dev)) {
+			qdf_nbuf_set_next(nbuf, NULL);
+			qdf_nbuf_free(nbuf);
+			++stats->per_cpu[cpu_index].rx_refused;
+			nbuf = nbuf_next;
+			continue;
+		}
+		if (dp_intf->dev)
+			hdd_wonder_note_rx_peer(dp_intf->dev, nbuf);
+#endif
 		qdf_nbuf_set_dev(nbuf, dp_intf->dev);
+
+		/* Radiotap is the link header. Packet taps run before Wonder's RX
+		 * handler and require a valid MAC header even on fresh raw copies.
+		 */
+		skb_reset_mac_header(nbuf);
+		qdf_nbuf_set_protocol(nbuf, htons(ETH_P_802_2));
 
 		++stats->per_cpu[cpu_index].rx_packets;
 		qdf_net_stats_add_rx_pkts(&dp_intf->stats, 1);
@@ -922,8 +955,7 @@ QDF_STATUS dp_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
 			 * This is the last packet on the chain
 			 * Scheduling rx sirq
 			 */
-			type = qdf_in_atomic() ? DP_NBUF_PUSH_NAPI :
-						 DP_NBUF_PUSH_BH_DISABLE;
+			type = dp_mon_rx_push_type(dp_intf->dev);
 			status = dp_intf->dp_ctx->dp_ops.dp_nbuf_push_pkt(nbuf,
 							type);
 		}

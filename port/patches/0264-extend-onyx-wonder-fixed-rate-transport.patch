@@ -1,0 +1,457 @@
+diff --git a/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h b/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
+index cb408370f..0ba9c39fc 100644
+--- a/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
++++ b/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
+@@ -11,6 +11,8 @@ enum cdp_tx_injection_preamble {
+ 	CDP_INJECTION_OFDM,
+ 	CDP_INJECTION_CCK,
+ 	CDP_INJECTION_HT,
++	CDP_INJECTION_VHT,
++	CDP_INJECTION_HE_SU,
+ };
+ 
+ struct cdp_tx_injection_params {
+@@ -21,10 +23,12 @@ struct cdp_tx_injection_params {
+ 	uint8_t interface_mac[QDF_MAC_ADDR_SIZE];
+ 	uint8_t nss_mask;
+ 	uint8_t preamble;
+-	/* HTT bandwidth bitmap: bit 2 = 20 MHz, bit 3 = 40 MHz. */
++	/* HTT bandwidth bitmap: bits 2/3/4 = 20/40/80 MHz. */
+ 	uint8_t bw_mask;
+-	/* HTT guard interval: 0 = 0.4 us, 1 = 0.8 us. */
++	/* HTT guard interval: 0/1/2/3 = 0.4/0.8/1.6/3.2 us. */
+ 	uint8_t guard_interval;
++	/* HE SU LTF subtype: 0/1/2 = 1x/2x/4x. */
++	uint8_t he_ltf;
+ 	/* Total attempts, including the initial transmission (1..15). */
+ 	uint8_t retries;
+ 	uint8_t tid;
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/dp_tx.c b/qca-wifi-host-cmn/dp/wifi3.0/dp_tx.c
+index f5eb05ecb..ade9898a7 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/dp_tx.c
++++ b/qca-wifi-host-cmn/dp/wifi3.0/dp_tx.c
+@@ -3885,9 +3885,19 @@ dp_tx_add_injection_metadata(qdf_nbuf_t nbuf,
+ 		case CDP_INJECTION_HT:
+ 			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_HT;
+ 			break;
+-		default:
++		case CDP_INJECTION_VHT:
++			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_VHT;
++			break;
++		case CDP_INJECTION_HE_SU:
++			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_HE_SU;
++			meta->ltf_subtype_11ax = params.he_ltf;
++			meta->use_dcm_11ax = 0;
++			break;
++		case CDP_INJECTION_OFDM:
+ 			meta->pream_type = HTT_TX_MSDU_EXT2_DESC_PREAM_OFDM;
+ 			break;
++		default:
++			return false;
+ 		}
+ 	}
+ 	if (params.bandwidth_valid) {
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+index 42ed4d703..a36dfda30 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+@@ -542,8 +542,7 @@ static int hdd_injection_mcs(const uint8_t *mcs,
+ 
+ 	if (params->rate_valid)
+ 		return -EINVAL;
+-	/* The injection helper advertises one spatial stream. */
+-	if (!(known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) || mcs[2] > 7 ||
++	if (!(known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) || mcs[2] > 15 ||
+ 	    known & ~(IEEE80211_RADIOTAP_MCS_HAVE_BW |
+ 		      IEEE80211_RADIOTAP_MCS_HAVE_MCS |
+ 		      IEEE80211_RADIOTAP_MCS_HAVE_GI |
+@@ -551,6 +550,8 @@ static int hdd_injection_mcs(const uint8_t *mcs,
+ 		      IEEE80211_RADIOTAP_MCS_HAVE_FEC |
+ 		      IEEE80211_RADIOTAP_MCS_HAVE_STBC))
+ 		return -EOPNOTSUPP;
++	if (flags & ~(IEEE80211_RADIOTAP_MCS_BW_MASK | IEEE80211_RADIOTAP_MCS_SGI))
++		return -EOPNOTSUPP;
+ 	if (((known & IEEE80211_RADIOTAP_MCS_HAVE_FMT) &&
+ 	     (flags & IEEE80211_RADIOTAP_MCS_FMT_GF)) ||
+ 	    ((known & IEEE80211_RADIOTAP_MCS_HAVE_FEC) &&
+@@ -564,8 +565,9 @@ static int hdd_injection_mcs(const uint8_t *mcs,
+ 		return -EOPNOTSUPP;
+ 
+ 	params->rate_valid = true;
+-	params->mcs_mask = BIT(mcs[2]);
+-	params->nss_mask = 1;
++	/* HTT carries per-stream MCS separately from NSS, not combined HT indices. */
++	params->mcs_mask = BIT(mcs[2] % 8);
++	params->nss_mask = BIT(mcs[2] / 8);
+ 	params->preamble = CDP_INJECTION_HT;
+ 	if (known & IEEE80211_RADIOTAP_MCS_HAVE_BW) {
+ 		params->bandwidth_valid = true;
+@@ -580,6 +582,90 @@ static int hdd_injection_mcs(const uint8_t *mcs,
+ 	return 0;
+ }
+ 
++static int hdd_injection_vht(const uint8_t *vht,
++			     struct cdp_tx_injection_params *params)
++{
++	u16 known = get_unaligned_le16(vht);
++	u8 mcs = vht[4] >> 4, nss = vht[4] & 0xf;
++	u8 bw;
++
++	if (params->rate_valid)
++		return -EINVAL;
++	if ((known & ~(IEEE80211_RADIOTAP_VHT_KNOWN_GI |
++		       IEEE80211_RADIOTAP_VHT_KNOWN_BANDWIDTH)) ||
++	    !(known & IEEE80211_RADIOTAP_VHT_KNOWN_BANDWIDTH) ||
++	    (vht[2] & ~IEEE80211_RADIOTAP_VHT_FLAG_SGI) ||
++	    vht[5] || vht[6] || vht[7] || vht[8] || vht[9] ||
++	    get_unaligned_le16(vht + 10) || nss < 1 || nss > 2 || mcs > 9)
++		return -EOPNOTSUPP;
++	/* Only full-channel SU bandwidths, not sideband or MU encodings. */
++	switch (vht[3]) {
++	case 0: bw = 2; break;
++	case 1: bw = 3; break;
++	case 4: bw = 4; break;
++	default: return -EOPNOTSUPP;
++	}
++	if (bw == 2 && mcs == 9)
++		return -EOPNOTSUPP;
++	params->rate_valid = true;
++	params->preamble = CDP_INJECTION_VHT;
++	params->mcs_mask = BIT(mcs);
++	params->nss_mask = BIT(nss - 1);
++	params->bandwidth_valid = true;
++	params->bw_mask = BIT(bw);
++	if (known & IEEE80211_RADIOTAP_VHT_KNOWN_GI) {
++		params->gi_valid = true;
++		params->guard_interval = !(vht[2] & IEEE80211_RADIOTAP_VHT_FLAG_SGI);
++	}
++	return 0;
++}
++
++static int hdd_injection_he(const uint8_t *he,
++			    struct cdp_tx_injection_params *params)
++{
++	u16 d1 = get_unaligned_le16(he), d2 = get_unaligned_le16(he + 2);
++	u16 d3 = get_unaligned_le16(he + 4), d4 = get_unaligned_le16(he + 6);
++	u16 d5 = get_unaligned_le16(he + 8), d6 = get_unaligned_le16(he + 10);
++	u8 mcs = (d3 & IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS) >> 8;
++	u8 nss = d6 & IEEE80211_RADIOTAP_HE_DATA6_NSTS;
++	u8 bw = d5 & IEEE80211_RADIOTAP_HE_DATA5_DATA_BW_RU_ALLOC;
++	u8 gi = (d5 & IEEE80211_RADIOTAP_HE_DATA5_GI) >> 4;
++	u8 ltf = (d5 & IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE) >> 6;
++	u16 required = IEEE80211_RADIOTAP_HE_DATA1_DATA_MCS_KNOWN |
++		       IEEE80211_RADIOTAP_HE_DATA1_BW_RU_ALLOC_KNOWN;
++
++	if (params->rate_valid)
++		return -EINVAL;
++	/* HTT supports HE SU MCS/NSS/BW/GI/LTF, not MU/RU, STBC, DCM or
++	 * explicit coding, beamforming, colour and spatial-reuse selections.
++	 */
++	if ((d1 & required) != required || (d1 & ~required) ||
++	    (d2 & ~IEEE80211_RADIOTAP_HE_DATA2_GI_KNOWN) ||
++	    (d3 & ~IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS) || d4 ||
++	    (d5 & ~(IEEE80211_RADIOTAP_HE_DATA5_DATA_BW_RU_ALLOC |
++		    IEEE80211_RADIOTAP_HE_DATA5_GI |
++		    IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE)) ||
++	    (d6 & ~IEEE80211_RADIOTAP_HE_DATA6_NSTS) ||
++	    mcs > 11 || nss < 1 || nss > 2 || bw > 2 || gi > 2 ||
++	    (!(d2 & IEEE80211_RADIOTAP_HE_DATA2_GI_KNOWN) && gi))
++		return -EOPNOTSUPP;
++	/* Default is 0.8 us/2x. 1.6 us requires 2x; 3.2 us requires 4x. */
++	if (!ltf)
++		ltf = gi == 2 ? 3 : 2;
++	if ((gi == 0 && ltf == 3) || (gi == 1 && ltf != 2) || (gi == 2 && ltf != 3))
++		return -EOPNOTSUPP;
++	params->rate_valid = true;
++	params->preamble = CDP_INJECTION_HE_SU;
++	params->mcs_mask = BIT(mcs);
++	params->nss_mask = BIT(nss - 1);
++	params->bandwidth_valid = true;
++	params->bw_mask = BIT(bw + 2);
++	params->gi_valid = true;
++	params->guard_interval = gi + 1;
++	params->he_ltf = ltf - 1;
++	return 0;
++}
++
+ static int hdd_injection_radiotap_present(const uint8_t *data, uint16_t len)
+ {
+ 	uint32_t present, allowed;
+@@ -598,7 +684,8 @@ static int hdd_injection_radiotap_present(const uint8_t *data, uint16_t len)
+ 		allowed = BIT(IEEE80211_RADIOTAP_EXT) |
+ 			  BIT(IEEE80211_RADIOTAP_RADIOTAP_NAMESPACE);
+ 		if (standard)
+-			allowed |= GENMASK(IEEE80211_RADIOTAP_VHT, 0) & ~BIT(18);
++			allowed |= (GENMASK(IEEE80211_RADIOTAP_VHT, 0) & ~BIT(18)) |
++				   BIT(IEEE80211_RADIOTAP_HE);
+ 		if (present & ~allowed)
+ 			return -EOPNOTSUPP;
+ 		standard = present & BIT(IEEE80211_RADIOTAP_RADIOTAP_NAMESPACE);
+@@ -650,6 +737,16 @@ static int hdd_parse_injection_radiotap(struct sk_buff *skb,
+ 			if (ret)
+ 				return ret;
+ 			break;
++		case IEEE80211_RADIOTAP_VHT:
++			ret = hdd_injection_vht(iter.this_arg, params);
++			if (ret)
++				return ret;
++			break;
++		case IEEE80211_RADIOTAP_HE:
++			ret = hdd_injection_he(iter.this_arg, params);
++			if (ret)
++				return ret;
++			break;
+ 		case IEEE80211_RADIOTAP_CHANNEL:
+ 			params->chanfreq = get_unaligned_le16(iter.this_arg);
+ 			if (get_unaligned_le16(iter.this_arg + 2) &
+diff --git a/qcacld-3.0/core/wma/src/wma_data.c b/qcacld-3.0/core/wma/src/wma_data.c
+index 5770f2b73..d4d435930 100644
+--- a/qcacld-3.0/core/wma/src/wma_data.c
++++ b/qcacld-3.0/core/wma/src/wma_data.c
+@@ -220,6 +220,8 @@ struct wma_injection_helper {
+ 	uint8_t interface_mac[QDF_MAC_ADDR_SIZE];
+ 	uint8_t mac_addr[QDF_MAC_ADDR_SIZE];
+ 	uint8_t peer_addr[QDF_MAC_ADDR_SIZE];
++	uint8_t max_nss;
++	uint8_t channel_bw_mask;
+ #ifdef FEATURE_WLAN_WONDER
+ 	uint64_t wonder_cookie;
+ 	bool wonder_owned;
+@@ -987,6 +989,9 @@ QDF_STATUS wma_injection_helper_start_rsp(struct vdev_mlme_obj *mlme,
+ 			     sizeof(struct wlan_channel));
+ 		wma->interfaces[helper->vdev_id].ch_freq = helper->chanfreq;
+ 		wma->interfaces[helper->vdev_id].tx_streams = rsp->cfgd_tx_streams;
++		/* Firmware may reduce the preferred stream count for the chosen MAC. */
++		helper->max_nss = rsp->cfgd_tx_streams ?
++			qdf_min((uint32_t)helper->max_nss, rsp->cfgd_tx_streams) : 1;
+ 		wlan_mlme_set_vdev_mac_id(wma->pdev, helper->vdev_id, mac_id);
+ 		cdp_update_mac_id(wlan_psoc_get_dp_handle(wma->psoc),
+ 				 helper->vdev_id, mac_id);
+@@ -1143,6 +1148,8 @@ struct wma_injection_helper_snapshot {
+ 	uint8_t vdev_id;
+ 	uint16_t peer_id;
+ 	bool direct_dp;
++	uint8_t max_nss;
++	uint8_t channel_bw_mask;
+ };
+ 
+ static void wma_injection_queue_work(void)
+@@ -1170,6 +1177,8 @@ wma_injection_get_helper_snapshot(uint8_t monitor_vdev_id,
+ 
+ 	snapshot->vdev_id = READ_ONCE(helper->vdev_id);
+ 	snapshot->peer_id = READ_ONCE(helper->peer_id);
++	snapshot->max_nss = READ_ONCE(helper->max_nss);
++	snapshot->channel_bw_mask = READ_ONCE(helper->channel_bw_mask);
+ 	snapshot->direct_dp = READ_ONCE(helper->dp_attached) &&
+ 			      READ_ONCE(helper->dp_peer_attached) &&
+ 			      READ_ONCE(helper->wmi_started) &&
+@@ -1177,6 +1186,25 @@ wma_injection_get_helper_snapshot(uint8_t monitor_vdev_id,
+ 	return true;
+ }
+ 
++static uint8_t wma_injection_nss_limit(uint8_t configured)
++{
++	return configured ? qdf_min(configured, (uint8_t)2) : 1;
++}
++
++static uint8_t wma_injection_channel_bw_mask(enum phy_ch_width width)
++{
++	switch (width) {
++	case CH_WIDTH_40MHZ:
++		return BIT(2) | BIT(3);
++	case CH_WIDTH_80MHZ:
++	case CH_WIDTH_160MHZ:
++	case CH_WIDTH_80P80MHZ:
++		return BIT(2) | BIT(3) | BIT(4);
++	default:
++		return BIT(2);
++	}
++}
++
+ static void wma_injection_select_mac(uint8_t *helper_mac,
+ 				     const uint8_t *interface_mac,
+ 				     const uint8_t *monitor_mac)
+@@ -1450,8 +1478,12 @@ wma_injection_native_channel(tp_wma_handle wma,
+ 	start->channel.puncture_bitmap = channel->puncture_bitmap;
+ 	start->eht_ops = owner_mlme->proto.eht_ops_info.eht_ops;
+ #endif
+-	start->preferred_tx_streams = 1;
+-	start->preferred_rx_streams = 1;
++	helper->max_nss = wma_injection_nss_limit(channel->ch_freq < 3000 ?
++		qdf_min(owner_mlme->proto.generic.nss_2g, mlme->proto.generic.nss_2g) :
++		qdf_min(owner_mlme->proto.generic.nss_5g, mlme->proto.generic.nss_5g));
++	helper->channel_bw_mask = wma_injection_channel_bw_mask(channel->ch_width);
++	start->preferred_tx_streams = helper->max_nss;
++	start->preferred_rx_streams = helper->max_nss;
+ 	wlan_reg_get_dfs_region(wma->pdev, &dfs_region);
+ 	start->regdomain = dfs_region;
+ 	start->he_ops = owner_mlme->proto.he_ops_info.he_ops;
+@@ -1838,8 +1870,10 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
+ 	stage = "vdev_create";
+ 	create.vdev_id = helper->vdev_id;
+ 	create.type = WMI_VDEV_TYPE_AP;
+-	create.nss_2g = 1;
+-	create.nss_5g = 1;
++	create.nss_2g = wma_injection_nss_limit(monitor_mlme->proto.generic.nss_2g);
++	create.nss_5g = wma_injection_nss_limit(monitor_mlme->proto.generic.nss_5g);
++	helper->max_nss = chanfreq < 3000 ? create.nss_2g : create.nss_5g;
++	helper->channel_bw_mask = wma_injection_channel_bw_mask(monitor_chan->ch_width);
+ 	status = wmi_unified_vdev_create_send(wma->wmi_handle,
+ 					      helper->mac_addr, &create);
+ 	if (QDF_IS_STATUS_ERROR(status))
+@@ -1929,8 +1963,8 @@ __wma_injection_ensure_helper(tp_wma_handle wma, uint8_t monitor_vdev_id,
+ 	start.channel.puncture_bitmap = monitor_chan->puncture_bitmap;
+ 	start.eht_ops = monitor_mlme->proto.eht_ops_info.eht_ops;
+ #endif
+-	start.preferred_tx_streams = 1;
+-	start.preferred_rx_streams = 1;
++	start.preferred_tx_streams = helper->max_nss;
++	start.preferred_rx_streams = helper->max_nss;
+ 	wlan_reg_get_dfs_region(wma->pdev, &dfs_region);
+ 	start.regdomain = dfs_region;
+ 	start.he_ops = monitor_mlme->proto.he_ops_info.he_ops;
+@@ -2011,10 +2045,13 @@ QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+ 		status = QDF_STATUS_E_NOSUPPORT;
+ 		goto out;
+ 	}
+-	status = __wma_injection_ensure_helper(wma, monitor_id, frequency,
+-					     interface_mac, generation);
+-	if (QDF_IS_STATUS_ERROR(status))
+-		goto out;
++	if (!wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
++					      generation, &current)) {
++		status = __wma_injection_ensure_helper(wma, monitor_id, frequency,
++						     interface_mac, generation);
++		if (QDF_IS_STATUS_ERROR(status))
++			goto out;
++	}
+ 	if (!wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+ 					      generation, &current) || !current.direct_dp) {
+ 		status = QDF_STATUS_E_AGAIN;
+@@ -2180,6 +2217,15 @@ wma_injection_send(tp_wma_handle wma, qdf_nbuf_t nbuf,
+ 	}
+ 	if (!allow_setup && !helper.direct_dp)
+ 		return QDF_STATUS_E_AGAIN;
++	if (tx_params->rate_valid && (!helper.max_nss ||
++	    (tx_params->nss_mask & ~GENMASK(helper.max_nss - 1, 0))))
++		return QDF_STATUS_E_NOSUPPORT;
++	if (tx_params->bandwidth_valid &&
++	    (tx_params->bw_mask & ~helper.channel_bw_mask))
++		return QDF_STATUS_E_NOSUPPORT;
++	if (chanfreq >= 5925 && tx_params->rate_valid &&
++	    tx_params->preamble != CDP_INJECTION_HE_SU)
++		return QDF_STATUS_E_NOSUPPORT;
+ 	/* WMI management fallback cannot carry raw data/control or HTT options. */
+ 	if (!helper.direct_dp &&
+ 	    (!ieee80211_is_mgmt(frame_control) || tx_params->rate_valid ||
+diff --git a/wonder/include/wondertap_monitor.h b/wonder/include/wondertap_monitor.h
+index 83d4de2fa..0a5639c76 100644
+--- a/wonder/include/wondertap_monitor.h
++++ b/wonder/include/wondertap_monitor.h
+@@ -7,18 +7,38 @@
+ #include <wondertap.h>
+ 
+ /* Bounds for the existing Onyx monitor injection transport. */
+-#define WONDERTAP_MONITOR_RTAP_MAX 17
++#define WONDERTAP_MONITOR_RTAP_MAX 26
+ 
+ static inline int wondertap_monitor_validate_rate(
+ 		const struct wondertap_fixed_tx_rate_params *rate)
+ {
+ 	if (!rate)
+ 		return -EINVAL;
+-	if (rate->preamble != WONDERTAP_RATE_PREAMBLE_HT ||
+-	    rate->bw != WONDERTAP_RATE_BW_20 || rate->nss != 1 ||
+-	    rate->mcs > 7 || rate->gi < WONDERTAP_RATE_GI_DEFAULT ||
+-	    rate->gi > WONDERTAP_RATE_GI_0_8_US)
++	if (rate->nss < 1 || rate->nss > 2 ||
++	    rate->bw < WONDERTAP_RATE_BW_20 || rate->bw > WONDERTAP_RATE_BW_80 ||
++	    rate->gi < WONDERTAP_RATE_GI_DEFAULT || rate->gi > WONDERTAP_RATE_GI_3_2_US ||
++	    rate->reserved[0] || rate->reserved[1])
+ 		return -EOPNOTSUPP;
++	switch (rate->preamble) {
++	case WONDERTAP_RATE_PREAMBLE_HT:
++		/* Accept per-stream MCS or a consistent combined HT MCS index. */
++		if (rate->bw > WONDERTAP_RATE_BW_40 || rate->mcs > 15 ||
++		    (rate->mcs > 7 && rate->nss != rate->mcs / 8 + 1) ||
++		    rate->gi > WONDERTAP_RATE_GI_0_8_US)
++			return -EOPNOTSUPP;
++		break;
++	case WONDERTAP_RATE_PREAMBLE_VHT:
++		if (rate->mcs > 9 || rate->gi > WONDERTAP_RATE_GI_0_8_US ||
++		    (rate->bw == WONDERTAP_RATE_BW_20 && rate->mcs == 9))
++			return -EOPNOTSUPP;
++		break;
++	case WONDERTAP_RATE_PREAMBLE_HE:
++		if (rate->mcs > 11 || rate->gi == WONDERTAP_RATE_GI_SHORT)
++			return -EOPNOTSUPP;
++		break;
++	default:
++		return -EOPNOTSUPP;
++	}
+ 	return 0;
+ }
+ 
+@@ -53,20 +73,57 @@ static inline int wondertap_monitor_radiotap(u8 *buffer, size_t size,
+ 		buffer[offset++] = 12;
+ 		offset = ALIGN(offset, 2);
+ 	} else {
+-		present |= BIT(IEEE80211_RADIOTAP_MCS);
++		switch (rate->preamble) {
++		case WONDERTAP_RATE_PREAMBLE_HT:
++			present |= BIT(IEEE80211_RADIOTAP_MCS);
++			break;
++		case WONDERTAP_RATE_PREAMBLE_VHT:
++			present |= BIT(IEEE80211_RADIOTAP_VHT);
++			break;
++		case WONDERTAP_RATE_PREAMBLE_HE:
++			present |= BIT(IEEE80211_RADIOTAP_HE);
++			break;
++		default:
++			return -EOPNOTSUPP;
++		}
+ 	}
+ 	put_unaligned_le16(freq, buffer + offset);
+ 	put_unaligned_le16(channel_flags, buffer + offset + 2);
+ 	offset += 4;
+ 	put_unaligned_le16(tx_flags, buffer + offset);
+ 	offset += 2;
+-	if (data) {
++	if (data && rate->preamble == WONDERTAP_RATE_PREAMBLE_HT) {
+ 		buffer[offset++] = IEEE80211_RADIOTAP_MCS_HAVE_BW |
+ 			IEEE80211_RADIOTAP_MCS_HAVE_MCS |
+ 			IEEE80211_RADIOTAP_MCS_HAVE_GI;
+-		buffer[offset++] = rate->gi == WONDERTAP_RATE_GI_SHORT ?
+-			IEEE80211_RADIOTAP_MCS_SGI : 0;
+-		buffer[offset++] = rate->mcs;
++		buffer[offset++] =
++			(rate->bw == WONDERTAP_RATE_BW_40 ? IEEE80211_RADIOTAP_MCS_BW_40 : 0) |
++			(rate->gi == WONDERTAP_RATE_GI_SHORT ? IEEE80211_RADIOTAP_MCS_SGI : 0);
++		buffer[offset++] = rate->mcs <= 7 ? rate->mcs + 8 * (rate->nss - 1) : rate->mcs;
++	} else if (data && rate->preamble == WONDERTAP_RATE_PREAMBLE_VHT) {
++		offset = ALIGN(offset, 2);
++		put_unaligned_le16(IEEE80211_RADIOTAP_VHT_KNOWN_GI |
++				   IEEE80211_RADIOTAP_VHT_KNOWN_BANDWIDTH, buffer + offset);
++		buffer[offset + 2] = rate->gi == WONDERTAP_RATE_GI_SHORT ?
++			IEEE80211_RADIOTAP_VHT_FLAG_SGI : 0;
++		buffer[offset + 3] = rate->bw == WONDERTAP_RATE_BW_80 ? 4 :
++			rate->bw == WONDERTAP_RATE_BW_40 ? 1 : 0;
++		buffer[offset + 4] = (rate->mcs << 4) | rate->nss;
++		offset += 12;
++	} else if (data && rate->preamble == WONDERTAP_RATE_PREAMBLE_HE) {
++		u16 gi = rate->gi == WONDERTAP_RATE_GI_3_2_US ? 2 :
++			 rate->gi == WONDERTAP_RATE_GI_1_6_US ? 1 : 0;
++		u16 ltf = gi == 2 ? IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE_4X :
++			  IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE_2X;
++
++		offset = ALIGN(offset, 2);
++		put_unaligned_le16(IEEE80211_RADIOTAP_HE_DATA1_DATA_MCS_KNOWN |
++				   IEEE80211_RADIOTAP_HE_DATA1_BW_RU_ALLOC_KNOWN, buffer + offset);
++		put_unaligned_le16(IEEE80211_RADIOTAP_HE_DATA2_GI_KNOWN, buffer + offset + 2);
++		put_unaligned_le16(rate->mcs << 8, buffer + offset + 4);
++		put_unaligned_le16(rate->bw | (gi << 4) | (ltf << 6), buffer + offset + 8);
++		put_unaligned_le16(rate->nss, buffer + offset + 10);
++		offset += sizeof(struct ieee80211_radiotap_he);
+ 	}
+ 	header->it_len = cpu_to_le16(offset);
+ 	header->it_present = cpu_to_le32(present);

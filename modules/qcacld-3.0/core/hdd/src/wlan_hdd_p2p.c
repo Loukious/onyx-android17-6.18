@@ -1360,6 +1360,11 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 
 	hdd_enter();
 
+#ifdef FEATURE_WLAN_WONDER
+	if (READ_ONCE(adapter->wonder_owned))
+		return -EBUSY;
+#endif
+
 	if (QDF_GLOBAL_FTM_MODE == hdd_get_conparam()) {
 		hdd_err("Command not allowed in FTM mode");
 		return -EINVAL;
@@ -1432,6 +1437,11 @@ int wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	bool sta_delete = adapter->device_mode == QDF_STA_MODE &&
 		hdd_sta_ap_monitor_coexist_enabled();
 	bool owner_delete = ap_delete || sta_delete;
+
+#ifdef FEATURE_WLAN_WONDER
+	if (READ_ONCE(adapter->wonder_owned))
+		return -EBUSY;
+#endif
 
 	if (hdd_preserve_station_for_monitor(hdd_ctx, adapter))
 		return 0;

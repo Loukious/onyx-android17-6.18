@@ -1,0 +1,4070 @@
+diff --git a/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h b/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
+index 0ba9c39fc0e91191ceb23418c25317c6a44f3b26..45b446fddbfc78a36993e65ca8a3fd690be7623d 100644
+--- a/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
++++ b/qca-wifi-host-cmn/dp/inc/cdp_txrx_injection.h
+@@ -105,6 +105,30 @@ static inline void wma_injection_power_override(uint8_t vdev_id)
+ }
+ #endif
+ 
++#ifdef FEATURE_WLAN_WONDER
++bool wlan_injection_wonder_vdev_admission(uint8_t opmode);
++/* Genuine per-PPDU airtime and MAC TSF, never packet-count estimates. */
++void wlan_injection_wonder_note_airtime(uint32_t pdev_id, uint32_t lmac_id,
++				       uint32_t frequency,
++				       uint32_t mac_tsf, bool tx,
++				       uint32_t duration_us);
++
++struct cdp_soc_t;
++#if defined(WIFI_MONITOR_SUPPORT) && defined(WDI_EVENT_ENABLE)
++/* Caller serializes monitor lifetime. Disable relinquishes ownership even
++ * when restoring the firmware upload mask fails, and returns that error.
++ */
++QDF_STATUS dp_mon_wonder_set_airtime(struct cdp_soc_t *soc, uint8_t monitor_id,
++				     bool enabled);
++#else
++static inline QDF_STATUS
++dp_mon_wonder_set_airtime(struct cdp_soc_t *soc, uint8_t monitor_id, bool enabled)
++{
++	return QDF_STATUS_E_NOSUPPORT;
++}
++#endif
++#endif
++
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
+ bool wma_injection_get_tx_params(qdf_nbuf_t nbuf,
+ 				struct cdp_tx_injection_params *params);
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/dp_htt.c b/qca-wifi-host-cmn/dp/wifi3.0/dp_htt.c
+index 11f045d40ab614508239c202ac4beed2d0d807ee..21df4b3b0a6bac463c5442eabcae9e721219f363 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/dp_htt.c
++++ b/qca-wifi-host-cmn/dp/wifi3.0/dp_htt.c
+@@ -63,6 +63,14 @@
+ #define HTT_MASK_UPPER_TIMESTAMP 0xFFFFFFFF00000000
+ #define HTT_BKP_STATS_MAX_QUEUE_DEPTH 16
+ 
++#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT) && \
++	defined(WDI_EVENT_ENABLE)
++/* HTT submission is atomic-context safe. Serialize ownership, the current
++ * base request, and command ordering across all stats consumers.
++ */
++static DEFINE_SPINLOCK(dp_wonder_airtime_config_lock);
++#endif
++
+ #ifdef HTT_HTC_NO_RECYCLER_ALLOC
+ static inline qdf_nbuf_t dp_htt_htc_msg_alloc(qdf_device_t osdev,
+ 					      qdf_size_t size,
+@@ -4434,6 +4442,11 @@ void dp_htt_t2h_msg_handler(void *context, HTC_PACKET *pkt)
+ 
+ 	case HTT_T2H_MSG_TYPE_PPDU_STATS_IND:
+ 		{
++#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT) && \
++	defined(WDI_EVENT_ENABLE)
++			/* Onyx has neither SON enhanced stats nor packet logging. */
++			dp_mon_wonder_tx_ppdu(soc, msg_word, htt_t2h_msg);
++#endif
+ 			free_buf =
+ 				dp_monitor_ppdu_stats_ind_handler(soc,
+ 								  msg_word,
+@@ -5315,7 +5328,7 @@ QDF_STATUS dp_h2t_3tuple_config_send(struct dp_pdev *pdev,
+  * HTT_H2T_MSG_TYPE_PPDU_STATS_CFG in htt.h file
+  * */
+ #if defined(WDI_EVENT_ENABLE)
+-QDF_STATUS dp_h2t_cfg_stats_msg_send(struct dp_pdev *pdev,
++static QDF_STATUS dp_h2t_cfg_stats_msg_send_locked(struct dp_pdev *pdev,
+ 		uint32_t stats_type_upload_mask, uint8_t mac_id)
+ {
+ 	struct htt_soc *soc = pdev->soc->htt_handle;
+@@ -5324,6 +5337,14 @@ QDF_STATUS dp_h2t_cfg_stats_msg_send(struct dp_pdev *pdev,
+ 	uint32_t *msg_word;
+ 	uint8_t pdev_mask;
+ 	QDF_STATUS status;
++#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT)
++	uint32_t requested_mask = stats_type_upload_mask;
++	struct dp_mon_pdev *mon_pdev = pdev->monitor_pdev;
++
++	if (mon_pdev && mac_id == pdev->pdev_id &&
++	    READ_ONCE(mon_pdev->wonder_airtime_enabled))
++		stats_type_upload_mask |= 1U << HTT_PPDU_STATS_COMMON_TLV;
++#endif
+ 
+ 	msg = dp_htt_htc_msg_alloc(
+ 			soc->osdev,
+@@ -5393,9 +5414,73 @@ QDF_STATUS dp_h2t_cfg_stats_msg_send(struct dp_pdev *pdev,
+ 		qdf_nbuf_free(msg);
+ 		htt_htc_pkt_free(soc, pkt);
+ 	}
++#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT)
++	else if (mon_pdev && mac_id == pdev->pdev_id) {
++		/* Record current base requests, including changes made while owned. */
++		WRITE_ONCE(mon_pdev->wonder_airtime_base_mask, requested_mask);
++	}
++#endif
++
++	return status;
++}
++
++QDF_STATUS dp_h2t_cfg_stats_msg_send(struct dp_pdev *pdev,
++		uint32_t stats_type_upload_mask, uint8_t mac_id)
++{
++#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT)
++	QDF_STATUS status;
++
++	spin_lock_bh(&dp_wonder_airtime_config_lock);
++	status = dp_h2t_cfg_stats_msg_send_locked(pdev, stats_type_upload_mask,
++						 mac_id);
++	spin_unlock_bh(&dp_wonder_airtime_config_lock);
++	return status;
++#else
++	return dp_h2t_cfg_stats_msg_send_locked(pdev, stats_type_upload_mask, mac_id);
++#endif
++}
++
++#if defined(FEATURE_WLAN_WONDER) && defined(WIFI_MONITOR_SUPPORT)
++QDF_STATUS dp_htt_wonder_set_airtime(struct dp_pdev *pdev, uint8_t monitor_id,
++				     bool enabled)
++{
++	struct dp_mon_pdev *mon_pdev = pdev->monitor_pdev;
++	QDF_STATUS status;
+ 
++	spin_lock_bh(&dp_wonder_airtime_config_lock);
++	if (mon_pdev->wonder_airtime_enabled) {
++		if (mon_pdev->wonder_airtime_vdev_id != monitor_id) {
++			status = QDF_STATUS_E_BUSY;
++			goto unlock;
++		}
++		if (enabled) {
++			status = QDF_STATUS_SUCCESS;
++			goto unlock;
++		}
++	} else if (!enabled) {
++		status = QDF_STATUS_SUCCESS;
++		goto unlock;
++	}
++	qdf_spin_lock_bh(&mon_pdev->ppdu_stats_lock);
++	mon_pdev->wonder_airtime_vdev_id = monitor_id;
++	if (enabled)
++		qdf_mem_zero(mon_pdev->wonder_airtime_last,
++			     sizeof(mon_pdev->wonder_airtime_last));
++	WRITE_ONCE(mon_pdev->wonder_airtime_enabled, enabled);
++	qdf_spin_unlock_bh(&mon_pdev->ppdu_stats_lock);
++	status = dp_h2t_cfg_stats_msg_send_locked(pdev,
++			mon_pdev->wonder_airtime_base_mask, pdev->pdev_id);
++	if (QDF_IS_STATUS_ERROR(status) && enabled) {
++		qdf_spin_lock_bh(&mon_pdev->ppdu_stats_lock);
++		WRITE_ONCE(mon_pdev->wonder_airtime_enabled, false);
++		qdf_spin_unlock_bh(&mon_pdev->ppdu_stats_lock);
++	}
++	/* Failed disable reports a firmware restore error but releases ownership. */
++unlock:
++	spin_unlock_bh(&dp_wonder_airtime_config_lock);
+ 	return status;
+ }
++#endif
+ 
+ qdf_export_symbol(dp_h2t_cfg_stats_msg_send);
+ #endif
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c b/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c
+index dd9bff2fce4287877614ba6332ee65c8ef6f0b07..778383c3bae8eed0db704c31216e9c019b8d03ec 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c
++++ b/qca-wifi-host-cmn/dp/wifi3.0/monitor/1.0/dp_rx_mon_status_1.0.c
+@@ -16,6 +16,7 @@
+  */
+ #include "hal_hw_headers.h"
+ #include "dp_types.h"
++#include <cdp_txrx_injection.h>
+ #include "dp_rx.h"
+ #include "dp_peer.h"
+ #include "hal_rx.h"
+@@ -485,9 +486,26 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
+ 		    mon_pdev->undecoded_metadata_capture ||
+ 		    rx_enh_capture_mode != CDP_RX_ENH_CAPTURE_DISABLED) {
+ 			do {
++#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE) && \
++	defined(QCA_WIFI_WCN7750)
++				/* Full monitor may retain the previous status until its
++				 * destination is consumed. Track actual TLVs for this PPDU.
++				 */
++				if (HAL_RX_GET_USER_TLV32_TYPE(rx_tlv) ==
++				    WIFIRX_PPDU_START_E) {
++					mon_mac->wonder_rx_start_seen = true;
++					mon_mac->wonder_rx_end_seen = false;
++				}
++#endif
+ 				tlv_status = hal_rx_status_get_tlv_info(rx_tlv,
+ 						ppdu_info, pdev->soc->hal_soc,
+ 						status_nbuf);
++#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE) && \
++	defined(QCA_WIFI_WCN7750)
++				if (HAL_RX_GET_USER_TLV32_TYPE(rx_tlv) ==
++				    WIFIRXPCU_PPDU_END_INFO_E)
++					mon_mac->wonder_rx_end_seen = true;
++#endif
+ 
+ 				if (qdf_unlikely(IS_LOCAL_PKT_CAPTURE_RUNNING(mon_pdev, is_local_pkt_capture_running)))
+ 					dp_rx_handle_local_pkt_capture(pdev, ppdu_info, status_nbuf, mac_id, tlv_status);
+@@ -570,10 +588,23 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
+ 		}
+ 
+ 		if (qdf_unlikely(tlv_status == HAL_TLV_STATUS_PPDU_NON_STD_DONE)) {
++#ifdef FEATURE_WLAN_WONDER
++			mon_mac->wonder_rx_start_seen = false;
++			mon_mac->wonder_rx_end_seen = false;
++#endif
+ 			dp_rx_mon_deliver_non_std(soc, mac_id);
+ 			dp_mon_rx_ppdu_status_reset(mon_mac);
+ 		} else if ((qdf_likely(tlv_status == HAL_TLV_STATUS_PPDU_DONE)) &&
+ 				(qdf_likely(!dp_rx_mon_check_phyrx_abort(pdev, ppdu_info)))) {
++#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE) && \
++	defined(QCA_WIFI_WCN7750)
++			/* Once per PPDU, before per-user stats and channel fallbacks. */
++			if (mon_mac->wonder_rx_start_seen &&
++			    mon_mac->wonder_rx_end_seen)
++				dp_mon_wonder_rx_ppdu(pdev, mac_id, ppdu_info);
++			mon_mac->wonder_rx_start_seen = false;
++			mon_mac->wonder_rx_end_seen = false;
++#endif
+ 			rx_mon_stats->status_ppdu_done++;
+ 			dp_rx_mon_handle_mu_ul_info(ppdu_info);
+ 
+@@ -624,6 +655,12 @@ dp_rx_mon_status_process_tlv(struct dp_soc *soc, struct dp_intr *int_ctx,
+ 						DP_PPDU_STATUS_START;
+ 			}
+ 		} else {
++#ifdef FEATURE_WLAN_WONDER
++			if (tlv_status == HAL_TLV_STATUS_PPDU_DONE) {
++				mon_mac->wonder_rx_start_seen = false;
++				mon_mac->wonder_rx_end_seen = false;
++			}
++#endif
+ 			dp_rx_mon_handle_ppdu_undecoded_metadata(soc, pdev,
+ 								 ppdu_info,
+ 								 mon_mac);
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.c b/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.c
+index 18515af2531389c2ba7fb89a17bbf52b3d6bceec..97603e854f2022b0f0c84d068597a3d5b01fd809 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.c
++++ b/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.c
+@@ -15,6 +15,7 @@
+  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  */
+ #include <dp_types.h>
++#include <cdp_txrx_injection.h>
+ #include "dp_rx.h"
+ #include "dp_tx.h"
+ #include "dp_peer.h"
+@@ -49,6 +50,127 @@
+ #define DP_INTR_POLL_TIMER_MS	5
+ #define INVALID_FREE_BUFF 0xffffffff
+ 
++#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE)
++QDF_STATUS dp_mon_wonder_set_airtime(struct cdp_soc_t *soc_hdl,
++				     uint8_t monitor_id, bool enabled)
++{
++	struct dp_soc *soc;
++	struct dp_vdev *vdev;
++	struct dp_pdev *pdev;
++	QDF_STATUS status;
++
++	if (!soc_hdl)
++		return QDF_STATUS_E_INVAL;
++	soc = cdp_soc_t_to_dp_soc(soc_hdl);
++	if (!soc->monitor_soc ||
++	    hal_get_target_type(soc->hal_soc) != TARGET_TYPE_WCN7750 ||
++	    dp_mon_mode_local_pkt_capture(soc))
++		return QDF_STATUS_E_NOSUPPORT;
++	vdev = dp_vdev_get_ref_by_id(soc, monitor_id, DP_MOD_ID_CDP);
++	if (!vdev)
++		return QDF_STATUS_E_INVAL;
++	pdev = vdev->pdev;
++	if (!pdev || !pdev->monitor_pdev ||
++	    vdev->opmode != wlan_op_mode_monitor) {
++		status = QDF_STATUS_E_INVAL;
++		goto release;
++	}
++	if (enabled && !pdev->monitor_pdev->monitor_configured) {
++		status = QDF_STATUS_E_AGAIN;
++		goto release;
++	}
++	status = dp_htt_wonder_set_airtime(pdev, monitor_id, enabled);
++release:
++	dp_vdev_unref_delete(soc, vdev, DP_MOD_ID_CDP);
++	return status;
++}
++
++static void dp_mon_wonder_note_ppdu(struct dp_pdev *pdev, uint32_t mac_id,
++				   uint32_t frequency, uint64_t tsf,
++				   uint32_t ppdu_id, bool tx,
++				   uint32_t duration_us)
++{
++	struct dp_mon_pdev *mon_pdev = pdev->monitor_pdev;
++	unsigned int direction = tx ? 1 : 0;
++	bool report = false;
++
++	if (!mon_pdev || mac_id >= MAX_NUM_LMAC_HW || !frequency ||
++	    !duration_us || !READ_ONCE(mon_pdev->wonder_airtime_enabled))
++		return;
++	qdf_spin_lock_bh(&mon_pdev->ppdu_stats_lock);
++	/* Common TX TLVs and RX status rings are ordered within each MAC.
++	 * Reject duplicate and stale observations without multiplying MU users.
++	 */
++	if (mon_pdev->wonder_airtime_enabled &&
++	    (!mon_pdev->wonder_airtime_last[mac_id][direction].valid ||
++	     tsf > mon_pdev->wonder_airtime_last[mac_id][direction].tsf)) {
++		mon_pdev->wonder_airtime_last[mac_id][direction].valid = true;
++		mon_pdev->wonder_airtime_last[mac_id][direction].tsf = tsf;
++		mon_pdev->wonder_airtime_last[mac_id][direction].ppdu_id = ppdu_id;
++		report = true;
++	}
++	qdf_spin_unlock_bh(&mon_pdev->ppdu_stats_lock);
++	if (report)
++		wlan_injection_wonder_note_airtime(pdev->pdev_id, mac_id, frequency,
++					       (uint32_t)tsf, tx, duration_us);
++}
++
++void dp_mon_wonder_rx_ppdu(struct dp_pdev *pdev, uint32_t mac_id,
++			 struct hal_rx_ppdu_info *ppdu_info)
++{
++	dp_mon_wonder_note_ppdu(pdev, mac_id, ppdu_info->rx_status.chan_freq,
++			       ppdu_info->rx_status.tsft, ppdu_info->com_info.ppdu_id,
++			       false, ppdu_info->rx_status.duration);
++}
++
++void dp_mon_wonder_tx_ppdu(struct htt_soc *soc, uint32_t *msg_word,
++			 qdf_nbuf_t htt_t2h_msg)
++{
++	struct dp_pdev *pdev;
++	uint32_t remaining, length, tag, frequency, duration, ppdu_id, mac_id;
++	uint64_t tsf;
++	uint8_t pdev_id;
++
++	if (qdf_nbuf_len(htt_t2h_msg) < HTT_T2H_PPDU_STATS_IND_HDR_SIZE)
++		return;
++	remaining = HTT_T2H_PPDU_STATS_PAYLOAD_SIZE_GET(*msg_word);
++	if (remaining > qdf_nbuf_len(htt_t2h_msg) - HTT_T2H_PPDU_STATS_IND_HDR_SIZE)
++		return;
++	pdev_id = dp_get_host_pdev_id_for_target_pdev_id(soc->dp_soc,
++				HTT_T2H_PPDU_STATS_PDEV_ID_GET(*msg_word));
++	pdev = dp_get_pdev_from_soc_pdev_id_wifi3(soc->dp_soc, pdev_id);
++	if (!pdev || !pdev->monitor_pdev ||
++	    !READ_ONCE(pdev->monitor_pdev->wonder_airtime_enabled))
++		return;
++	mac_id = HTT_T2H_PPDU_STATS_MAC_ID_GET(*msg_word);
++	ppdu_id = HTT_T2H_PPDU_STATS_PPDU_ID_GET(msg_word[1]);
++	msg_word += HTT_T2H_PPDU_STATS_IND_HDR_SIZE / sizeof(*msg_word);
++	while (remaining >= sizeof(*msg_word)) {
++		tag = HTT_STATS_TLV_TAG_GET(*msg_word);
++		length = HTT_STATS_TLV_LENGTH_GET(*msg_word) + sizeof(*msg_word);
++		if (length > remaining || length % sizeof(*msg_word))
++			return;
++		if (tag == HTT_PPDU_STATS_COMMON_TLV) {
++			/* Need the real PHY duration and both MAC timestamp halves. */
++			if (length < (HTT_GET_STATS_CMN_INDEX(START_TSTMP_U32_US) + 1) *
++				     sizeof(*msg_word))
++				return;
++			frequency = HTT_PPDU_STATS_COMMON_TLV_CHAN_MHZ_GET(
++				msg_word[HTT_GET_STATS_CMN_INDEX(CHAN_MHZ_PHY_MODE)]);
++			duration = HTT_PPDU_STATS_COMMON_TLV_PHY_PPDU_TX_TIME_US_GET(
++				msg_word[HTT_GET_STATS_CMN_INDEX(RESV_NUM_UL_BEAM)]);
++			tsf = msg_word[HTT_GET_STATS_CMN_INDEX(START_TSTMP_U32_US)];
++			tsf = (tsf << 32) |
++				msg_word[HTT_GET_STATS_CMN_INDEX(START_TSTMP_L32_US)];
++			dp_mon_wonder_note_ppdu(pdev, mac_id, frequency, tsf,
++					       ppdu_id, true, duration);
++		}
++		remaining -= length;
++		msg_word += length / sizeof(*msg_word);
++	}
++}
++#endif
++
+ #if defined(FEATURE_FRAME_INJECTION_SUPPORT) && defined(QCA_MONITOR_PKT_SUPPORT)
+ bool dp_mon_sta_coex_supported(struct cdp_soc_t *soc_hdl)
+ {
+diff --git a/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h b/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h
+index f520e6297878227ebcf87f45c15b777cb1516d79..e917653798af81412649f88a42887faf5accd143 100644
+--- a/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h
++++ b/qca-wifi-host-cmn/dp/wifi3.0/monitor/dp_mon.h
+@@ -689,6 +689,16 @@ bool dp_ppdu_stats_ind_handler(struct htt_soc *soc,
+ 			       qdf_nbuf_t htt_t2h_msg);
+ #endif
+ 
++#if defined(FEATURE_WLAN_WONDER) && defined(WDI_EVENT_ENABLE)
++QDF_STATUS dp_htt_wonder_set_airtime(struct dp_pdev *pdev, uint8_t monitor_id,
++				     bool enabled);
++/* Consume raw PPDU metadata before per-user or delayed-BA transformations. */
++void dp_mon_wonder_tx_ppdu(struct htt_soc *soc, uint32_t *msg_word,
++			 qdf_nbuf_t htt_t2h_msg);
++void dp_mon_wonder_rx_ppdu(struct dp_pdev *pdev, uint32_t mac_id,
++			 struct hal_rx_ppdu_info *ppdu_info);
++#endif
++
+ #if defined(QCA_ENHANCED_STATS_SUPPORT) || \
+ 	(!defined(WLAN_TX_PKT_CAPTURE_ENH) || defined(WLAN_PKT_CAPTURE_TX_2_0))
+ /**
+@@ -1214,6 +1224,11 @@ struct dp_mon_mac {
+ 	uint32_t mon_last_buf_cookie;
+ 	qdf_nbuf_queue_t rx_status_q;
+ 	struct hal_rx_ppdu_info ppdu_info;
++#ifdef FEATURE_WLAN_WONDER
++	/* Metadata must belong to this PPDU, including after a missing end TLV. */
++	bool wonder_rx_start_seen;
++	bool wonder_rx_end_seen;
++#endif
+ #ifdef WLAN_FEATURE_LOCAL_PKT_CAPTURE
+ 	/* Maintain MSDU list on PPDU */
+ 	qdf_nbuf_queue_t msdu_queue;
+@@ -1235,6 +1250,17 @@ struct  dp_mon_pdev {
+ 	/* monitor */
+ 	bool monitor_configured;
+ 	uint32_t mon_vdev_id;
++#ifdef FEATURE_WLAN_WONDER
++	bool wonder_airtime_enabled;
++	uint8_t wonder_airtime_vdev_id;
++	/* Last successfully submitted request before the Wonder COMMON bit. */
++	uint32_t wonder_airtime_base_mask;
++	struct {
++		uint64_t tsf;
++		uint32_t ppdu_id;
++		bool valid;
++	} wonder_airtime_last[MAX_NUM_LMAC_HW][2];
++#endif
+ 
+ #if defined(FEATURE_ML_MONITOR_MODE_SUPPORT) || \
+ 	defined(FEATURE_ML_LOCAL_PKT_CAPTURE)
+diff --git a/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c b/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
+index 3a7737306609c7ec22ea0a00378568b74d560c4f..c4eab76c1c4456f30b08d8007b4fdae78ca9dd0f 100644
+--- a/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
++++ b/qcacld-3.0/components/dp/core/src/wlan_dp_txrx.c
+@@ -52,7 +52,6 @@
+ #endif
+ #include "p2phc.h"
+ #ifdef FEATURE_WLAN_WONDER
+-#include "wlan_hdd_main.h"
+ #include "wlan_hdd_wonder.h"
+ #endif
+ 
+@@ -903,17 +902,12 @@ QDF_STATUS dp_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
+ 	while (nbuf) {
+ 		nbuf_next = qdf_nbuf_next(nbuf);
+ #ifdef FEATURE_WLAN_WONDER
+-		if (dp_intf->dev) {
+-			struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dp_intf->dev);
+-
+-			if (READ_ONCE(adapter->wonder_owned) &&
+-			    !hdd_wonder_transport_ready(adapter)) {
+-				qdf_nbuf_set_next(nbuf, NULL);
+-				qdf_nbuf_free(nbuf);
+-				++stats->per_cpu[cpu_index].rx_refused;
+-				nbuf = nbuf_next;
+-				continue;
+-			}
++		if (dp_intf->dev && !hdd_wonder_netdev_transport_ready(dp_intf->dev)) {
++			qdf_nbuf_set_next(nbuf, NULL);
++			qdf_nbuf_free(nbuf);
++			++stats->per_cpu[cpu_index].rx_refused;
++			nbuf = nbuf_next;
++			continue;
+ 		}
+ #endif
+ 		qdf_nbuf_set_dev(nbuf, dp_intf->dev);
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_main.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_main.h
+index ab1a2f56da63df2feb112b0813bebdad09434ed8..1513c285282b5656a48fd00df8d0251929c3d5bf 100644
+--- a/qcacld-3.0/core/hdd/inc/wlan_hdd_main.h
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_main.h
+@@ -1362,6 +1362,8 @@ struct hdd_adapter {
+ #ifdef FEATURE_WLAN_WONDER
+ 	/* Only the Wonder session may destroy or change this monitor interface. */
+ 	bool wonder_owned;
++	/* Timestamp of the actual firmware monitor-channel completion. */
++	u64 wonder_channel_complete_ns;
+ #endif
+ 
+ 	enum QDF_OPMODE device_mode;
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h
+index e21eb9ae97302a993b30b4160bcb94194b23d945..c7d73a4ab6c9cc6c69a3d2a79378b148bb0bb0a5 100644
+--- a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h
+@@ -5,11 +5,19 @@
+ #include <linux/types.h>
+ 
+ struct hdd_context;
++struct hdd_adapter;
++struct net_device;
+ 
+ #ifdef FEATURE_WLAN_WONDER
+ void hdd_wonder_register(struct hdd_context *hdd_ctx);
+ void hdd_wonder_unregister(struct hdd_context *hdd_ctx);
+ bool hdd_wonder_can_start(struct hdd_context *hdd_ctx);
++bool hdd_wonder_transport_ready(struct hdd_adapter *adapter);
++bool hdd_wonder_netdev_transport_ready(struct net_device *dev);
++bool hdd_wonder_vdev_admission(struct hdd_adapter *adapter);
++int hdd_wonder_add_monitor(struct hdd_context *hdd_ctx,
++			   struct hdd_adapter **adapter, const char *name,
++			   unsigned char *mac);
+ #else
+ static inline void hdd_wonder_register(struct hdd_context *hdd_ctx) { }
+ static inline void hdd_wonder_unregister(struct hdd_context *hdd_ctx) { }
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h
+index 081023aa43136058204ae32bdcac6c6937103fc3..47644868c2488b484ac2825574bb6ffc96b511be 100644
+--- a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_peer.h
+@@ -8,6 +8,7 @@ struct hdd_adapter;
+ struct hdd_wonder_peer_state;
+ struct wlan_objmgr_psoc;
+ struct set_rx_mac_filter;
++struct wma_wonder_helper_snapshot;
+ 
+ #ifdef FEATURE_WLAN_WONDER
+ #include <wondertap.h>
+@@ -31,6 +32,8 @@ int hdd_wonder_peer_clear(struct hdd_wonder_peer_state *state);
+ void hdd_wonder_peer_cancel(struct hdd_wonder_peer_state *state);
+ void hdd_wonder_peer_destroy(struct hdd_wonder_peer_state *state);
+ bool hdd_wonder_peer_ready(struct hdd_wonder_peer_state *state);
++int hdd_wonder_peer_get_helper(struct hdd_wonder_peer_state *state,
++			      struct wma_wonder_helper_snapshot *helper);
+ int hdd_wonder_peer_get_limits(struct hdd_wonder_peer_state *state,
+ 			       struct hdd_wonder_peer_limits *limits);
+ int hdd_wonder_peer_validate_rate(struct hdd_wonder_peer_state *state,
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_sched.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_sched.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f182051bb38275db89e7059a07d803a17f1b00c
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder_sched.h
+@@ -0,0 +1,64 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __WLAN_HDD_WONDER_SCHED_H
++#define __WLAN_HDD_WONDER_SCHED_H
++
++#include <wondertap.h>
++
++struct hdd_adapter;
++struct hdd_wonder_sched;
++
++struct hdd_wonder_sched_ops {
++	/* Must not wait on provider/RTNL locks held by quiesce or destroy.
++	 * Check hdd_wonder_sched_generation_active() under the provider lock
++	 * before submitting a switch; return -EAGAIN on a temporary lock conflict.
++	 * Success means firmware channel completion and helper/peer rebind finished.
++	 */
++	int (*set_channel)(void *context,
++			   const struct wondertap_set_freq_params *channel,
++			   u64 generation, u64 *completion_host_ns);
++	/* Pure preflight: do not change the live monitor channel here. */
++	int (*validate_channel)(void *context,
++				const struct wondertap_set_freq_params *channel);
++};
++
++struct hdd_wonder_sched *
++hdd_wonder_sched_create(struct hdd_adapter *adapter, void *context,
++			const struct hdd_wonder_sched_ops *ops);
++/* Quiesce is nonblocking with respect to the channel callback; destroy drains.
++ * The adapter/context must remain alive until destroy returns.
++ */
++void hdd_wonder_sched_quiesce(struct hdd_wonder_sched *sched);
++/* Retain the paired firmware clock witness while draining all host work. */
++void hdd_wonder_sched_suspend(struct hdd_wonder_sched *sched);
++/* Caller holds a vdev/psoc operation; failure leaves the scheduler quiesced. */
++int hdd_wonder_sched_resume(struct hdd_wonder_sched *sched, u8 vdev_id,
++			    u64 helper_cookie);
++void hdd_wonder_sched_destroy(struct hdd_wonder_sched *sched);
++int hdd_wonder_sched_request(struct hdd_wonder_sched *sched,
++			     const struct channel_schedule_request *request);
++int hdd_wonder_sched_get_tsf(struct hdd_wonder_sched *sched, u32 *tsf);
++int hdd_wonder_sched_get_report(struct hdd_wonder_sched *sched,
++				struct wondertap_channel_status_report *report);
++bool hdd_wonder_sched_generation_active(struct hdd_wonder_sched *sched,
++					u64 generation);
++/* Call after a successful manual switch; cancel an active plan first (len=0). */
++void hdd_wonder_sched_note_channel(struct hdd_wonder_sched *sched, u32 freq,
++				  enum wondertap_rate_bw bandwidth,
++				  u64 completion_host_ns);
++/* Caller holds a vdev/psoc operation and binds after helper preparation and
++ * every completed channel switch. A fresh FW capture verifies counter identity
++ * and continuity before the plan can continue. No provider callback is made.
++ */
++int hdd_wonder_sched_bind_tsf(struct hdd_wonder_sched *sched, u8 vdev_id,
++			      u64 helper_cookie);
++/* Pause timing before helper retirement; keep the old pair only as a witness.
++ * This does not cancel a plan during an intentional channel transition.
++ */
++void hdd_wonder_sched_unbind_tsf(struct hdd_wonder_sched *sched);
++/* Feed real RX/TX PPDU airtime (microseconds), once per PPDU, from monitor DP.
++ * tsf is the MAC TSF at PPDU start; zero frequency/timestamp is ignored.
++ */
++void hdd_wonder_sched_note_airtime(struct hdd_wonder_sched *sched, u32 lmac_id,
++				  u32 freq, u32 tsf, bool tx, u32 duration_us);
++
++#endif /* __WLAN_HDD_WONDER_SCHED_H */
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index 905872d9cc80d49049ea94b758abaea86ba7d638..1fabcf69143de663fc9a8d8a5443ef76c5d41f1b 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -9517,6 +9517,10 @@ int hdd_vdev_create(struct wlan_hdd_link_info *link_info)
+ 
+ 	/* do vdev create via objmgr */
+ 	hdd_ctx = WLAN_HDD_GET_CTX(adapter);
++#ifdef FEATURE_WLAN_WONDER
++	if (!hdd_wonder_vdev_admission(adapter))
++		return -EBUSY;
++#endif
+ 
+ 	if (hdd_use_sta_vdev_for_p2p_dev_upon_vdev_exhaust(hdd_ctx))
+ 		hdd_debug("max vdev create limit reached, use sta vdev for p2p device operation");
+@@ -24719,20 +24723,24 @@ next_adapter:
+ #ifdef FEATURE_WLAN_WONDER
+ bool hdd_wonder_can_start(struct hdd_context *hdd_ctx)
+ {
++	struct wlan_mlme_sta_mon_snapshot coex;
++
+ 	return hdd_get_conparam() == QDF_GLOBAL_MISSION_MODE &&
+ 	       ucfg_mlme_is_sta_mon_conc_supported(hdd_ctx->psoc) &&
+ 	       !hdd_get_adapter(hdd_ctx, QDF_MONITOR_MODE) &&
+ 	       ucfg_pkt_capture_get_mode(hdd_ctx->psoc) ==
+ 						PACKET_CAPTURE_MODE_DISABLE &&
+-	       hdd_monitor_can_start_standalone(hdd_ctx);
++	       (hdd_monitor_can_start_standalone(hdd_ctx) ||
++		!hdd_sta_mon_snapshot(hdd_ctx, &coex));
+ }
+ #endif
+ 
+-int
+-wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
++static int
++hdd_add_monitor_check(struct hdd_context *hdd_ctx,
+ 			   struct hdd_adapter **adapter,
+ 			   const char *name, bool rtnl_held,
+-			   unsigned char name_assign_type, bool is_rx_mon)
++			   unsigned char name_assign_type, bool is_rx_mon,
++			   unsigned char *wonder_mac)
+ {
+ 	struct hdd_adapter *sta_adapter;
+ 	struct hdd_adapter *mon_adapter;
+@@ -24750,6 +24758,9 @@ wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
+ 	sta_adapter = hdd_get_adapter(hdd_ctx, QDF_STA_MODE);
+ 	if (use_coex && hdd_monitor_can_start_standalone(hdd_ctx))
+ 		use_coex = false;
++	/* Wonder cannot repurpose a live Android STA as standalone monitor. */
++	if (wonder_mac && !use_coex && !hdd_monitor_can_start_standalone(hdd_ctx))
++		return -EBUSY;
+ 	if (!sta_adapter && !use_coex) {
+ 		hdd_err("No station adapter");
+ 		return -EINVAL;
+@@ -24810,13 +24821,12 @@ wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
+ 		wlan_hdd_del_p2p_interface(hdd_ctx);
+ 
+ 	params.is_add_virtual_iface = 1;
+-	if (use_coex)
++	if (use_coex || wonder_mac)
+ 		params.num_sessions = 1;
+ 
+ 	mon_adapter = hdd_open_adapter(hdd_ctx, QDF_MONITOR_MODE, name,
+-				       wlan_hdd_get_intf_addr(
+-				       hdd_ctx,
+-				       QDF_MONITOR_MODE),
++				       wonder_mac ?: wlan_hdd_get_intf_addr(
++				       hdd_ctx, QDF_MONITOR_MODE),
+ 				       name_assign_type, rtnl_held, &params);
+ 	if (!mon_adapter) {
+ 		hdd_err("hdd_open_adapter failed");
+@@ -24837,6 +24847,25 @@ wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
+ 	return 0;
+ }
+ 
++int wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
++			      struct hdd_adapter **adapter, const char *name,
++			      bool rtnl_held, unsigned char name_assign_type,
++			      bool is_rx_mon)
++{
++	return hdd_add_monitor_check(hdd_ctx, adapter, name, rtnl_held,
++				    name_assign_type, is_rx_mon, NULL);
++}
++
++#ifdef FEATURE_WLAN_WONDER
++int hdd_wonder_add_monitor(struct hdd_context *hdd_ctx,
++			   struct hdd_adapter **adapter, const char *name,
++			   unsigned char *mac)
++{
++	return hdd_add_monitor_check(hdd_ctx, adapter, name, true,
++				    NET_NAME_USER, true, mac);
++}
++#endif
++
+ #ifdef FEATURE_MONITOR_MODE_SUPPORT
+ 
+ void hdd_sme_monitor_mode_callback(uint8_t vdev_id, bool is_up)
+@@ -24861,6 +24890,9 @@ void hdd_sme_monitor_mode_callback(uint8_t vdev_id, bool is_up)
+ 		return;
+ 	}
+ 	if (is_up) {
++#ifdef FEATURE_WLAN_WONDER
++		WRITE_ONCE(adapter->wonder_channel_complete_ns, ktime_get_ns());
++#endif
+ 		qdf_event_set(&adapter->qdf_monitor_mode_vdev_up_event);
+ 		hdd_debug("monitor mode vdev up completed for vdev %d",
+ 			  vdev_id);
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+index cb0bc158781f4d57c28725934af73bb0c63d54d4..a680f63e4c6d224ce32bc877abdb93b879473fba 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+@@ -695,6 +695,39 @@ static int hdd_injection_radiotap_present(const uint8_t *data, uint16_t len)
+ 	return 0;
+ }
+ 
++static int
++hdd_injection_radiotap_next(struct ieee80211_radiotap_iterator *iter)
++{
++	unsigned long offset;
++	int ret;
++
++	ret = ieee80211_radiotap_iterator_next(iter);
++	if (ret != -ENOENT || !iter->is_radiotap_ns ||
++	    iter->_arg_index != IEEE80211_RADIOTAP_HE ||
++	    !(iter->_bitmap_shifter & 1))
++		return ret;
++
++	/*
++	 * The pinned cfg80211 iterator stops before HE because its standard
++	 * size table ends at VHT. Supply only the fixed HE field it stopped
++	 * at, then let it process every later bitmap and namespace normally.
++	 * Radiotap alignment is relative to the header, not the skb address.
++	 */
++	offset = iter->_arg - (uint8_t *)iter->_rtheader;
++	offset = ALIGN(offset, 2);
++	if (offset > iter->_max_length ||
++	    sizeof(struct ieee80211_radiotap_he) > iter->_max_length - offset)
++		return -EINVAL;
++
++	iter->this_arg = (uint8_t *)iter->_rtheader + offset;
++	iter->this_arg_index = IEEE80211_RADIOTAP_HE;
++	iter->this_arg_size = sizeof(struct ieee80211_radiotap_he);
++	iter->_arg = iter->this_arg + iter->this_arg_size;
++	iter->_bitmap_shifter >>= 1;
++	iter->_arg_index++;
++	return 0;
++}
++
+ static int hdd_parse_injection_radiotap(struct sk_buff *skb,
+ 				       struct cdp_tx_injection_params *params,
+ 				       uint8_t *flags)
+@@ -717,7 +750,7 @@ static int hdd_parse_injection_radiotap(struct sk_buff *skb,
+ 	if (ret)
+ 		return ret;
+ 
+-	while (!(ret = ieee80211_radiotap_iterator_next(&iter))) {
++	while (!(ret = hdd_injection_radiotap_next(&iter))) {
+ 		if (!iter.is_radiotap_ns)
+ 			return -EOPNOTSUPP;
+ 		switch (iter.this_arg_index) {
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c
+index 48ab314d59c395c30d15666acf0b8228ee641eb9..1fd6b5694dc313558e5ebd7b077443dd65449f11 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c
+@@ -5,6 +5,8 @@
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/rtnetlink.h>
++#include <linux/rcupdate.h>
++#include <linux/ktime.h>
+ #include <linux/slab.h>
+ #include <net/cfg80211.h>
+ #include <wondertap.h>
+@@ -12,6 +14,13 @@
+ #include <wlan_hdd_includes.h>
+ #include <wlan_hdd_main.h>
+ #include <wlan_hdd_wonder.h>
++#include <wlan_hdd_wonder_peer.h>
++#include <wlan_hdd_wonder_sched.h>
++#include <wma_api.h>
++#include "wlan_mlme_sta_mon.h"
++#include <cdp_txrx_cmn.h>
++#include <cdp_txrx_mon.h>
++#include <cdp_txrx_injection.h>
+ #include "osif_psoc_sync.h"
+ #include "osif_vdev_sync.h"
+ #include "wlan_reg_ucfg_api.h"
+@@ -22,10 +31,17 @@
+ 
+ struct hdd_wonder_session {
+ 	struct hdd_adapter *adapter;
++	struct hdd_wonder_peer_state *peer;
++	struct hdd_wonder_sched *sched;
++	struct wondertap_set_freq_params channel;
++	struct wondertap_fixed_tx_rate_params tx_rate;
++	bool airtime_enabled;
++	bool suspended;
++	bool failed;
+ };
+ 
+ struct hdd_wonder_provider {
+-	struct wondertap_aux_dev tap;
++	struct wondertap_monitor_aux_dev monitor;
+ 	struct hdd_context *hdd_ctx;
+ 	struct hdd_wonder_session *session;
+ 	bool removing;
+@@ -35,10 +51,12 @@ struct hdd_wonder_provider {
+ static DEFINE_MUTEX(hdd_wonder_lock);
+ static DEFINE_MUTEX(hdd_wonder_lifecycle_lock);
+ static struct hdd_wonder_provider *hdd_wonder_provider;
+-static bool wonder_enabled;
++static struct hdd_wonder_session __rcu *hdd_wonder_active;
++static bool wonder_enabled = true;
++static bool hdd_wonder_standalone_active;
+ module_param(wonder_enabled, bool, 0444);
+ MODULE_PARM_DESC(wonder_enabled,
+-	"Expose the experimental Onyx monitor-backed Wonder provider (default off)");
++	"Expose the Onyx Wonder/AWDL provider (default on)");
+ 
+ static int hdd_wonder_validate_rate(
+ 		const struct wondertap_fixed_tx_rate_params *rate)
+@@ -46,6 +64,38 @@ static int hdd_wonder_validate_rate(
+ 	return wondertap_monitor_validate_rate(rate);
+ }
+ 
++static int hdd_wonder_airtime(struct hdd_wonder_session *session, bool enabled)
++{
++	QDF_STATUS status;
++
++	if (session->airtime_enabled == enabled)
++		return 0;
++	status = dp_mon_wonder_set_airtime(cds_get_context(QDF_MODULE_ID_SOC),
++					session->adapter->deflink->vdev_id, enabled);
++	/* Disable relinquishes the monitor owner even if the FW mask restore fails. */
++	if (!enabled)
++		session->airtime_enabled = false;
++	if (QDF_IS_STATUS_ERROR(status))
++		return qdf_status_to_os_return(status);
++	session->airtime_enabled = enabled;
++	return 0;
++}
++
++static int hdd_wonder_bind_clock(struct hdd_wonder_session *session, bool resume)
++{
++	struct wma_wonder_helper_snapshot helper;
++	int ret;
++
++	ret = hdd_wonder_peer_get_helper(session->peer, &helper);
++	if (ret)
++		return ret;
++	if (resume)
++		return hdd_wonder_sched_resume(session->sched, helper.vdev_id,
++					       helper.cookie);
++	return hdd_wonder_sched_bind_tsf(session->sched, helper.vdev_id,
++					helper.cookie);
++}
++
+ /* Caller holds RTNL and hdd_wonder_lock. No core RX handler may remain. */
+ static void hdd_wonder_close_session(struct hdd_wonder_provider *provider)
+ {
+@@ -58,6 +108,13 @@ static void hdd_wonder_close_session(struct hdd_wonder_provider *provider)
+ 		return;
+ 	provider->session = NULL;
+ 	adapter = session->adapter;
++	WRITE_ONCE(session->failed, true);
++	rcu_assign_pointer(hdd_wonder_active, NULL);
++	synchronize_rcu();
++	if (hdd_wonder_airtime(session, false))
++		hdd_warn("Wonder airtime reporting could not be disabled before teardown");
++	hdd_wonder_sched_destroy(session->sched);
++	hdd_wonder_peer_destroy(session->peer);
+ 	netif_tx_disable(adapter->dev);
+ 	if (adapter->dev->flags & IFF_UP)
+ 		dev_close(adapter->dev);
+@@ -79,25 +136,226 @@ static void hdd_wonder_close_session(struct hdd_wonder_provider *provider)
+ 	wiphy_unlock(provider->hdd_ctx->wiphy);
+ 	if (vdev_sync)
+ 		osif_vdev_sync_destroy(vdev_sync);
++	WRITE_ONCE(hdd_wonder_standalone_active, false);
+ 	kfree(session);
+ }
+ 
+-static int hdd_wonder_set_channel(struct hdd_adapter *adapter,
+-				const struct wondertap_set_freq_params *params)
++static int hdd_wonder_bandwidth(enum wondertap_rate_bw bandwidth)
+ {
+-	struct hdd_monitor_ctx channel = { 0 };
+-	int ret;
++	switch (bandwidth) {
++	case WONDERTAP_RATE_BW_20: return CH_WIDTH_20MHZ;
++	case WONDERTAP_RATE_BW_40: return CH_WIDTH_40MHZ;
++	case WONDERTAP_RATE_BW_80: return CH_WIDTH_80MHZ;
++	default: return -EOPNOTSUPP;
++	}
++}
++
++/* This is preflight only. In particular it never writes the live channel. */
++static int hdd_wonder_validate_channel(void *context,
++			       const struct wondertap_set_freq_params *params)
++{
++	struct hdd_wonder_session *session = context;
++	struct hdd_adapter *adapter = session->adapter;
++	struct hdd_context *hdd_ctx = adapter->hdd_ctx;
++	struct ieee80211_channel *channel;
++	struct wlan_channel shared;
++	struct ch_params bonded = { 0 };
++	int width, ret;
+ 
+ 	if (!params || !params->freq)
+ 		return -EINVAL;
+-	if (params->bandwidth != WONDERTAP_RATE_BW_20)
++	width = hdd_wonder_bandwidth(params->bandwidth);
++	if (width < 0)
++		return width;
++	channel = ieee80211_get_channel(hdd_ctx->wiphy, params->freq);
++	if (!channel || channel->flags & (IEEE80211_CHAN_DISABLED |
++					 IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR))
+ 		return -EOPNOTSUPP;
+-	channel.freq = params->freq;
+-	channel.bandwidth = CH_WIDTH_20MHZ;
+-	ret = wlan_hdd_validate_mon_params(adapter, &channel, 1);
++	if (adapter->sta_mon_coexist) {
++		ret = hdd_sta_mon_get_channel(adapter, &shared);
++		if (ret)
++			return ret;
++		/* Shared ownership retains the real STA/AP's operating channel.
++		 * No intentional-disconnect handoff is allowed from Wonder.
++		 */
++		if (shared.ch_freq != params->freq || shared.ch_cfreq2 ||
++		    shared.ch_width < width || shared.ch_width > CH_WIDTH_80MHZ)
++			return -EBUSY;
++		return 0;
++	}
++	ret = hdd_validate_channel_and_bandwidth(adapter, params->freq, 0, width);
+ 	if (ret)
+ 		return ret;
+-	return wlan_hdd_set_mon_chan(adapter);
++	bonded.ch_width = width;
++	wlan_reg_set_channel_params_for_pwrmode(hdd_ctx->pdev, params->freq,
++					       0, &bonded, REG_CURRENT_PWR_MODE);
++	if (bonded.ch_width != width)
++		return -EOPNOTSUPP;
++	return 0;
++}
++
++static int hdd_wonder_set_channel(struct hdd_wonder_session *session,
++				const struct wondertap_set_freq_params *params,
++				u64 *completed_ns)
++{
++	struct hdd_adapter *adapter = session->adapter;
++	struct hdd_context *hdd_ctx = adapter->hdd_ctx;
++	struct hdd_monitor_ctx channel = { 0 };
++	struct wlan_channel shared;
++	u64 generation = 0;
++	QDF_STATUS status;
++	int ret;
++
++	ret = hdd_wonder_validate_channel(session, params);
++	if (ret)
++		return ret;
++	if (adapter->sta_mon_coexist) {
++		ret = hdd_sta_mon_get_channel(adapter, &shared);
++		if (ret)
++			return ret;
++		generation = wlan_mlme_sta_mon_epoch(hdd_ctx->psoc);
++		/* The live shared width can be wider than Wonder's requested rate. */
++		*completed_ns = ktime_get_ns();
++	} else {
++		if (session->channel.freq != params->freq ||
++		    session->channel.bandwidth != params->bandwidth) {
++			hdd_wonder_sched_unbind_tsf(session->sched);
++			ret = hdd_wonder_peer_clear(session->peer);
++			if (ret)
++				goto failed;
++			status = wma_injection_channel_change_begin(
++					adapter->deflink->vdev_id, params->freq);
++			if (QDF_IS_STATUS_ERROR(status)) {
++				ret = qdf_status_to_os_return(status);
++				goto failed;
++			}
++			channel.freq = params->freq;
++			channel.bandwidth = hdd_wonder_bandwidth(params->bandwidth);
++			ret = wlan_hdd_validate_mon_params(adapter, &channel, 1);
++			if (!ret)
++				ret = wlan_hdd_set_mon_chan(adapter);
++			wma_injection_channel_change_end();
++			if (ret)
++				goto failed;
++			status = cdp_refresh_monitor_mode(cds_get_context(QDF_MODULE_ID_SOC),
++					 OL_TXRX_PDEV_ID, adapter->deflink->vdev_id);
++			if (QDF_IS_STATUS_ERROR(status)) {
++				ret = qdf_status_to_os_return(status);
++				goto failed;
++			}
++			*completed_ns = READ_ONCE(adapter->wonder_channel_complete_ns);
++			if (!*completed_ns)
++				*completed_ns = ktime_get_ns();
++		} else {
++			/* No retune completed: this dwell begins at the current instant. */
++			*completed_ns = ktime_get_ns();
++		}
++	}
++	/* The receiving AWDL MAC belongs to the actual raw-injection helper. */
++	ret = hdd_wonder_peer_prepare(session->peer, params->freq, generation);
++	if (ret)
++		goto failed;
++	if (session->sched) {
++		ret = hdd_wonder_bind_clock(session, false);
++		if (ret)
++			goto failed;
++	}
++	session->channel = *params;
++	return 0;
++failed:
++	WRITE_ONCE(session->failed, true);
++	netif_tx_disable(adapter->dev);
++	return ret;
++}
++
++static int hdd_wonder_scheduled_channel(void *context,
++				const struct wondertap_set_freq_params *channel,
++				u64 generation, u64 *completed_ns)
++{
++	struct hdd_wonder_session *session = context;
++	struct hdd_wonder_provider *provider;
++	struct osif_vdev_sync *vdev_sync;
++	int ret = -EAGAIN;
++
++	/* Teardown may drain this worker while holding provider/RTNL locks. */
++	if (!mutex_trylock(&hdd_wonder_lock))
++		return -EAGAIN;
++	provider = hdd_wonder_provider;
++	if (!provider || provider->removing || provider->session != session ||
++	    session->suspended || session->failed ||
++	    !hdd_wonder_sched_generation_active(session->sched, generation)) {
++		ret = -ESHUTDOWN;
++		goto unlock;
++	}
++	if (!mutex_trylock(&provider->hdd_ctx->wiphy->mtx))
++		goto unlock;
++	ret = osif_vdev_sync_op_start(session->adapter->dev, &vdev_sync);
++	if (!ret) {
++		ret = hdd_wonder_set_channel(session, channel, completed_ns);
++		osif_vdev_sync_op_stop(vdev_sync);
++	}
++	wiphy_unlock(provider->hdd_ctx->wiphy);
++unlock:
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
++}
++
++static const struct hdd_wonder_sched_ops hdd_wonder_sched_ops = {
++	.set_channel = hdd_wonder_scheduled_channel,
++	.validate_channel = hdd_wonder_validate_channel,
++};
++
++/* The standalone firmware helper has no objmgr vdev. Block competing vdev
++ * creation until its real teardown, instead of allowing its ID to be reused.
++ */
++bool hdd_wonder_vdev_admission(struct hdd_adapter *adapter)
++{
++	return !wma_wonder_standalone_helper_reserved() &&
++		(!READ_ONCE(hdd_wonder_standalone_active) || READ_ONCE(adapter->wonder_owned));
++}
++
++bool wlan_injection_wonder_vdev_admission(u8 opmode)
++{
++	return !wma_wonder_standalone_helper_reserved() &&
++		(!READ_ONCE(hdd_wonder_standalone_active) || opmode == QDF_MONITOR_MODE);
++}
++
++bool hdd_wonder_transport_ready(struct hdd_adapter *adapter)
++{
++	struct hdd_wonder_session *session;
++	bool ready;
++
++	if (!READ_ONCE(adapter->wonder_owned))
++		return true;
++	rcu_read_lock();
++	session = rcu_dereference(hdd_wonder_active);
++	ready = session && session->adapter == adapter &&
++		!smp_load_acquire(&session->suspended) && !READ_ONCE(session->failed) &&
++		hdd_wonder_peer_ready(session->peer);
++	rcu_read_unlock();
++	return ready;
++}
++
++bool hdd_wonder_netdev_transport_ready(struct net_device *dev)
++{
++	return dev && hdd_wonder_transport_ready(WLAN_HDD_GET_PRIV_PTR(dev));
++}
++
++void wlan_injection_wonder_note_airtime(u32 pdev_id, u32 lmac_id, u32 frequency,
++				       u32 mac_tsf, bool tx, u32 duration_us)
++{
++	struct hdd_wonder_session *session;
++
++	if (!frequency || !duration_us)
++		return;
++	rcu_read_lock();
++	session = rcu_dereference(hdd_wonder_active);
++	if (session && !smp_load_acquire(&session->suspended) &&
++	    !READ_ONCE(session->failed) &&
++	    wlan_objmgr_pdev_get_pdev_id(session->adapter->hdd_ctx->pdev) == pdev_id)
++		hdd_wonder_sched_note_airtime(session->sched, lmac_id, frequency,
++					      mac_tsf, tx, duration_us);
++	rcu_read_unlock();
+ }
+ 
+ static int hdd_wonder_init(void **handle,
+@@ -105,13 +363,13 @@ static int hdd_wonder_init(void **handle,
+ {
+ 	struct hdd_wonder_provider *provider;
+ 	struct hdd_wonder_session *session;
+-	struct hdd_adapter_create_param create = { 0 };
+ 	struct osif_psoc_sync *psoc_sync;
+ 	struct hdd_context *hdd_ctx;
+ 	struct net_device *existing;
+ 	u8 mac[ETH_ALEN];
+ 	u8 country[3] = { 0 };
+ 	int ret;
++	u64 completed_ns;
+ 
+ 	/* mac80211 start owns RTNL; never acquire it recursively here. */
+ 	ASSERT_RTNL();
+@@ -123,10 +381,10 @@ static int hdd_wonder_init(void **handle,
+ 	ret = hdd_wonder_validate_rate(&params->tx_rate);
+ 	if (ret)
+ 		return ret;
+-	if (params->channel.bandwidth != WONDERTAP_RATE_BW_20 ||
++	if (hdd_wonder_bandwidth(params->channel.bandwidth) < 0 ||
++	    params->tx_rate.bw > params->channel.bandwidth ||
+ 	    params->amsdu_enable || params->ampdu_enable ||
+-	    params->rate_adaptation_enable || params->channel_hopping_enable ||
+-	    params->perf_mode != WONDER_PERF_MODE_OFF)
++	    params->rate_adaptation_enable || params->perf_mode >= WONDER_PERF_MODE_MAX)
+ 		return -EOPNOTSUPP;
+ 
+ 	mutex_lock(&hdd_wonder_lock);
+@@ -179,25 +437,52 @@ static int hdd_wonder_init(void **handle,
+ 		goto restart_idle;
+ 	}
+ 	ether_addr_copy(mac, params->mac_addr);
+-	create.is_add_virtual_iface = 1;
+-	create.num_sessions = 1;
+ 	wiphy_lock(hdd_ctx->wiphy);
+-	session->adapter = hdd_open_adapter(hdd_ctx, QDF_MONITOR_MODE,
+-			HDD_WONDER_NETDEV, mac, NET_NAME_USER, true, &create);
++	ret = hdd_wonder_add_monitor(hdd_ctx, &session->adapter,
++				     HDD_WONDER_NETDEV, mac);
+ 	wiphy_unlock(hdd_ctx->wiphy);
+-	if (!session->adapter) {
++	if (ret) {
+ 		kfree(session);
+-		ret = -ENOMEM;
+ 		goto restart_idle;
+ 	}
+ 	provider->session = session;
+ 	WRITE_ONCE(session->adapter->wonder_owned, true);
++	WRITE_ONCE(hdd_wonder_standalone_active,
++		   !session->adapter->sta_mon_coexist);
++	session->peer = hdd_wonder_peer_create(session->adapter);
++	if (IS_ERR(session->peer)) {
++		ret = PTR_ERR(session->peer);
++		session->peer = NULL;
++		goto close_session;
++	}
+ 	ret = dev_open(session->adapter->dev, NULL);
+ 	if (ret)
+ 		goto close_session;
+-	ret = hdd_wonder_set_channel(session->adapter, &params->channel);
++	wiphy_lock(hdd_ctx->wiphy);
++	ret = hdd_wonder_set_channel(session, &params->channel, &completed_ns);
++	wiphy_unlock(hdd_ctx->wiphy);
++	if (ret)
++		goto close_session;
++	ret = hdd_wonder_peer_validate_rate(session->peer, &params->tx_rate);
++	if (ret)
++		goto close_session;
++	session->tx_rate = params->tx_rate;
++	session->sched = hdd_wonder_sched_create(session->adapter, session,
++						&hdd_wonder_sched_ops);
++	if (IS_ERR(session->sched)) {
++		ret = PTR_ERR(session->sched);
++		session->sched = NULL;
++		goto close_session;
++	}
++	ret = hdd_wonder_bind_clock(session, false);
++	if (ret)
++		goto close_session;
++	ret = hdd_wonder_airtime(session, true);
+ 	if (ret)
+ 		goto close_session;
++	hdd_wonder_sched_note_channel(session->sched, params->channel.freq,
++				      params->channel.bandwidth, completed_ns);
++	rcu_assign_pointer(hdd_wonder_active, session);
+ 	*handle = session;
+ 	hdd_info("Experimental Wonder monitor transport ready on %s, %u MHz",
+ 		 HDD_WONDER_NETDEV, params->channel.freq);
+@@ -233,26 +518,60 @@ static void hdd_wonder_deinit(void *handle,
+ 	mutex_unlock(&hdd_wonder_lock);
+ }
+ 
++/* Caller holds hdd_wonder_lock. No packet-path callback takes that lock. */
++static struct hdd_wonder_session *hdd_wonder_session_get(void *handle)
++{
++	struct hdd_wonder_provider *provider = hdd_wonder_provider;
++	struct hdd_wonder_session *session;
++
++	if (!provider || provider->removing || !handle || provider->session != handle)
++		return ERR_PTR(-ENODEV);
++	session = provider->session;
++	if (session->suspended)
++		return ERR_PTR(-EHOSTDOWN);
++	if (session->failed || !(session->adapter->dev->flags & IFF_UP))
++		return ERR_PTR(-ENETDOWN);
++	return session;
++}
++
+ static int hdd_wonder_set_freq(void *handle,
+ 			       const struct wondertap_set_freq_params *params)
+ {
+-	struct hdd_wonder_provider *provider;
++	struct hdd_wonder_session *session;
+ 	struct osif_vdev_sync *vdev_sync;
+-	int ret = -ENODEV;
++	struct channel_schedule_request cancel = { 0 };
++	u64 completed_ns;
++	int ret;
+ 
+ 	mutex_lock(&hdd_wonder_lock);
+-	provider = hdd_wonder_provider;
+-	if (!provider || provider->removing || !handle ||
+-	    provider->session != handle)
+-		goto unlock;
+-	if (!(provider->session->adapter->dev->flags & IFF_UP)) {
+-		ret = -ENETDOWN;
++	session = hdd_wonder_session_get(handle);
++	if (IS_ERR(session)) {
++		ret = PTR_ERR(session);
+ 		goto unlock;
+ 	}
+-	ret = osif_vdev_sync_op_start(provider->session->adapter->dev, &vdev_sync);
++	ret = osif_vdev_sync_op_start(session->adapter->dev, &vdev_sync);
+ 	if (ret)
+ 		goto unlock;
+-	ret = hdd_wonder_set_channel(provider->session->adapter, params);
++	wiphy_lock(session->adapter->hdd_ctx->wiphy);
++	ret = hdd_wonder_validate_channel(session, params);
++	if (!ret) {
++		/* Manual frequency control replaces any accepted hopping plan. */
++		ret = hdd_wonder_sched_request(session->sched, &cancel);
++		if (!ret) {
++			ret = hdd_wonder_set_channel(session, params, &completed_ns);
++			/* The core retains its accepted cache after an error. A canceled
++			 * provider plan must not later be replayed by resuming this session.
++			 */
++			if (ret) {
++				WRITE_ONCE(session->failed, true);
++				netif_tx_disable(session->adapter->dev);
++			}
++		}
++		if (!ret)
++			hdd_wonder_sched_note_channel(session->sched, params->freq,
++						      params->bandwidth, completed_ns);
++	}
++	wiphy_unlock(session->adapter->hdd_ctx->wiphy);
+ 	osif_vdev_sync_op_stop(vdev_sync);
+ unlock:
+ 	mutex_unlock(&hdd_wonder_lock);
+@@ -262,23 +581,48 @@ unlock:
+ static int hdd_wonder_set_filter(void *handle,
+ 				enum wondertap_filter_type type, const void *params)
+ {
+-	return -EOPNOTSUPP;
++	const struct wondertap_frame_filter_params *filter = params;
++	struct hdd_wonder_session *session;
++	int ret = 0;
++
++	if (type != WONDERTAP_FILTER_TYPE_FRAME)
++		return -EOPNOTSUPP;
++	if (!filter || (filter->enabled &&
++	    (filter->frame_type & ~IEEE80211_FCTL_FTYPE ||
++	     filter->frame_subtype & ~IEEE80211_FCTL_STYPE ||
++	     filter->frame_type == IEEE80211_FCTL_FTYPE)))
++		return -EINVAL;
++	mutex_lock(&hdd_wonder_lock);
++	session = hdd_wonder_session_get(handle);
++	if (IS_ERR(session))
++		ret = PTR_ERR(session);
++	/* Wonder applies the accepted frame filter to its mac80211 RX stream. */
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
+ }
+ 
+ static int hdd_wonder_set_fixed_rate(void *handle,
+ 			const struct wondertap_fixed_tx_rate_params *params)
+ {
+-	struct hdd_wonder_provider *provider;
++	struct hdd_wonder_session *session;
+ 	int ret = hdd_wonder_validate_rate(params);
+ 
+ 	if (ret)
+ 		return ret;
+ 	mutex_lock(&hdd_wonder_lock);
+-	provider = hdd_wonder_provider;
+-	if (!provider || provider->removing || !handle ||
+-	    provider->session != handle)
+-		ret = -ENODEV;
+-	/* Wonder encodes this validated fixed rate into each TX radiotap header. */
++	session = hdd_wonder_session_get(handle);
++	if (IS_ERR(session)) {
++		ret = PTR_ERR(session);
++		goto unlock;
++	}
++	if (params->bw > session->channel.bandwidth) {
++		ret = -EOPNOTSUPP;
++		goto unlock;
++	}
++	ret = hdd_wonder_peer_validate_rate(session->peer, params);
++	if (!ret)
++		session->tx_rate = *params;
++unlock:
+ 	mutex_unlock(&hdd_wonder_lock);
+ 	return ret;
+ }
+@@ -286,47 +630,183 @@ static int hdd_wonder_set_fixed_rate(void *handle,
+ static int hdd_wonder_set_rate_mask(void *handle,
+ 			const struct wondertap_tx_rate_mask_params *params)
+ {
++	/* Raw per-packet exception descriptors do not run firmware rate control. */
+ 	return -EOPNOTSUPP;
+ }
+ 
+-static int hdd_wonder_capabilities(void *handle,
+-				 struct wondertap_capability *caps)
++static int hdd_wonder_capabilities(void *handle, struct wondertap_capability *caps)
+ {
++	struct hdd_wonder_provider *provider;
++	struct hdd_wonder_peer_limits limits;
++
+ 	if (!caps)
+ 		return -EINVAL;
+ 	memset(caps, 0, sizeof(*caps));
+ 	caps->version = 0;
+-	caps->bits.nss = 1;
++	caps->bits.nss = 2;
+ 	caps->bits.dynamic_freq = 1;
+ 	caps->bits.dynamic_fixed_tx_rate = 1;
++	caps->bits.frame_type_filter = 1;
++	caps->bits.channel_hopping = 1;
+ 	caps->bits.fcs_not_support = 1;
++	/* A firmware channel transition may wait for the genuine vdev-up event. */
++	caps->maximum_channel_switch_time_us = WLAN_MONITOR_MODE_VDEV_UP_EVT * 1000;
++	mutex_lock(&hdd_wonder_lock);
++	provider = hdd_wonder_provider;
++	if (handle && (!provider || provider->session != handle)) {
++		mutex_unlock(&hdd_wonder_lock);
++		return -ENODEV;
++	}
++	if (provider && provider->session &&
++	    !hdd_wonder_peer_get_limits(provider->session->peer, &limits))
++		caps->bits.nss = limits.max_nss;
++	/* Off-channel concurrency has no supported admission path in this backend.
++	 * Same-channel sharing is admitted separately without a STA disconnect.
++	 */
++	mutex_unlock(&hdd_wonder_lock);
+ 	return 0;
+ }
+ 
+ static int hdd_wonder_schedule(void *handle,
+ 			     const struct channel_schedule_request *request)
+ {
+-	return -EOPNOTSUPP;
++	struct hdd_wonder_session *session;
++	int ret;
++
++	mutex_lock(&hdd_wonder_lock);
++	session = hdd_wonder_session_get(handle);
++	if (IS_ERR(session)) {
++		ret = PTR_ERR(session);
++		goto unlock;
++	}
++	wiphy_lock(session->adapter->hdd_ctx->wiphy);
++	ret = hdd_wonder_sched_request(session->sched, request);
++	wiphy_unlock(session->adapter->hdd_ctx->wiphy);
++unlock:
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
+ }
+ 
+ static int hdd_wonder_tsf(void *handle, u32 *tsf)
+ {
+-	return -EOPNOTSUPP;
++	struct hdd_wonder_session *session;
++	int ret;
++
++	mutex_lock(&hdd_wonder_lock);
++	session = hdd_wonder_session_get(handle);
++	ret = IS_ERR(session) ? PTR_ERR(session) : hdd_wonder_sched_get_tsf(session->sched, tsf);
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
+ }
+ 
+ static int hdd_wonder_channel_status(void *handle,
+ 				struct wondertap_channel_status_report *report)
+ {
+-	return -EOPNOTSUPP;
++	struct hdd_wonder_session *session;
++	int ret;
++
++	mutex_lock(&hdd_wonder_lock);
++	session = hdd_wonder_session_get(handle);
++	ret = IS_ERR(session) ? PTR_ERR(session) : hdd_wonder_sched_get_report(session->sched, report);
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
+ }
+ 
+-static int hdd_wonder_station(void *handle,
+-			    const enum wondertap_station_action action,
++static int hdd_wonder_station(void *handle, enum wondertap_station_action action,
+ 			    struct wondertap_station_info *info)
+ {
+-	return -EOPNOTSUPP;
++	struct hdd_wonder_session *session;
++	int ret;
++
++	mutex_lock(&hdd_wonder_lock);
++	session = hdd_wonder_session_get(handle);
++	ret = IS_ERR(session) ? PTR_ERR(session) : hdd_wonder_peer_station(session->peer, action, info);
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
++}
++
++/* Suspend retains the vendor netdev and RX registration; PM never owns RTNL. */
++static int hdd_wonder_suspend(void *handle)
++{
++	struct hdd_wonder_session *session;
++	int ret = 0;
++
++	mutex_lock(&hdd_wonder_lock);
++	session = hdd_wonder_session_get(handle);
++	if (IS_ERR(session)) {
++		ret = PTR_ERR(session);
++		/* A repeated suspend on the same retained session is harmless. */
++		if (ret == -EHOSTDOWN)
++			ret = 0;
++		goto unlock;
++	}
++	ret = hdd_wonder_airtime(session, false);
++	if (ret) {
++		/* An aborted suspend must restore the live reporting request too. */
++		if (hdd_wonder_airtime(session, true)) {
++			WRITE_ONCE(session->failed, true);
++			netif_tx_disable(session->adapter->dev);
++		}
++		goto unlock;
++	}
++	WRITE_ONCE(session->suspended, true);
++	netif_device_detach(session->adapter->dev);
++	netif_tx_disable(session->adapter->dev);
++	/* Retain the firmware clock witness so resume can prove TSF continuity. */
++	synchronize_rcu();
++	hdd_wonder_sched_suspend(session->sched);
++	synchronize_net();
++unlock:
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
++}
++
++static int hdd_wonder_resume(void *handle)
++{
++	struct hdd_wonder_provider *provider;
++	struct hdd_wonder_session *session;
++	struct osif_vdev_sync *vdev_sync;
++	int ret = 0;
++
++	mutex_lock(&hdd_wonder_lock);
++	provider = hdd_wonder_provider;
++	if (!provider || provider->removing || provider->session != handle || !handle) {
++		ret = -ENODEV;
++		goto unlock;
++	}
++	session = provider->session;
++	if (!session->suspended)
++		goto unlock;
++	if (session->failed || !hdd_wonder_peer_ready(session->peer)) {
++		ret = -ENETDOWN;
++		goto unlock;
++	}
++	ret = osif_vdev_sync_op_start(session->adapter->dev, &vdev_sync);
++	if (ret)
++		goto unlock;
++	ret = hdd_wonder_bind_clock(session, true);
++	if (!ret)
++		ret = hdd_wonder_airtime(session, true);
++	if (ret)
++		hdd_wonder_sched_suspend(session->sched);
++	osif_vdev_sync_op_stop(vdev_sync);
++	if (ret)
++		goto unlock;
++	hdd_wonder_sched_note_channel(session->sched, session->channel.freq,
++				      session->channel.bandwidth, ktime_get_ns());
++	smp_store_release(&session->suspended, false);
++	netif_device_attach(session->adapter->dev);
++	netif_tx_wake_all_queues(session->adapter->dev);
++unlock:
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
+ }
+ 
++static const struct wondertap_monitor_ops hdd_wonder_monitor_ops = {
++	.suspend = hdd_wonder_suspend,
++	.resume = hdd_wonder_resume,
++};
++
+ static const struct wondertap_ops hdd_wonder_ops = {
+ 	.init = hdd_wonder_init,
+ 	.deinit = hdd_wonder_deinit,
+@@ -345,8 +825,10 @@ static void hdd_wonder_release(struct device *dev)
+ {
+ 	struct auxiliary_device *adev = to_auxiliary_dev(dev);
+ 	struct wondertap_aux_dev *tap = container_of(adev, struct wondertap_aux_dev, adev);
++	struct wondertap_monitor_aux_dev *monitor =
++		container_of(tap, struct wondertap_monitor_aux_dev, tap);
+ 	struct hdd_wonder_provider *provider =
+-		container_of(tap, struct hdd_wonder_provider, tap);
++		container_of(monitor, struct hdd_wonder_provider, monitor);
+ 
+ 	kfree(provider);
+ }
+@@ -362,13 +844,14 @@ static void __hdd_wonder_register(struct hdd_context *hdd_ctx)
+ 	if (!provider)
+ 		return;
+ 	provider->hdd_ctx = hdd_ctx;
+-	provider->tap.ver = WONDER_VERSION_3_6_6;
+-	provider->tap.wonder_ops = &hdd_wonder_ops;
+-	provider->tap.adev.name = "wondertap";
+-	provider->tap.adev.id = 0;
+-	provider->tap.adev.dev.parent = hdd_ctx->parent_dev;
+-	provider->tap.adev.dev.release = hdd_wonder_release;
+-	ret = auxiliary_device_init(&provider->tap.adev);
++	provider->monitor.tap.ver = WONDER_VERSION_3_6_6;
++	provider->monitor.tap.wonder_ops = &hdd_wonder_ops;
++	provider->monitor.monitor_ops = &hdd_wonder_monitor_ops;
++	provider->monitor.tap.adev.name = "wondertap";
++	provider->monitor.tap.adev.id = 0;
++	provider->monitor.tap.adev.dev.parent = hdd_ctx->parent_dev;
++	provider->monitor.tap.adev.dev.release = hdd_wonder_release;
++	ret = auxiliary_device_init(&provider->monitor.tap.adev);
+ 	if (ret) {
+ 		kfree(provider);
+ 		return;
+@@ -376,18 +859,18 @@ static void __hdd_wonder_register(struct hdd_context *hdd_ctx)
+ 	mutex_lock(&hdd_wonder_lock);
+ 	if (hdd_wonder_provider) {
+ 		mutex_unlock(&hdd_wonder_lock);
+-		auxiliary_device_uninit(&provider->tap.adev);
++		auxiliary_device_uninit(&provider->monitor.tap.adev);
+ 		return;
+ 	}
+ 	hdd_wonder_provider = provider;
+ 	mutex_unlock(&hdd_wonder_lock);
+ 	/* Probing the core can query capabilities; never hold the callback lock. */
+-	ret = auxiliary_device_add(&provider->tap.adev);
++	ret = auxiliary_device_add(&provider->monitor.tap.adev);
+ 	if (ret) {
+ 		mutex_lock(&hdd_wonder_lock);
+ 		hdd_wonder_provider = NULL;
+ 		mutex_unlock(&hdd_wonder_lock);
+-		auxiliary_device_uninit(&provider->tap.adev);
++		auxiliary_device_uninit(&provider->monitor.tap.adev);
+ 		hdd_warn("Wonder auxiliary registration failed: %d", ret);
+ 	}
+ }
+@@ -405,14 +888,14 @@ static void __hdd_wonder_unregister(struct hdd_context *hdd_ctx)
+ 	provider->removing = true;
+ 	mutex_unlock(&hdd_wonder_lock);
+ 	/* Core removal drains RX and releases its netdev reference before deinit. */
+-	auxiliary_device_delete(&provider->tap.adev);
++	auxiliary_device_delete(&provider->monitor.tap.adev);
+ 	rtnl_lock();
+ 	mutex_lock(&hdd_wonder_lock);
+ 	hdd_wonder_close_session(provider);
+ 	hdd_wonder_provider = NULL;
+ 	mutex_unlock(&hdd_wonder_lock);
+ 	rtnl_unlock();
+-	auxiliary_device_uninit(&provider->tap.adev);
++	auxiliary_device_uninit(&provider->monitor.tap.adev);
+ }
+ 
+ void hdd_wonder_register(struct hdd_context *hdd_ctx)
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c
+index 90933ffac642ec9dea29da077b194e5447c60ad3..f07135ee5d8c48a0b7ae2e7601979e49fc53e205 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_peer.c
+@@ -351,13 +351,46 @@ bool hdd_wonder_peer_ready(struct hdd_wonder_peer_state *state)
+ 	if (!state->stopping && !state->error &&
+ 	    state->bound_id < ARRAY_SIZE(hdd_wonder_matches)) {
+ 		match = &hdd_wonder_matches[state->bound_id];
+-		ready = match->used && match->owner == state && match->active &&
+-			!match->pending && !match->poisoned && !match->clear_started;
++		ready = match->used && match->psoc == state->psoc &&
++			match->owner == state && match->active && !match->pending &&
++			!match->poisoned && !match->clear_started &&
++			match->helper_cookie == state->helper_cookie &&
++			match->frequency == state->frequency;
+ 	}
+ 	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
+ 	return ready;
+ }
+ 
++int hdd_wonder_peer_get_helper(struct hdd_wonder_peer_state *state,
++			      struct wma_wonder_helper_snapshot *helper)
++{
++	struct hdd_wonder_match *match;
++	unsigned long flags;
++	int error = -EAGAIN;
++
++	if (!state || !helper)
++		return -EINVAL;
++	spin_lock_irqsave(&hdd_wonder_match_lock, flags);
++	if (state->stopping || state->error) {
++		error = state->stopping ? -ESHUTDOWN : state->error;
++		goto out;
++	}
++	if (state->bound_id >= ARRAY_SIZE(hdd_wonder_matches))
++		goto out;
++	match = &hdd_wonder_matches[state->bound_id];
++	if (!match->used || match->psoc != state->psoc || match->owner != state ||
++	    !match->active || match->pending || match->poisoned ||
++	    match->clear_started || match->helper_cookie != state->helper_cookie ||
++	    match->frequency != state->frequency)
++		goto out;
++	helper->vdev_id = state->bound_id;
++	helper->cookie = state->helper_cookie;
++	error = 0;
++out:
++	spin_unlock_irqrestore(&hdd_wonder_match_lock, flags);
++	return error;
++}
++
+ int hdd_wonder_peer_get_limits(struct hdd_wonder_peer_state *state,
+ 			       struct hdd_wonder_peer_limits *limits)
+ {
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a2932881627e973ec0c898df63fbbab99b7ab34
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder_sched.c
+@@ -0,0 +1,808 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Host scheduling uses a measured firmware TSF/QTIMER pair, never host uptime. */
++#include <linux/err.h>
++#include <linux/hrtimer.h>
++#include <linux/kref.h>
++#include <linux/ktime.h>
++#include <linux/limits.h>
++#include <linux/math64.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/workqueue.h>
++#include <qdf_time.h>
++#include <wlan_hdd_includes.h>
++#include <wlan_hdd_main.h>
++#include <wlan_hdd_wonder_sched.h>
++#include <wma_wonder_tsf.h>
++#include "osif_vdev_sync.h"
++
++#ifdef FEATURE_WLAN_WONDER
++
++#define HDD_WONDER_TSF_REFRESH_MS 2000
++#define HDD_WONDER_TSF_MAX_AGE_NS (10ULL * NSEC_PER_SEC)
++#define HDD_WONDER_TSF_MAX_CAPTURE_AGE_US 1000000ULL
++#define HDD_WONDER_TSF_CLOCK_JUMP_US 2000ULL
++#define HDD_WONDER_SWITCH_RETRY_NS (1000ULL * NSEC_PER_USEC)
++#define HDD_WONDER_CHANNELS_MAX U8_MAX
++
++struct hdd_wonder_slot {
++	struct wondertap_channel_status status;
++	u64 start_tsf;
++	u64 end_tsf;
++	u64 tx_us;
++	u64 rx_us;
++};
++
++struct hdd_wonder_plan {
++	struct kref ref;
++	u64 generation;
++	u64 dwell_us;
++	u64 next_tsf;
++	u64 next_host_ns;
++	u32 request_tsf;
++	u32 next_index;
++	u32 current_index;
++	u8 count;
++	bool slot_active;
++	struct wondertap_channel_list_params channels[HDD_WONDER_CHANNELS_MAX];
++	struct hdd_wonder_slot slots[HDD_WONDER_CHANNELS_MAX];
++};
++
++struct hdd_wonder_clock {
++	struct wma_wonder_tsf_sample sample;
++	u64 sample_host_ns;
++	u64 helper_cookie;
++	u8 vdev_id;
++	bool valid;
++};
++
++struct hdd_wonder_sched {
++	struct hdd_adapter *adapter;
++	void *context;
++	struct hdd_wonder_sched_ops ops;
++	struct workqueue_struct *workqueue;
++	struct work_struct switch_work;
++	struct delayed_work sync_work;
++	struct hrtimer timer;
++	struct mutex sample_lock;
++	spinlock_t lock;
++	struct hdd_wonder_clock clock;
++	/* Last proven pair survives an unbind and CLOCK_MONOTONIC suspension. */
++	struct hdd_wonder_clock continuity;
++	struct hdd_wonder_plan *plan;
++	u64 generation;
++	u64 identity_sequence;
++	u64 current_host_ns;
++	u32 current_freq;
++	enum wondertap_rate_bw current_bandwidth;
++	u8 tsf_vdev_id;
++	u64 tsf_helper_cookie;
++	int last_error;
++	bool running;
++	bool tsf_bound;
++};
++
++static void hdd_wonder_plan_release(struct kref *ref)
++{
++	kfree(container_of(ref, struct hdd_wonder_plan, ref));
++}
++
++static int hdd_wonder_clock_tsf(const struct hdd_wonder_clock *clock,
++			       u64 host_ns, u64 *tsf)
++{
++	s64 delta_us;
++
++	if (!clock->valid)
++		return -ENODATA;
++	delta_us = div_s64((s64)(host_ns - clock->sample_host_ns), NSEC_PER_USEC);
++	if (delta_us < 0 && (u64)-delta_us > clock->sample.tsf_us)
++		return -ERANGE;
++	*tsf = clock->sample.tsf_us + delta_us;
++	return 0;
++}
++
++static u64 hdd_wonder_clock_host(const struct hdd_wonder_clock *clock, u64 tsf)
++{
++	s64 delta_us = (s64)(tsf - clock->sample.tsf_us);
++
++	/* A valid old MAC TSF can predate this kernel's monotonic clock epoch. */
++	if (delta_us < 0 && (u64)-delta_us >
++	    div64_u64(clock->sample_host_ns, NSEC_PER_USEC))
++		return 0;
++	return clock->sample_host_ns + delta_us * NSEC_PER_USEC;
++}
++
++static u16 hdd_wonder_traffic_index(u64 airtime_us, u64 elapsed_us)
++{
++	if (!elapsed_us)
++		return 0;
++	if (airtime_us >= elapsed_us)
++		return 100;
++	return div64_u64(airtime_us * 100, elapsed_us);
++}
++
++static void hdd_wonder_slot_end(struct hdd_wonder_plan *plan, u64 tsf)
++{
++	struct hdd_wonder_slot *slot;
++	u64 duration;
++
++	if (!plan->slot_active)
++		return;
++	slot = &plan->slots[plan->current_index];
++	if (tsf < slot->start_tsf)
++		return;
++	slot->end_tsf = tsf;
++	slot->status.channel_end_tsf = (u32)tsf;
++	duration = tsf - slot->start_tsf;
++	slot->status.tx_traffic_index = hdd_wonder_traffic_index(slot->tx_us, duration);
++	slot->status.rx_traffic_index = hdd_wonder_traffic_index(slot->rx_us, duration);
++	plan->slot_active = false;
++}
++
++/* sample_lock is held; explicit bind callers already hold a vdev/psoc op. */
++static int hdd_wonder_sched_capture_clock(struct hdd_wonder_sched *sched,
++					 bool operation_held,
++					 bool strict_continuity)
++{
++	struct wma_wonder_tsf_sample sample = { 0 };
++	struct hdd_wonder_clock previous;
++	struct osif_vdev_sync *vdev_sync = NULL;
++	u64 before_ns, after_ns, bridge_host_ns, qtimer_now_us;
++	u64 sample_host_ns, tsf_delta, qtimer_delta, error_us;
++	u64 helper_cookie, identity_sequence;
++	unsigned long flags;
++	bool discontinuity = false;
++	u8 vdev_id;
++	int ret;
++
++	spin_lock_irqsave(&sched->lock, flags);
++	if (!sched->running || !sched->tsf_bound) {
++		ret = sched->running ? -ENODATA : -ESHUTDOWN;
++		spin_unlock_irqrestore(&sched->lock, flags);
++		return ret;
++	}
++	previous = sched->continuity;
++	vdev_id = sched->tsf_vdev_id;
++	helper_cookie = sched->tsf_helper_cookie;
++	identity_sequence = sched->identity_sequence;
++	strict_continuity |= sched->plan &&
++			     sched->plan->generation == sched->generation;
++	spin_unlock_irqrestore(&sched->lock, flags);
++
++	if (!operation_held) {
++		ret = osif_vdev_sync_op_start(sched->adapter->dev, &vdev_sync);
++		if (ret)
++			return ret;
++	}
++	/* Always ask FW for this helper's current register/LMAC identity. Cached
++	 * scratch-register IDs can silently follow the wrong MAC after retuning.
++	 */
++	ret = wma_wonder_tsf_capture(sched->adapter->deflink->vdev_id, vdev_id,
++				     helper_cookie, &sample);
++	if (ret)
++		goto stop_op;
++	/* WCN7750 has MAC0/MAC1, each with TSF1/TSF2. tsf_id_valid is the
++	 * firmware's register-pair validity, as in wlan_hdd_tsf_reg_update_details.
++	 */
++	if (!sample.ids_valid || sample.tsf_id > 1 || sample.mac_id > 1 ||
++	    !sample.qtimer_us) {
++		ret = -ENODATA;
++		goto stop_op;
++	}
++
++	/* Measure the QTIMER-to-CLOCK_MONOTONIC bridge after response arrival.
++	 * Firmware supplies capture QTIMER in microseconds, paired with MAC TSF.
++	 */
++	before_ns = ktime_get_ns();
++	qtimer_now_us = qdf_get_log_timestamp_usecs();
++	after_ns = ktime_get_ns();
++	bridge_host_ns = before_ns + (after_ns - before_ns) / 2;
++	if (sample.qtimer_us > qtimer_now_us ||
++	    qtimer_now_us - sample.qtimer_us > HDD_WONDER_TSF_MAX_CAPTURE_AGE_US ||
++	    (qtimer_now_us - sample.qtimer_us) * NSEC_PER_USEC > bridge_host_ns) {
++		ret = -ERANGE;
++		goto stop_op;
++	}
++	sample_host_ns = bridge_host_ns -
++		(qtimer_now_us - sample.qtimer_us) * NSEC_PER_USEC;
++
++	spin_lock_irqsave(&sched->lock, flags);
++	if (!sched->running || !sched->tsf_bound ||
++	    sched->identity_sequence != identity_sequence ||
++	    sched->tsf_vdev_id != vdev_id ||
++	    sched->tsf_helper_cookie != helper_cookie) {
++		ret = -ESTALE;
++		goto unlock_state;
++	}
++	if (previous.valid) {
++		discontinuity = sample.tsf_id != previous.sample.tsf_id ||
++				sample.mac_id != previous.sample.mac_id ||
++				sample.qtimer_us < previous.sample.qtimer_us ||
++				sample.tsf_us < previous.sample.tsf_us;
++		if (!discontinuity) {
++			/* QTIMER includes suspend; monotonic host time does not. */
++			qtimer_delta = sample.qtimer_us - previous.sample.qtimer_us;
++			tsf_delta = sample.tsf_us - previous.sample.tsf_us;
++			error_us = tsf_delta > qtimer_delta ?
++				tsf_delta - qtimer_delta : qtimer_delta - tsf_delta;
++			discontinuity = error_us > HDD_WONDER_TSF_CLOCK_JUMP_US;
++		}
++	}
++	if (discontinuity) {
++		/* Even equal-valued counters on a new LMAC are a different epoch. */
++		sched->generation++;
++		if (strict_continuity) {
++			sched->clock.valid = false;
++			sched->last_error = -ESTALE;
++			ret = -ESTALE;
++			goto unlock_state;
++		}
++	}
++	sched->clock.sample = sample;
++	sched->clock.sample_host_ns = sample_host_ns;
++	sched->clock.helper_cookie = helper_cookie;
++	sched->clock.vdev_id = vdev_id;
++	sched->clock.valid = true;
++	sched->continuity = sched->clock;
++	if (sched->plan && sched->plan->generation == sched->generation)
++		sched->plan->next_host_ns =
++			hdd_wonder_clock_host(&sched->clock, sched->plan->next_tsf);
++	ret = 0;
++unlock_state:
++	spin_unlock_irqrestore(&sched->lock, flags);
++stop_op:
++	if (vdev_sync)
++		osif_vdev_sync_op_stop(vdev_sync);
++	return ret;
++}
++
++static int hdd_wonder_sched_refresh_clock(struct hdd_wonder_sched *sched)
++{
++	int ret;
++
++	mutex_lock(&sched->sample_lock);
++	ret = hdd_wonder_sched_capture_clock(sched, false, false);
++	mutex_unlock(&sched->sample_lock);
++	return ret;
++}
++
++static void hdd_wonder_sync_work(struct work_struct *work)
++{
++	struct hdd_wonder_sched *sched = container_of(to_delayed_work(work),
++					struct hdd_wonder_sched, sync_work);
++	unsigned long flags;
++	int ret;
++
++	ret = hdd_wonder_sched_refresh_clock(sched);
++	spin_lock_irqsave(&sched->lock, flags);
++	if (ret)
++		sched->last_error = ret;
++	if (sched->running) {
++		queue_delayed_work(sched->workqueue, &sched->sync_work,
++				   msecs_to_jiffies(HDD_WONDER_TSF_REFRESH_MS));
++		if (!ret && sched->plan && sched->plan->generation == sched->generation)
++			queue_work(sched->workqueue, &sched->switch_work);
++	}
++	spin_unlock_irqrestore(&sched->lock, flags);
++}
++
++static enum hrtimer_restart hdd_wonder_sched_timer(struct hrtimer *timer)
++{
++	struct hdd_wonder_sched *sched = container_of(timer, struct hdd_wonder_sched, timer);
++
++	queue_work(sched->workqueue, &sched->switch_work);
++	return HRTIMER_NORESTART;
++}
++
++bool hdd_wonder_sched_generation_active(struct hdd_wonder_sched *sched, u64 generation)
++{
++	unsigned long flags;
++	bool active;
++
++	if (!sched)
++		return false;
++	spin_lock_irqsave(&sched->lock, flags);
++	active = sched->running && sched->plan &&
++		 sched->plan->generation == generation && sched->generation == generation;
++	spin_unlock_irqrestore(&sched->lock, flags);
++	return active;
++}
++
++static void hdd_wonder_sched_switch_work(struct work_struct *work)
++{
++	struct hdd_wonder_sched *sched = container_of(work, struct hdd_wonder_sched, switch_work);
++	struct wondertap_set_freq_params channel;
++	struct hdd_wonder_plan *plan;
++	struct hdd_wonder_slot *slot;
++	struct hdd_wonder_clock clock;
++	u64 now_ns = ktime_get_ns(), completion_ns = 0, completion_tsf, now_tsf;
++	u64 skipped, target_tsf, generation, next_ns = 0;
++	unsigned long flags;
++	u32 index;
++	int ret;
++
++	spin_lock_irqsave(&sched->lock, flags);
++	plan = sched->plan;
++	if (!sched->running || !plan || plan->generation != sched->generation)
++		goto unlock;
++	kref_get(&plan->ref);
++	if (now_ns < plan->next_host_ns) {
++		next_ns = plan->next_host_ns;
++		goto release_locked;
++	}
++	clock = sched->clock;
++	if (!sched->tsf_bound || !clock.valid ||
++	    now_ns - clock.sample_host_ns > HDD_WONDER_TSF_MAX_AGE_NS) {
++		sched->last_error = -ENODATA;
++		goto release_locked;
++	}
++	/* Skip elapsed slots; do not burst old channel changes after a stall. */
++	if (hdd_wonder_clock_tsf(&clock, now_ns, &now_tsf)) {
++		sched->last_error = -ERANGE;
++		goto release_locked;
++	}
++	skipped = now_tsf > plan->next_tsf ?
++		div64_u64(now_tsf - plan->next_tsf, plan->dwell_us) : 0;
++	plan->next_index = (plan->next_index + skipped % plan->count) % plan->count;
++	plan->next_tsf += skipped * plan->dwell_us;
++	plan->next_host_ns = hdd_wonder_clock_host(&clock, plan->next_tsf);
++	index = plan->next_index;
++	target_tsf = plan->next_tsf;
++	generation = plan->generation;
++	channel.freq = plan->channels[index].freq ?: sched->current_freq;
++	channel.bandwidth = plan->channels[index].freq ?
++		plan->channels[index].bandwidth : sched->current_bandwidth;
++	spin_unlock_irqrestore(&sched->lock, flags);
++
++	if (!hdd_wonder_sched_generation_active(sched, generation)) {
++		ret = -ESTALE;
++	} else {
++		ret = sched->ops.set_channel(sched->context, &channel, generation, &completion_ns);
++	}
++	if (!completion_ns)
++		completion_ns = ktime_get_ns();
++	spin_lock_irqsave(&sched->lock, flags);
++	if (!sched->running || sched->plan != plan || generation != sched->generation)
++		goto release_locked;
++	/* set_channel has now rebound and captured the actual prepared helper.
++	 * Completion timestamps must use that fresh anchor, not the old MAC.
++	 */
++	clock = sched->clock;
++	if (!ret && (!sched->tsf_bound || !clock.valid))
++		ret = -ENODATA;
++	if (!ret)
++		ret = hdd_wonder_clock_tsf(&clock, completion_ns, &completion_tsf);
++	if (ret) {
++		sched->last_error = ret;
++		if (ret == -EAGAIN || ret == -EBUSY) {
++			next_ns = ktime_get_ns() + HDD_WONDER_SWITCH_RETRY_NS;
++			goto release_locked;
++		}
++		/* Keep the last known channel active, but stop a failed sequence. */
++		sched->generation++;
++		goto release_locked;
++	}
++
++	hdd_wonder_slot_end(plan, completion_tsf);
++	slot = &plan->slots[index];
++	memset(slot, 0, sizeof(*slot));
++	slot->start_tsf = completion_tsf;
++	slot->status.channel_switch_tsf = (u32)target_tsf;
++	slot->status.freq = channel.freq;
++	slot->status.channel_start_tsf = (u32)completion_tsf;
++	plan->current_index = index;
++	plan->slot_active = true;
++	sched->current_freq = channel.freq;
++	sched->current_bandwidth = channel.bandwidth;
++	sched->current_host_ns = completion_ns;
++	sched->last_error = 0;
++	plan->next_index = (index + 1) % plan->count;
++	plan->next_tsf += plan->dwell_us;
++	plan->next_host_ns = hdd_wonder_clock_host(&clock, plan->next_tsf);
++	next_ns = plan->next_host_ns;
++release_locked:
++	/* Arm under the same lock as quiesce so no timer can be armed after its
++	 * cancellation barrier. The timer callback only queues work.
++	 */
++	if (next_ns && sched->running && sched->plan == plan &&
++	    sched->generation == plan->generation)
++		hrtimer_start(&sched->timer, ns_to_ktime(next_ns), HRTIMER_MODE_ABS);
++	spin_unlock_irqrestore(&sched->lock, flags);
++	kref_put(&plan->ref, hdd_wonder_plan_release);
++	return;
++unlock:
++	spin_unlock_irqrestore(&sched->lock, flags);
++}
++
++struct hdd_wonder_sched *
++hdd_wonder_sched_create(struct hdd_adapter *adapter, void *context,
++			const struct hdd_wonder_sched_ops *ops)
++{
++	struct hdd_wonder_sched *sched;
++
++	if (!adapter || !ops || !ops->set_channel || !ops->validate_channel)
++		return ERR_PTR(-EINVAL);
++	sched = kzalloc(sizeof(*sched), GFP_KERNEL);
++	if (!sched)
++		return ERR_PTR(-ENOMEM);
++	sched->adapter = adapter;
++	sched->context = context;
++	sched->ops = *ops;
++	sched->tsf_vdev_id = U8_MAX;
++	spin_lock_init(&sched->lock);
++	mutex_init(&sched->sample_lock);
++	INIT_WORK(&sched->switch_work, hdd_wonder_sched_switch_work);
++	INIT_DELAYED_WORK(&sched->sync_work, hdd_wonder_sync_work);
++	hrtimer_setup(&sched->timer, hdd_wonder_sched_timer, CLOCK_MONOTONIC,
++		      HRTIMER_MODE_ABS);
++	sched->workqueue = alloc_ordered_workqueue("wonder-channel", WQ_HIGHPRI | WQ_MEM_RECLAIM);
++	if (!sched->workqueue) {
++		kfree(sched);
++		return ERR_PTR(-ENOMEM);
++	}
++	sched->running = true;
++	return sched;
++}
++
++void hdd_wonder_sched_quiesce(struct hdd_wonder_sched *sched)
++{
++	unsigned long flags;
++
++	if (!sched)
++		return;
++	spin_lock_irqsave(&sched->lock, flags);
++	sched->running = false;
++	sched->generation++;
++	sched->identity_sequence++;
++	sched->clock.valid = false;
++	spin_unlock_irqrestore(&sched->lock, flags);
++	hrtimer_cancel(&sched->timer);
++	cancel_delayed_work(&sched->sync_work);
++}
++
++void hdd_wonder_sched_suspend(struct hdd_wonder_sched *sched)
++{
++	if (!sched)
++		return;
++	hdd_wonder_sched_quiesce(sched);
++	/* Channel callbacks use provider/RTNL trylocks; TSF capture has no
++	 * provider callback. Draining while the provider is locked cannot wait
++	 * on that same lock from either worker.
++	 */
++	cancel_delayed_work_sync(&sched->sync_work);
++	cancel_work_sync(&sched->switch_work);
++}
++
++void hdd_wonder_sched_destroy(struct hdd_wonder_sched *sched)
++{
++	if (!sched)
++		return;
++	hdd_wonder_sched_quiesce(sched);
++	cancel_delayed_work_sync(&sched->sync_work);
++	cancel_work_sync(&sched->switch_work);
++	destroy_workqueue(sched->workqueue);
++	if (sched->plan)
++		kref_put(&sched->plan->ref, hdd_wonder_plan_release);
++	kfree(sched);
++}
++
++int hdd_wonder_sched_get_tsf(struct hdd_wonder_sched *sched, u32 *tsf)
++{
++	struct hdd_wonder_clock clock;
++	unsigned long flags;
++	u64 value, now_ns;
++	int ret;
++
++	if (!sched || !tsf)
++		return -EINVAL;
++	spin_lock_irqsave(&sched->lock, flags);
++	if (!sched->running) {
++		spin_unlock_irqrestore(&sched->lock, flags);
++		return -ESHUTDOWN;
++	}
++	clock = sched->clock;
++	spin_unlock_irqrestore(&sched->lock, flags);
++	now_ns = ktime_get_ns();
++	if (!clock.valid || now_ns - clock.sample_host_ns > HDD_WONDER_TSF_MAX_AGE_NS) {
++		ret = hdd_wonder_sched_refresh_clock(sched);
++		if (ret)
++			return ret;
++		spin_lock_irqsave(&sched->lock, flags);
++		clock = sched->clock;
++		spin_unlock_irqrestore(&sched->lock, flags);
++		now_ns = ktime_get_ns();
++	}
++	ret = hdd_wonder_clock_tsf(&clock, now_ns, &value);
++	if (!ret)
++		*tsf = (u32)value;
++	return ret;
++}
++
++int hdd_wonder_sched_request(struct hdd_wonder_sched *sched,
++			     const struct channel_schedule_request *request)
++{
++	struct hdd_wonder_plan *plan = NULL, *old;
++	struct hdd_wonder_clock clock;
++	struct wondertap_set_freq_params channel;
++	u64 now_ns, now_tsf, target_tsf;
++	s32 delta_us;
++	u32 unused;
++	unsigned long flags;
++	int i, ret;
++
++	if (!sched || !request)
++		return -EINVAL;
++	if (request->channel_list_len) {
++		if (!request->channel_list || !request->dwell_time_tu ||
++		    request->dwell_time_tu > INT_MAX / 1024 ||
++		    request->next_channel_index >= request->channel_list_len)
++			return -EINVAL;
++		plan = kzalloc(sizeof(*plan), GFP_KERNEL);
++		if (!plan)
++			return -ENOMEM;
++		kref_init(&plan->ref);
++		plan->count = request->channel_list_len;
++		plan->next_index = request->next_channel_index;
++		plan->current_index = request->next_channel_index;
++		plan->dwell_us = (u64)request->dwell_time_tu * 1024;
++		plan->request_tsf = request->target_switch_time_tsf;
++		memcpy(plan->channels, request->channel_list,
++		       plan->count * sizeof(plan->channels[0]));
++		for (i = 0; i < plan->count; i++) {
++			if (plan->channels[i].role >= WONDERTAP_ROLE_MAX ||
++			    (!plan->channels[i].freq && plan->channels[i].role != WONDERTAP_ROLE_NOP)) {
++				ret = -EINVAL;
++				goto free_plan;
++			}
++			if (!plan->channels[i].freq)
++				continue;
++			channel.freq = plan->channels[i].freq;
++			channel.bandwidth = plan->channels[i].bandwidth;
++			ret = sched->ops.validate_channel(sched->context, &channel);
++			if (ret)
++				goto free_plan;
++		}
++		ret = hdd_wonder_sched_get_tsf(sched, &unused);
++		if (ret)
++			goto free_plan;
++	}
++
++	spin_lock_irqsave(&sched->lock, flags);
++	if (!sched->running) {
++		ret = -ESHUTDOWN;
++		goto unlock;
++	}
++	clock = sched->clock;
++	now_ns = ktime_get_ns();
++	if (plan) {
++		ret = hdd_wonder_clock_tsf(&clock, now_ns, &now_tsf);
++		if (ret)
++			goto unlock;
++		delta_us = (s32)(request->target_switch_time_tsf - (u32)now_tsf);
++		if (delta_us < 0 && (u64)-((s64)delta_us) > now_tsf) {
++			ret = -ERANGE;
++			goto unlock;
++		}
++		target_tsf = now_tsf + delta_us;
++		plan->next_tsf = target_tsf;
++		plan->next_host_ns = hdd_wonder_clock_host(&clock, target_tsf);
++		plan->generation = ++sched->generation;
++	} else {
++		sched->generation++;
++	}
++	old = sched->plan;
++	if (old && clock.valid && !hdd_wonder_clock_tsf(&clock, now_ns, &now_tsf))
++		hdd_wonder_slot_end(old, now_tsf);
++	sched->plan = plan;
++	sched->last_error = 0;
++	spin_unlock_irqrestore(&sched->lock, flags);
++	if (old)
++		kref_put(&old->ref, hdd_wonder_plan_release);
++	/* Queueing is safe even if an old timer fires: work always snapshots plan. */
++	queue_work(sched->workqueue, &sched->switch_work);
++	return 0;
++unlock:
++	spin_unlock_irqrestore(&sched->lock, flags);
++free_plan:
++	if (plan)
++		kref_put(&plan->ref, hdd_wonder_plan_release);
++	return ret;
++}
++
++int hdd_wonder_sched_get_report(struct hdd_wonder_sched *sched,
++				struct wondertap_channel_status_report *report)
++{
++	struct hdd_wonder_plan *plan;
++	struct hdd_wonder_slot *slot;
++	u64 now_tsf, elapsed;
++	unsigned long flags;
++	int i, ret = 0;
++
++	if (!sched || !report)
++		return -EINVAL;
++	spin_lock_irqsave(&sched->lock, flags);
++	plan = sched->plan;
++	if (!sched->running) {
++		ret = -ESHUTDOWN;
++		goto unlock;
++	}
++	if (!plan) {
++		if (report->channel_status_len)
++			ret = -ENODATA;
++		else {
++			report->current_channel_hopping_request_tsf = 0;
++			report->current_channel_index = 0;
++		}
++		goto unlock;
++	}
++	if (report->channel_status_len != plan->count) {
++		ret = -EINVAL;
++		goto unlock;
++	}
++	if (plan->generation != sched->generation) {
++		ret = sched->last_error ?: -ESTALE;
++		goto unlock;
++	}
++	report->current_channel_hopping_request_tsf = plan->request_tsf;
++	report->current_channel_index = plan->current_index;
++	for (i = 0; i < plan->count; i++)
++		report->status[i] = plan->slots[i].status;
++	if (plan->slot_active &&
++	    !hdd_wonder_clock_tsf(&sched->clock, ktime_get_ns(), &now_tsf)) {
++		slot = &plan->slots[plan->current_index];
++		if (now_tsf >= slot->start_tsf) {
++			elapsed = now_tsf - slot->start_tsf;
++			report->status[plan->current_index].tx_traffic_index =
++				hdd_wonder_traffic_index(slot->tx_us, elapsed);
++			report->status[plan->current_index].rx_traffic_index =
++				hdd_wonder_traffic_index(slot->rx_us, elapsed);
++		}
++	}
++unlock:
++	spin_unlock_irqrestore(&sched->lock, flags);
++	return ret;
++}
++
++void hdd_wonder_sched_note_channel(struct hdd_wonder_sched *sched, u32 freq,
++				  enum wondertap_rate_bw bandwidth,
++				  u64 completion_host_ns)
++{
++	unsigned long flags;
++
++	if (!sched)
++		return;
++	spin_lock_irqsave(&sched->lock, flags);
++	sched->current_freq = freq;
++	sched->current_bandwidth = bandwidth;
++	sched->current_host_ns = completion_host_ns;
++	spin_unlock_irqrestore(&sched->lock, flags);
++}
++
++static int hdd_wonder_sched_bind_clock(struct hdd_wonder_sched *sched,
++				      u8 vdev_id, u64 helper_cookie,
++				      bool strict_continuity)
++{
++	unsigned long flags;
++	int ret;
++
++	if (!sched || !helper_cookie)
++		return -EINVAL;
++	mutex_lock(&sched->sample_lock);
++	spin_lock_irqsave(&sched->lock, flags);
++	if (!sched->running) {
++		spin_unlock_irqrestore(&sched->lock, flags);
++		ret = -ESHUTDOWN;
++		goto unlock;
++	}
++	sched->tsf_vdev_id = vdev_id;
++	sched->tsf_helper_cookie = helper_cookie;
++	sched->tsf_bound = true;
++	sched->identity_sequence++;
++	sched->clock.valid = false;
++	spin_unlock_irqrestore(&sched->lock, flags);
++	ret = hdd_wonder_sched_capture_clock(sched, true, strict_continuity);
++	spin_lock_irqsave(&sched->lock, flags);
++	if (ret)
++		sched->last_error = ret;
++	else
++		sched->last_error = 0;
++	if (sched->running && (!strict_continuity || !ret)) {
++		mod_delayed_work(sched->workqueue, &sched->sync_work,
++				 ret ? 0 : msecs_to_jiffies(HDD_WONDER_TSF_REFRESH_MS));
++		if (!ret && sched->plan && sched->plan->generation == sched->generation)
++			queue_work(sched->workqueue, &sched->switch_work);
++	}
++	spin_unlock_irqrestore(&sched->lock, flags);
++unlock:
++	mutex_unlock(&sched->sample_lock);
++	return ret;
++}
++
++int hdd_wonder_sched_bind_tsf(struct hdd_wonder_sched *sched, u8 vdev_id,
++			      u64 helper_cookie)
++{
++	return hdd_wonder_sched_bind_clock(sched, vdev_id, helper_cookie, false);
++}
++
++void hdd_wonder_sched_unbind_tsf(struct hdd_wonder_sched *sched)
++{
++	unsigned long flags;
++
++	if (!sched)
++		return;
++	spin_lock_irqsave(&sched->lock, flags);
++	sched->tsf_bound = false;
++	sched->identity_sequence++;
++	sched->clock.valid = false;
++	spin_unlock_irqrestore(&sched->lock, flags);
++}
++
++int hdd_wonder_sched_resume(struct hdd_wonder_sched *sched, u8 vdev_id,
++			    u64 helper_cookie)
++{
++	unsigned long flags;
++	int ret;
++
++	if (!sched || !helper_cookie)
++		return -EINVAL;
++	spin_lock_irqsave(&sched->lock, flags);
++	if (sched->running) {
++		spin_unlock_irqrestore(&sched->lock, flags);
++		return -EBUSY;
++	}
++	if (!sched->continuity.valid) {
++		spin_unlock_irqrestore(&sched->lock, flags);
++		return -ENODATA;
++	}
++	sched->running = true;
++	spin_unlock_irqrestore(&sched->lock, flags);
++	/* Preserve old QTIMER/TSF and counter IDs across PM before replay. */
++	ret = hdd_wonder_sched_bind_clock(sched, vdev_id, helper_cookie, true);
++	if (ret)
++		hdd_wonder_sched_suspend(sched);
++	return ret;
++}
++
++void hdd_wonder_sched_note_airtime(struct hdd_wonder_sched *sched, u32 lmac_id,
++				  u32 freq, u32 tsf, bool tx, u32 duration_us)
++{
++	struct hdd_wonder_plan *plan;
++	struct hdd_wonder_slot *slot;
++	unsigned long flags;
++	int i;
++
++	if (!sched || !freq || !tsf || !duration_us)
++		return;
++	spin_lock_irqsave(&sched->lock, flags);
++	plan = sched->plan;
++	if (!sched->running || !sched->tsf_bound || !sched->clock.valid ||
++	    !sched->clock.sample.ids_valid ||
++	    sched->clock.sample.mac_id != lmac_id || !plan ||
++	    plan->generation != sched->generation ||
++	    ktime_get_ns() - sched->clock.sample_host_ns > HDD_WONDER_TSF_MAX_AGE_NS)
++		goto unlock;
++	/* A late PPDU report can still update a recently completed list entry. */
++	for (i = 0; i < plan->count; i++) {
++		slot = &plan->slots[i];
++		if (slot->status.freq != freq || !slot->start_tsf ||
++		    (s32)(tsf - (u32)slot->start_tsf) < 0 ||
++		    (slot->end_tsf && (s32)(tsf - (u32)slot->end_tsf) >= 0))
++			continue;
++		if (tx)
++			slot->tx_us += duration_us;
++		else
++			slot->rx_us += duration_us;
++		if (slot->end_tsf) {
++			slot->status.tx_traffic_index = hdd_wonder_traffic_index(
++				slot->tx_us, slot->end_tsf - slot->start_tsf);
++			slot->status.rx_traffic_index = hdd_wonder_traffic_index(
++				slot->rx_us, slot->end_tsf - slot->start_tsf);
++		}
++		break;
++	}
++unlock:
++	spin_unlock_irqrestore(&sched->lock, flags);
++}
++
++#endif /* FEATURE_WLAN_WONDER */
+diff --git a/qcacld-3.0/core/sme/src/common/sme_api.c b/qcacld-3.0/core/sme/src/common/sme_api.c
+index 5de81222f0a5e65bd92f8e800dfed93ece1e1ae1..9d7f088fae54e99b507129ccd9edc1f7f29d9c4f 100644
+--- a/qcacld-3.0/core/sme/src/common/sme_api.c
++++ b/qcacld-3.0/core/sme/src/common/sme_api.c
+@@ -1,3 +1,4 @@
++#include <cdp_txrx_injection.h>
+ /*
+  * Copyright (c) 2012-2021 The Linux Foundation. All rights reserved.
+  * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+@@ -5157,6 +5158,11 @@ struct wlan_objmgr_vdev
+ 	struct mac_context *mac_ctx = MAC_CONTEXT(mac_handle);
+ 	struct wlan_objmgr_vdev *vdev;
+ 
++#ifdef FEATURE_WLAN_WONDER
++	if (!wlan_injection_wonder_vdev_admission(vdev_params->opmode))
++		return NULL;
++#endif
++
+ 	sme_debug("addr:"QDF_MAC_ADDR_FMT" opmode:%d",
+ 		  QDF_MAC_ADDR_REF(vdev_params->macaddr),
+ 		  vdev_params->opmode);
+diff --git a/qcacld-3.0/core/wma/inc/wma_api.h b/qcacld-3.0/core/wma/inc/wma_api.h
+index af128c338c25d1c88c696f51ecdd1b96a55f63a3..ef41ec4d61a6f99f47ebbbbf22eeeb6a990bee23 100644
+--- a/qcacld-3.0/core/wma/inc/wma_api.h
++++ b/qcacld-3.0/core/wma/inc/wma_api.h
+@@ -60,6 +60,11 @@ struct wma_wonder_helper_limits {
+ };
+ 
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
++/* Lock-free admission check; retained standalone helpers have no objmgr ID. */
++bool wma_wonder_standalone_helper_reserved(void);
++/* Snapshot validation may sleep; never call from firmware/event callbacks. */
++bool wma_wonder_helper_identity_valid(uint8_t monitor_id, uint8_t helper_id,
++				      uint64_t cookie);
+ QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+ 		const uint8_t *interface_mac, uint64_t generation,
+ 		struct wma_wonder_helper_snapshot *snapshot);
+@@ -71,6 +76,18 @@ QDF_STATUS wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
+ 		const struct wma_wonder_helper_snapshot *snapshot,
+ 		struct wma_wonder_helper_limits *limits);
+ #else
++static inline bool wma_wonder_standalone_helper_reserved(void)
++{
++	return false;
++}
++
++static inline bool
++wma_wonder_helper_identity_valid(uint8_t monitor_id, uint8_t helper_id,
++				 uint64_t cookie)
++{
++	return false;
++}
++
+ static inline QDF_STATUS
+ wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+ 		const uint8_t *interface_mac, uint64_t generation,
+diff --git a/qcacld-3.0/core/wma/inc/wma_wonder_tsf.h b/qcacld-3.0/core/wma/inc/wma_wonder_tsf.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e86a3868244685a9dc6e57e6e0a858c7190e027c
+--- /dev/null
++++ b/qcacld-3.0/core/wma/inc/wma_wonder_tsf.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __WMA_WONDER_TSF_H
++#define __WMA_WONDER_TSF_H
++
++#include <qdf_types.h>
++
++struct stsf;
++
++/* Firmware TSF and the SoC timer latched by the same capture operation. */
++struct wma_wonder_tsf_sample {
++	u64 tsf_us;
++	u64 qtimer_us;
++	u32 tsf_id;
++	u32 mac_id;
++	bool ids_valid;
++};
++
++#ifdef FEATURE_WLAN_WONDER
++/* A helper cookie proves the standalone FW vdev, which has no objmgr vdev. */
++int wma_wonder_tsf_capture(u8 monitor_id, u8 vdev_id, u64 helper_cookie,
++			   struct wma_wonder_tsf_sample *sample);
++bool wma_wonder_tsf_event(const struct stsf *event);
++/* Only after the firmware/event queue has been drained across restart. */
++void wma_wonder_tsf_reset(void);
++#else
++static inline bool wma_wonder_tsf_event(const struct stsf *event)
++{
++	return false;
++}
++#endif
++
++#endif /* __WMA_WONDER_TSF_H */
+diff --git a/qcacld-3.0/core/wma/src/wma_data.c b/qcacld-3.0/core/wma/src/wma_data.c
+index 4205636c85d9a8f0550eea430a77c99fe6816a78..449a36bb333b0ae0dbd864ce2f190746db568d39 100644
+--- a/qcacld-3.0/core/wma/src/wma_data.c
++++ b/qcacld-3.0/core/wma/src/wma_data.c
+@@ -2057,12 +2057,54 @@ fail:
+ }
+ 
+ #ifdef FEATURE_WLAN_WONDER
++bool wma_wonder_standalone_helper_reserved(void)
++{
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++
++	return !READ_ONCE(helper->native) && READ_ONCE(helper->wonder_owned) &&
++		READ_ONCE(helper->wmi_created);
++}
++
++bool wma_wonder_helper_identity_valid(uint8_t monitor_id, uint8_t helper_id,
++				      uint64_t cookie)
++{
++	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
++	struct wma_injection_helper_snapshot helper_snapshot;
++	tp_wma_handle wma;
++	bool valid = false;
++
++	if (!cookie || !READ_ONCE(wma_injection_ctx.active))
++		return false;
++	mutex_lock(&wma_injection_ctx.lifecycle_lock);
++	mutex_lock(&wma_injection_ctx.helper_lock);
++	wma = wma_injection_ctx.wma;
++	if (!wma || !wma->wmi_handle || !wma_injection_ctx.active ||
++	    wma_injection_ctx.paused || wma_injection_ctx.channel_change_paused ||
++	    monitor_id >= wma->max_bssid || !wma->interfaces[monitor_id].vdev ||
++	    wma->interfaces[monitor_id].ch_freq != helper->chanfreq ||
++	    helper_id >= wma->max_bssid || !helper->wonder_owned ||
++	    helper->wonder_cookie != cookie || helper->vdev_id != helper_id ||
++	    helper->wonder_delete_sent ||
++	    !wma_injection_get_helper_snapshot(monitor_id, helper->chanfreq,
++					helper->interface_mac, helper->generation,
++					&helper_snapshot) || !helper_snapshot.direct_dp ||
++	    (helper->generation && !wlan_mlme_sta_mon_token_valid(wma->psoc,
++					monitor_id, helper->generation)) ||
++	    (!helper->generation && wlan_mlme_sta_mon_is_owner(wma->psoc, monitor_id)))
++		goto out;
++	valid = true;
++out:
++	mutex_unlock(&wma_injection_ctx.helper_lock);
++	mutex_unlock(&wma_injection_ctx.lifecycle_lock);
++	return valid;
++}
++
+ QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+ 		const uint8_t *interface_mac, uint64_t generation,
+ 		struct wma_wonder_helper_snapshot *snapshot)
+ {
+ 	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+-	struct wma_injection_helper_snapshot current;
++	struct wma_injection_helper_snapshot helper_snapshot;
+ 	tp_wma_handle wma;
+ 	QDF_STATUS status = QDF_STATUS_E_AGAIN;
+ 
+@@ -2086,14 +2128,14 @@ QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+ 		goto out;
+ 	}
+ 	if (!wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+-					      generation, &current)) {
++					      generation, &helper_snapshot)) {
+ 		status = __wma_injection_ensure_helper(wma, monitor_id, frequency,
+ 						     interface_mac, generation);
+ 		if (QDF_IS_STATUS_ERROR(status))
+ 			goto out;
+ 	}
+ 	if (!wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+-					      generation, &current) || !current.direct_dp) {
++					      generation, &helper_snapshot) || !helper_snapshot.direct_dp) {
+ 		status = QDF_STATUS_E_AGAIN;
+ 		goto out;
+ 	}
+@@ -2114,7 +2156,7 @@ QDF_STATUS wma_wonder_helper_prepare(uint8_t monitor_id, uint32_t frequency,
+ 			helper->wonder_cookie = atomic64_inc_return(&wma_wonder_helper_cookie);
+ 		WRITE_ONCE(helper->wonder_owned, true);
+ 	}
+-	snapshot->vdev_id = current.vdev_id;
++	snapshot->vdev_id = helper_snapshot.vdev_id;
+ 	snapshot->cookie = helper->wonder_cookie;
+ 	status = QDF_STATUS_SUCCESS;
+ out:
+@@ -2128,7 +2170,7 @@ QDF_STATUS wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
+ 		const struct wma_wonder_helper_snapshot *snapshot, bool set)
+ {
+ 	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+-	struct wma_injection_helper_snapshot current;
++	struct wma_injection_helper_snapshot helper_snapshot;
+ 	struct set_rx_mac_filter param = { 0 };
+ 	tp_wma_handle wma;
+ 	QDF_STATUS status = QDF_STATUS_E_AGAIN;
+@@ -2142,7 +2184,7 @@ QDF_STATUS wma_wonder_helper_set_rx_mac(uint8_t monitor_id, uint32_t frequency,
+ 	    !helper->wonder_owned || helper->wonder_cookie != snapshot->cookie ||
+ 	    helper->vdev_id != snapshot->vdev_id || helper->wonder_delete_sent ||
+ 	    !wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+-					      generation, &current) ||
++					      generation, &helper_snapshot) ||
+ 	    (set && (wma_injection_ctx.paused ||
+ 		     wma_injection_ctx.channel_change_paused ||
+ 		     (generation && !wlan_mlme_sta_mon_token_valid(wma->psoc,
+@@ -2165,7 +2207,7 @@ QDF_STATUS wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
+ 		struct wma_wonder_helper_limits *limits)
+ {
+ 	struct wma_injection_helper *helper = &wma_injection_ctx.helper;
+-	struct wma_injection_helper_snapshot current;
++	struct wma_injection_helper_snapshot helper_snapshot;
+ 	tp_wma_handle wma;
+ 	QDF_STATUS status = QDF_STATUS_E_AGAIN;
+ 
+@@ -2179,14 +2221,14 @@ QDF_STATUS wma_wonder_helper_get_limits(uint8_t monitor_id, uint32_t frequency,
+ 	    !helper->wonder_owned || helper->wonder_cookie != snapshot->cookie ||
+ 	    helper->vdev_id != snapshot->vdev_id ||
+ 	    !wma_injection_get_helper_snapshot(monitor_id, frequency, interface_mac,
+-					      generation, &current) || !current.direct_dp ||
++					      generation, &helper_snapshot) || !helper_snapshot.direct_dp ||
+ 	    (generation && !wlan_mlme_sta_mon_token_valid(wma->psoc, monitor_id,
+ 							  generation)))
+ 		goto out;
+ 	limits->frequency = helper->chanfreq;
+ 	limits->phy_mode = helper->phy_mode;
+-	limits->max_nss = current.max_nss;
+-	limits->bandwidth_mask = current.channel_bw_mask;
++	limits->max_nss = helper_snapshot.max_nss;
++	limits->bandwidth_mask = helper_snapshot.channel_bw_mask;
+ 	limits->ht_supported = helper->ht_supported;
+ 	limits->vht_supported = helper->vht_supported;
+ 	limits->he_supported = helper->he_supported;
+@@ -2810,7 +2852,15 @@ wma_injection_channel_change_begin(uint8_t monitor_vdev_id,
+ 			status = QDF_STATUS_E_BUSY;
+ 		} else if (smp_load_acquire(&helper->created) &&
+ 			   (helper->monitor_vdev_id != monitor_vdev_id ||
+-			    helper->chanfreq != chanfreq)) {
++			    helper->chanfreq != chanfreq
++#ifdef FEATURE_WLAN_WONDER
++			    || helper->wonder_owned
++#endif
++			   )) {
++			/* Wonder CLEAR retires its matcher until real helper DELETE.
++			 * Recreate it even for a width-only channel transition so its
++			 * lifetime cookie and channel limits describe the new channel.
++			 */
+ 			__wma_injection_destroy_helper(wma);
+ #ifdef FEATURE_WLAN_WONDER
+ 			if (helper->wonder_owned && helper->wmi_created)
+diff --git a/qcacld-3.0/core/wma/src/wma_features.c b/qcacld-3.0/core/wma/src/wma_features.c
+index d0719a76d947e443963acac8d37e9fd4c2398283..ee188efaf4f2bd96c076e07b1933e37b33b84bc3 100644
+--- a/qcacld-3.0/core/wma/src/wma_features.c
++++ b/qcacld-3.0/core/wma/src/wma_features.c
+@@ -59,6 +59,7 @@
+ #include "ol_fw.h"
+ 
+ #include "wma_internal.h"
++#include "wma_wonder_tsf.h"
+ #include "wma_nan_datapath.h"
+ #include <cdp_txrx_handle.h>
+ #include "wlan_pmo_ucfg_api.h"
+@@ -653,6 +654,13 @@ int wma_vdev_tsf_handler(void *handle, uint8_t *data, uint32_t data_len)
+ 				       tsf_event->mac_id_valid,
+ 				       tsf_event->tsf_id,
+ 				       tsf_event->tsf_id_valid);
++	/* Wonder owns its capture completion; legacy TSF_PLUS need not be started
++	 * for a monitor vdev, and may have no host capture timer initialized.
++	 */
++	if (wma_wonder_tsf_event(ptsf)) {
++		qdf_mem_free(ptsf);
++		return 0;
++	}
+ 	tsf_msg.type = eWNI_SME_TSF_EVENT;
+ 	tsf_msg.bodyptr = ptsf;
+ 	tsf_msg.bodyval = 0;
+diff --git a/qcacld-3.0/core/wma/src/wma_main.c b/qcacld-3.0/core/wma/src/wma_main.c
+index c5f6aae3cab9d5992a038188f30bc94083484cbc..f40bf8a60ee9fa0faad8465cc10e411e4bccaf30 100644
+--- a/qcacld-3.0/core/wma/src/wma_main.c
++++ b/qcacld-3.0/core/wma/src/wma_main.c
+@@ -1,3 +1,4 @@
++#include "wma_wonder_tsf.h"
+ /*
+  * Copyright (c) 2013-2021 The Linux Foundation. All rights reserved.
+  * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+@@ -5228,6 +5229,9 @@ QDF_STATUS wma_wmi_work_close(void)
+ 	/* remove the wmi work */
+ 	wma_debug("calling wmi_unified_remove_work");
+ 	wmi_unified_remove_work(wmi_handle);
++#ifdef FEATURE_WLAN_WONDER
++	wma_wonder_tsf_reset();
++#endif
+ 
+ 	wma_debug("Exit");
+ 	return QDF_STATUS_SUCCESS;
+diff --git a/qcacld-3.0/core/wma/src/wma_wonder_tsf.c b/qcacld-3.0/core/wma/src/wma_wonder_tsf.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..be19f29767f6f3ba01c9c98d4945d2f6053636a9
+--- /dev/null
++++ b/qcacld-3.0/core/wma/src/wma_wonder_tsf.c
+@@ -0,0 +1,138 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Reuse Onyx's existing paired TSF/QTIMER capture command. */
++#include <linux/completion.h>
++#include <linux/jiffies.h>
++#include <linux/mutex.h>
++#include <linux/spinlock.h>
++#include <qdf_time.h>
++#include "wma.h"
++#include "wma_internal.h"
++#include "wma_api.h"
++#include "wma_wonder_tsf.h"
++#include "cds_api.h"
++
++#ifdef FEATURE_WLAN_WONDER
++
++#define WMA_WONDER_TSF_TIMEOUT_MS 200
++
++static DEFINE_MUTEX(wma_wonder_tsf_request_lock);
++static DEFINE_SPINLOCK(wma_wonder_tsf_lock);
++static DECLARE_COMPLETION(wma_wonder_tsf_completion);
++static struct {
++	struct wma_wonder_tsf_sample sample;
++	u8 vdev_id;
++	bool pending;
++	bool waiting;
++	bool received;
++} wma_wonder_tsf;
++
++bool wma_wonder_tsf_event(const struct stsf *event)
++{
++	unsigned long flags;
++	bool consumed = false;
++
++	/* mac_id_valid identifies unsolicited TSF auto reports in this WMI ABI.
++	 * They must not release a pending command's late-response quarantine.
++	 */
++	if (!event || event->mac_id_valid)
++		return false;
++
++	spin_lock_irqsave(&wma_wonder_tsf_lock, flags);
++	if (wma_wonder_tsf.pending && event->vdev_id == wma_wonder_tsf.vdev_id) {
++		consumed = true;
++		wma_wonder_tsf.pending = false;
++		if (wma_wonder_tsf.waiting) {
++			wma_wonder_tsf.sample.tsf_us =
++				((u64)event->tsf_high << 32) | event->tsf_low;
++			wma_wonder_tsf.sample.qtimer_us =
++				((u64)event->soc_timer_high << 32) | event->soc_timer_low;
++#ifndef WLAN_FEATURE_TSF_TIMER_SYNC
++			wma_wonder_tsf.sample.qtimer_us = qdf_log_timestamp_to_usecs(
++				wma_wonder_tsf.sample.qtimer_us);
++#endif
++			wma_wonder_tsf.sample.tsf_id = event->tsf_id;
++			wma_wonder_tsf.sample.mac_id = event->mac_id;
++			wma_wonder_tsf.sample.ids_valid =
++				event->tsf_id_valid;
++			wma_wonder_tsf.received = true;
++			complete(&wma_wonder_tsf_completion);
++		}
++	}
++	spin_unlock_irqrestore(&wma_wonder_tsf_lock, flags);
++	return consumed;
++}
++
++int wma_wonder_tsf_capture(u8 monitor_id, u8 vdev_id, u64 helper_cookie,
++			   struct wma_wonder_tsf_sample *sample)
++{
++	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
++	unsigned long flags;
++	QDF_STATUS status;
++	int ret;
++
++	if (!sample || !wma || !helper_cookie || vdev_id >= wma->max_bssid)
++		return -ENODEV;
++
++	mutex_lock(&wma_wonder_tsf_request_lock);
++	if (!wma_wonder_helper_identity_valid(monitor_id, vdev_id, helper_cookie)) {
++		ret = -ESTALE;
++		goto unlock;
++	}
++	spin_lock_irqsave(&wma_wonder_tsf_lock, flags);
++	/* There is no transaction ID in this firmware response. A timed-out
++	 * request stays quarantined until its late response or firmware reset.
++	 */
++	if (wma_wonder_tsf.pending) {
++		spin_unlock_irqrestore(&wma_wonder_tsf_lock, flags);
++		ret = -EAGAIN;
++		goto unlock;
++	}
++	reinit_completion(&wma_wonder_tsf_completion);
++	wma_wonder_tsf.vdev_id = vdev_id;
++	wma_wonder_tsf.pending = true;
++	wma_wonder_tsf.waiting = true;
++	wma_wonder_tsf.received = false;
++	spin_unlock_irqrestore(&wma_wonder_tsf_lock, flags);
++
++	status = wma_capture_tsf(wma, vdev_id);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		spin_lock_irqsave(&wma_wonder_tsf_lock, flags);
++		wma_wonder_tsf.pending = false;
++		wma_wonder_tsf.waiting = false;
++		spin_unlock_irqrestore(&wma_wonder_tsf_lock, flags);
++		ret = qdf_status_to_os_return(status);
++		goto unlock;
++	}
++
++	wait_for_completion_timeout(&wma_wonder_tsf_completion,
++				    msecs_to_jiffies(WMA_WONDER_TSF_TIMEOUT_MS));
++	spin_lock_irqsave(&wma_wonder_tsf_lock, flags);
++	if (wma_wonder_tsf.received) {
++		*sample = wma_wonder_tsf.sample;
++		ret = 0;
++	} else {
++		ret = -ETIMEDOUT;
++	}
++	wma_wonder_tsf.waiting = false;
++	spin_unlock_irqrestore(&wma_wonder_tsf_lock, flags);
++	/* Reject a capture that crossed deletion/reuse of the same numeric ID. */
++	if (!ret && !wma_wonder_helper_identity_valid(monitor_id, vdev_id,
++						     helper_cookie))
++		ret = -ESTALE;
++unlock:
++	mutex_unlock(&wma_wonder_tsf_request_lock);
++	return ret;
++}
++
++void wma_wonder_tsf_reset(void)
++{
++	unsigned long flags;
++
++	mutex_lock(&wma_wonder_tsf_request_lock);
++	spin_lock_irqsave(&wma_wonder_tsf_lock, flags);
++	memset(&wma_wonder_tsf, 0, sizeof(wma_wonder_tsf));
++	spin_unlock_irqrestore(&wma_wonder_tsf_lock, flags);
++	mutex_unlock(&wma_wonder_tsf_request_lock);
++}
++
++#endif /* FEATURE_WLAN_WONDER */
+diff --git a/wonder/include/wondertap_monitor.h b/wonder/include/wondertap_monitor.h
+index 0a5639c76114bc272c12eccc43b82afaf67d56f9..c4dcf20f689fcdf86b3cd58b2a04c7ba3e3b162b 100644
+--- a/wonder/include/wondertap_monitor.h
++++ b/wonder/include/wondertap_monitor.h
+@@ -6,6 +6,22 @@
+ #include <net/ieee80211_radiotap.h>
+ #include <wondertap.h>
+ 
++/* Optional Onyx monitor lifecycle hooks, outside the shared vendor ABI.
++ * mac80211 PM holds only the Wonder wiphy/control locks: these hooks must
++ * retain the vendor session/netdev and must not acquire RTNL or create/delete
++ * interfaces. A failed suspend must leave the session usable; a failed resume
++ * must leave it suspended so that a later normal teardown remains possible.
++ */
++struct wondertap_monitor_ops {
++	int (*suspend)(void *handle);
++	int (*resume)(void *handle);
++};
++
++struct wondertap_monitor_aux_dev {
++	struct wondertap_aux_dev tap;
++	const struct wondertap_monitor_ops *monitor_ops;
++};
++
+ /* Bounds for the existing Onyx monitor injection transport. */
+ #define WONDERTAP_MONITOR_RTAP_MAX 26
+ 
+diff --git a/wonder/mac80211.c b/wonder/mac80211.c
+index d9ab185966277cfcf25315eed9eed768ede16054..c5f530dbe0d7cc95c0877931395884419add28fc 100644
+--- a/wonder/mac80211.c
++++ b/wonder/mac80211.c
+@@ -11,6 +11,7 @@
+ #define LOG_MODULE_NAME "mac80211"
+ 
+ #include <linux/netdevice.h>
++#include <linux/rtnetlink.h>
+ #include <linux/etherdevice.h>
+ #include <linux/skbuff.h>
+ #include <net/genetlink.h>
+@@ -413,6 +414,24 @@ static void syna_rx_handler(struct wonder_data *wonder, struct sk_buff *skb)
+ 	}
+ }
+ 
++static bool wonder_monitor_frame_filter(struct wondertap_data *wondertap,
++					__le16 frame_control)
++{
++	struct wondertap_frame_filter_params filter;
++	unsigned long flags;
++	u16 fc = le16_to_cpu(frame_control);
++
++	spin_lock_irqsave(&wondertap->tx_config_lock, flags);
++	filter = wondertap->cached_frame_filter;
++	spin_unlock_irqrestore(&wondertap->tx_config_lock, flags);
++
++	return !filter.enabled ||
++		((fc & IEEE80211_FCTL_FTYPE) ==
++		 (filter.frame_type & IEEE80211_FCTL_FTYPE) &&
++		 (fc & IEEE80211_FCTL_STYPE) ==
++		 (filter.frame_subtype & IEEE80211_FCTL_STYPE));
++}
++
+ static rx_handler_result_t wonder_rx_adhoc_handler(struct wonder_data *wonder,
+ 	struct sk_buff **pskb)
+ {
+@@ -476,6 +495,13 @@ static rx_handler_result_t wonder_rx_adhoc_handler(struct wonder_data *wonder,
+ 	}
+ 	hdr = (struct ieee80211_hdr_3addr *)(skb->data);
+ 
++	/* Apply the Onyx software filter only to normalized mac80211 input.
++	 * The raw monitor delivery path keeps its existing capture behavior.
++	 */
++	if (wonder->wondertap_data->monitor_backend &&
++	    !wonder_monitor_frame_filter(wonder->wondertap_data, hdr->frame_control))
++		goto drop;
++
+ 	/* Filtering */
+ 	if (!wonder_80211_common_filter(wonder, hdr))
+ 		goto drop;
+@@ -519,6 +545,10 @@ static rx_handler_result_t wonder_rx_handler(struct sk_buff **pskb)
+ 	struct sk_buff *skb = *pskb;
+ 	struct wonder_data *wonder = rcu_dereference(skb->dev->rx_handler_data);
+ 
++	/* The physical registration survives PM, which does not hold RTNL. */
++	if (unlikely(smp_load_acquire(&wonder->wondertap_data->monitor_pm_suspended)))
++		return RX_HANDLER_PASS;
++
+ 	atomic64_inc(&wonder->stats.rx_entry_cnt);
+ 
+ 	if (IS_ENABLED(CONFIG_ANDROID_WONDER_RX_DEBUG))
+@@ -641,10 +671,9 @@ static int wonder_rx_setup(struct wonder_data *wonder)
+ 
+ static void wonder_rx_reset(struct wonder_data *wonder)
+ {
+-	if (!wonder->vdev || !wonder->pdev)
+-		return;
+-
+-	netdev_rx_handler_unregister(wonder->pdev);
++	if (wonder->pdev &&
++	    rcu_access_pointer(wonder->pdev->rx_handler_data) == wonder)
++		netdev_rx_handler_unregister(wonder->pdev);
+ 	wonder->vdev = NULL;
+ }
+ 
+@@ -687,8 +716,8 @@ static void wonder_tx(struct ieee80211_hw *hw,
+ 		      struct sk_buff *skb)
+ {
+ 	struct wonder_data *wonder = hw->priv;
+-	struct net_device *pdev = wonder->pdev;
+-	struct net_device *vdev = wonder->vdev;
++	struct net_device *pdev;
++	struct net_device *vdev = NULL;
+ 	struct ieee80211_radiotap_header *radhdr;
+ 	struct ieee80211_hdr *hdr;
+ 	struct wonder_txd *txd;
+@@ -696,6 +725,10 @@ static void wonder_tx(struct ieee80211_hw *hw,
+ 	int monitor_rtap_len = 0;
+ 
+ 	atomic64_inc(&wonder->stats.tx_entry_cnt);
++	if (unlikely(smp_load_acquire(&wonder->wondertap_data->monitor_pm_suspended)))
++		goto drop;
++	pdev = READ_ONCE(wonder->pdev);
++	vdev = READ_ONCE(wonder->vdev);
+ 	if (unlikely(!pdev) || unlikely(!vdev)) {
+ 		pr_err_ratelimited("Physical device is not exist, dropping packet.\n");
+ 		goto drop;
+@@ -826,6 +859,118 @@ drop:
+ 	dev_kfree_skb_any(skb);
+ }
+ 
++static int wonder_monitor_pm_suspend(struct wonder_data *wonder, bool abortable)
++{
++	struct wondertap_data *wondertap = wonder->wondertap_data;
++	bool was_suspended, was_pending;
++	int ret = 0;
++
++	mutex_lock(&wondertap->lock);
++	was_suspended = wondertap->monitor_pm_suspended;
++	was_pending = wondertap->monitor_pm_resume_pending;
++	if (wondertap->state == WONDERTAP_STATE_UP &&
++	    (!was_suspended || was_pending)) {
++		WRITE_ONCE(wondertap->monitor_pm_suspended, true);
++		wondertap->monitor_pm_resume_pending = false;
++		if (wondertap->monitor_ops)
++			ret = wondertap->monitor_ops->suspend(wondertap->vendor_handle);
++		/* The WOWLAN callback can abort suspend, unlike .stop(true). */
++		if (ret && abortable) {
++			wondertap->monitor_pm_resume_pending = was_pending;
++			smp_store_release(&wondertap->monitor_pm_suspended, was_suspended);
++		}
++	}
++	mutex_unlock(&wondertap->lock);
++
++	if (!ret || !abortable) {
++		cancel_delayed_work_sync(&wonder->tx_work);
++		/* Drain readers that entered before the RX/TX gate was published. */
++		synchronize_net();
++	}
++	return ret;
++}
++
++/* The wiphy/control locks keep a validated virtual netdev alive until re-add.
++ * A failed resume may be followed by interface deletion, which bypasses the
++ * driver's ordinary .remove_interface/.stop callbacks. The netdev notifier
++ * invalidates that old pointer; only a current Wonder interface can replace it.
++ */
++static int wonder_monitor_vdev_restore(struct wonder_data *wonder)
++{
++	struct net_device *vdev = wonder->vdev;
++	struct wireless_dev *wdev;
++	bool acquired = false;
++	int ret = -ENODEV;
++
++	lockdep_assert_wiphy(wonder->hw->wiphy);
++	lockdep_assert_held(&wonder->wondertap_data->lock);
++	if (!vdev) {
++		vdev = dev_get_by_name(&init_net, VDEV_NAME);
++		if (!vdev)
++			return -ENODEV;
++		acquired = true;
++	}
++	wdev = vdev->ieee80211_ptr;
++	if (vdev->reg_state != NETREG_REGISTERED || !netif_running(vdev) ||
++	    !wdev || !wdev->registered || wdev->wiphy != wonder->hw->wiphy ||
++	    (wdev->iftype != NL80211_IFTYPE_MONITOR &&
++	     wdev->iftype != NL80211_IFTYPE_ADHOC))
++		goto out;
++
++	wonder->vdev = vdev;
++	wonder->iftype = wdev->iftype;
++	ret = 0;
++out:
++	/* No long-lived virtual ref: unregister must be able to finish. */
++	if (acquired)
++		dev_put(vdev);
++	return ret;
++}
++
++static int wonder_monitor_pm_resume(struct wonder_data *wonder, bool wait_for_interface)
++{
++	struct wondertap_data *wondertap = wonder->wondertap_data;
++	bool provider_resumed = false;
++	int ret = 0;
++
++	mutex_lock(&wondertap->lock);
++	if (wondertap->monitor_pm_suspended) {
++		if (wondertap->state != WONDERTAP_STATE_UP ||
++		    !wondertap->vendor_handle || !wonder->pdev) {
++			ret = -ENODEV;
++		} else {
++			ret = wonder_monitor_vdev_restore(wonder);
++		}
++		if (!ret && !wait_for_interface && !wonder->vif)
++			ret = -ENODEV;
++		if (!ret && wondertap->monitor_ops) {
++			ret = wondertap->monitor_ops->resume(wondertap->vendor_handle);
++			provider_resumed = !ret;
++		}
++		if (!ret)
++			ret = wondertap_replay_channel_schedule_locked(wondertap, false);
++		if (ret && provider_resumed) {
++			int suspend_ret = wondertap->monitor_ops->suspend(wondertap->vendor_handle);
++
++			if (suspend_ret)
++				pr_err("Cannot quiesce provider after schedule replay failed: %d\n", suspend_ret);
++		}
++		if (!ret) {
++			/* Regular .start precedes .add_interface. Keep RX/TX gated
++			 * until mac80211 supplies the current live vif; WOWLAN resume
++			 * already has that vif and can expose the restored session now.
++			 */
++			wondertap->monitor_pm_resume_pending = wait_for_interface;
++			if (!wait_for_interface)
++				smp_store_release(&wondertap->monitor_pm_suspended, false);
++		} else {
++			wondertap->monitor_pm_resume_pending = false;
++		}
++	}
++	mutex_unlock(&wondertap->lock);
++	return ret;
++}
++
+ static int wonder_start(struct ieee80211_hw *hw)
+ {
+ 	struct wonder_data *wonder = hw->priv;
+@@ -834,6 +979,14 @@ static int wonder_start(struct ieee80211_hw *hw)
+ 	const char *pdev_name = physical_name;
+ 	int ret;
+ 
++	/* Reconfiguration calls .start before .add_interface, without RTNL.
++	 * Reuse the existing session, physical reference and RX handler. Neither
++	 * vendor VIF creation nor MTU/RX-registration changes belong on this path.
++	 */
++	if (wondertap->monitor_backend &&
++	    READ_ONCE(wondertap->monitor_pm_suspended))
++		return wonder_monitor_pm_resume(wonder, true);
++
+ 	/* This should turn on the hardware and frame reception. */
+ 	ret = wondertap_get_capabilities(wondertap, &wondertap->cap);
+ 	if (ret) {
+@@ -922,10 +1075,20 @@ WONDER_PREPARATION_ERROR:
+ static void wonder_stop(struct ieee80211_hw *hw, bool suspended)
+ {
+ 	struct wonder_data *wonder = hw->priv;
++	struct wondertap_data *wondertap = wonder->wondertap_data;
++	int ret;
++
++	if (suspended && wondertap->monitor_backend) {
++		ret = wonder_monitor_pm_suspend(wonder, false);
++		if (ret)
++			pr_err("Monitor suspend failed: %d; core traffic remains stopped\n", ret);
++		return;
++	}
+ 	/* This should turn off the hardware. */
+ 	wonder_rx_reset(wonder);
+ 	wonder_pdev_put(wonder);
+-	wondertap_deinit(wonder->wondertap_data);
++	wondertap_deinit(wondertap);
++	WRITE_ONCE(wondertap->monitor_pm_suspended, false);
+ }
+ 
+ #ifdef CONFIG_PM
+@@ -934,12 +1097,20 @@ static int wonder_suspend(struct ieee80211_hw *hw,
+ {
+ 	struct wonder_data *wonder = hw->priv;
+ 
+-	/* Vendor VIF creation/deletion currently requires the netdev RTNL path. */
+ 	if (wonder->wondertap_data->monitor_backend)
+-		return -EBUSY;
++		return wonder_monitor_pm_suspend(wonder, true);
+ 	/* Preserve mac80211's normal full shutdown for other providers. */
+ 	return 1;
+ }
++
++static int wonder_resume(struct ieee80211_hw *hw)
++{
++	struct wonder_data *wonder = hw->priv;
++
++	if (wonder->wondertap_data->monitor_backend)
++		return wonder_monitor_pm_resume(wonder, false);
++	return 1;
++}
+ #endif
+ 
+ static int wonder_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
+@@ -996,6 +1167,9 @@ static void wonder_flush_worker(struct work_struct *work)
+ 	struct ieee80211_hw *hw = wonder->hw;
+ 	int ac;
+ 
++	if (smp_load_acquire(&wonder->wondertap_data->monitor_pm_suspended))
++		return;
++
+ 	/* Flush all AC queues */
+ 	local_bh_disable();
+ 	for (ac = 0; ac < NL80211_NUM_ACS; ac++)
+@@ -1010,6 +1184,9 @@ static void wonder_wake_tx_queue(struct ieee80211_hw *hw,
+ 	unsigned long frame_count = 0;
+ 	unsigned long byte_count = 0;
+ 
++	if (smp_load_acquire(&wonder->wondertap_data->monitor_pm_suspended))
++		return;
++
+ 	/* Called when mac80211 is ready to transmit frames on a previously stopped queue. */
+ 	if (IS_ENABLED(CONFIG_ANDROID_WONDER_TX_DEBUG))
+ 		pr_debug("TX queue woken up.\n");
+@@ -1105,8 +1282,10 @@ static int wonder_add_interface(struct ieee80211_hw *hw,
+ 	struct wonder_data *wonder = hw->priv;
+ 	struct wireless_dev *wdev;
+ 	struct net_device *vdev;
++	struct wondertap_data *wondertap = wonder->wondertap_data;
++	int ret;
+ 
+-	if (wonder->vif) {
++	if (wonder->vif && wonder->vif != vif) {
+ 		/*
+ 		 * Allow STATION mode to be added even if other modes are present,
+ 		 * assuming the underlying hardware supports concurrent STA/P2P/NAN operations.
+@@ -1134,19 +1313,42 @@ static int wonder_add_interface(struct ieee80211_hw *hw,
+ 	pr_debug("Added virtual interface %s (Type: %d), name %s, mtu %d\n",
+ 			wiphy_name(hw->wiphy), vif->type, vdev->name, vdev->mtu);
+ 	/* Configure mac address to phyiscal interface address */
+-	return wonder_force_set_mac(wonder, vif);
++	ret = wonder_force_set_mac(wonder, vif);
++	if (ret)
++		return ret;
++
++	mutex_lock(&wondertap->lock);
++	if (wondertap->monitor_backend && wondertap->monitor_pm_resume_pending) {
++		wondertap->monitor_pm_resume_pending = false;
++		smp_store_release(&wondertap->monitor_pm_suspended, false);
++	}
++	mutex_unlock(&wondertap->lock);
++	return 0;
+ }
+ 
+ static void wonder_remove_interface(struct ieee80211_hw *hw,
+ 							struct ieee80211_vif *vif)
+ {
+ 	struct wonder_data *wonder = hw->priv;
++	struct wondertap_data *wondertap = wonder->wondertap_data;
+ 
+ 	/* Clean up interface data */
++	mutex_lock(&wondertap->lock);
+ 	if (wonder->vif == vif) {
++		if (wondertap->monitor_backend) {
++			/* PM removes the vif before .stop(true). Preserve the fact
++			 * that the provider still needs quiescing, and drain readers
++			 * before invalidating the vif used by adhoc packet handling.
++			 */
++			if (!wondertap->monitor_pm_suspended)
++				wondertap->monitor_pm_resume_pending = true;
++			WRITE_ONCE(wondertap->monitor_pm_suspended, true);
++			synchronize_net();
++		}
+ 		wonder->vif = NULL;
+ 		wonder->iftype = NL80211_IFTYPE_MONITOR;
+ 	}
++	mutex_unlock(&wondertap->lock);
+ 	pr_debug("Removed virtual interface.\n");
+ }
+ 
+@@ -1165,11 +1367,11 @@ static int wonder_ampdu_action(struct ieee80211_hw *hw,
+ 			    struct ieee80211_vif *vif,
+ 			    struct ieee80211_ampdu_params *params)
+ {
+-	/* 
+-         * TODO: Vendors currently fully offload AMPDU to firmware, so these actions 
+-         * aren't needed yet. Since some vendor plan to use the mac80211 AMPDU flow 
+-         * (which is still being discussed), added a TODO and an early return for now.
+-         */
++	/*
++	 * TODO: Vendors currently fully offload AMPDU to firmware, so these actions
++	 * aren't needed yet. Since some vendor plan to use the mac80211 AMPDU flow
++	 * (which is still being discussed), added a TODO and an early return for now.
++	 */
+ 	return -EOPNOTSUPP;
+ 
+ 	switch (params->action) {
+@@ -1330,6 +1532,7 @@ static const struct ieee80211_ops wonder_mac80211_ops = {
+ 	.stop               = wonder_stop,
+ #ifdef CONFIG_PM
+ 	.suspend            = wonder_suspend,
++	.resume             = wonder_resume,
+ #endif
+ 	.config             = wonder_config,
+ 	.add_interface      = wonder_add_interface,
+@@ -1448,7 +1651,8 @@ void *wonder_mac80211_init(struct device *dev, struct wondertap_data *wondertap)
+ 	hw->queues = 4;
+ 
+ 	/* Set Hardware Capabilities */
+-	ieee80211_hw_set(hw, SUPPORTS_PS);
++	if (!wondertap->monitor_backend)
++		ieee80211_hw_set(hw, SUPPORTS_PS);
+ 	ieee80211_hw_set(hw, SINGLE_SCAN_ON_ALL_BANDS);
+ 	ieee80211_hw_set(hw, SIGNAL_DBM);
+ 	if (wondertap->cap.bits.amsdu_aggregation) {
+@@ -1487,6 +1691,9 @@ void *wonder_mac80211_init(struct device *dev, struct wondertap_data *wondertap)
+ 		BIT(NL80211_IFTYPE_MONITOR) |
+ 		BIT(NL80211_IFTYPE_NAN) |           /* Added NAN mode support */
+ 		BIT(NL80211_IFTYPE_STATION);        /* Added STATION mode support */
++	if (wondertap->monitor_backend)
++		hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_ADHOC) |
++					     BIT(NL80211_IFTYPE_MONITOR);
+ 	if (wondertap->monitor_backend)
+ 		hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_ADHOC) |
+ 					    BIT(NL80211_IFTYPE_MONITOR);
+@@ -1510,11 +1717,35 @@ void *wonder_mac80211_init(struct device *dev, struct wondertap_data *wondertap)
+ 
+ void wonder_mac80211_exit(struct wonder_data *wonder)
+ {
++	struct wondertap_data *wondertap;
++
+ 	if (!wonder)
+ 		return;
+ 
++	wondertap = wonder->wondertap_data;
+ 	wonder_ssr_exit(wonder);
++	if (wondertap->monitor_backend) {
++		/* A failed PM resume leaves a registered RX handler and vendor
++		 * session even though mac80211 no longer marks the HW started.
++		 * Gate readers before unregister_hw frees its virtual interfaces.
++		 */
++		WRITE_ONCE(wondertap->monitor_pm_suspended, true);
++		synchronize_net();
++	}
+ 	wonder_features_exit(wonder);
+ 	destroy_workqueue(wonder->workqueue);
++	if (wondertap->monitor_backend &&
++	    (wonder->pdev || wondertap->vendor_handle)) {
++		/* Auxiliary remove enters without RTNL; unregister_hw has
++		 * released its own RTNL section. Finish any session skipped
++		 * by mac80211's reconfiguration-failure shutdown path.
++		 */
++		rtnl_lock();
++		wonder_rx_reset(wonder);
++		wonder_pdev_put(wonder);
++		wondertap_deinit(wondertap);
++		WRITE_ONCE(wondertap->monitor_pm_suspended, false);
++		rtnl_unlock();
++	}
+ 	ieee80211_free_hw(wonder->hw);
+ }
+diff --git a/wonder/main.c b/wonder/main.c
+index de8b26afcc74e79f61b823efb451c2bf77b96767..3e3ef454fb3b095cf8c8ec145077c53c791257e0 100644
+--- a/wonder/main.c
++++ b/wonder/main.c
+@@ -15,6 +15,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/component.h>
+ #include <wondertap.h>
++#include <wondertap_monitor.h>
+ 
+ #include "core.h"
+ #include "mac80211.h"
+@@ -64,6 +65,17 @@ static int wonder_probe(struct auxiliary_device *adev,
+ 	if (!wondertap)
+ 		return -ENOMEM;
+ 	wondertap->monitor_backend = id->driver_data;
++	if (wondertap->monitor_backend) {
++		struct wondertap_monitor_aux_dev *monitor_adev =
++			container_of(wonder_adev, struct wondertap_monitor_aux_dev, tap);
++
++		wondertap->monitor_ops = monitor_adev->monitor_ops;
++		if (wondertap->monitor_ops &&
++		    (!wondertap->monitor_ops->suspend || !wondertap->monitor_ops->resume)) {
++			dev_err(dev, "Monitor PM callbacks must be supplied as a pair\n");
++			return -EINVAL;
++		}
++	}
+ 
+ 	/* Assign wondertap interface version will be used in the match process. */
+ 	wondertap->ver = WONDER_VERSION_3_6_6;
+diff --git a/wonder/nl80211_ven_cmd.c b/wonder/nl80211_ven_cmd.c
+index 588ba944d322eb56451da1c98ef4864a472106d0..959f1f2815e73863ebef23850333094f9d55df98 100644
+--- a/wonder/nl80211_ven_cmd.c
++++ b/wonder/nl80211_ven_cmd.c
+@@ -6,6 +6,7 @@
+ #include <net/cfg80211.h>
+ #include <net/netlink.h>
+ #include <net/mac80211.h>
++#include <linux/limits.h>
+ 
+ #include "wondertap.h"
+ #include "core.h"
+@@ -82,6 +83,16 @@ wonder_set_reg_policy[WONDER_VEN_ATTR_REG_MAX + 1] = {
+ 	WONDER_POL_STRING(WONDER_VEN_ATTR_REG_COUNTRY_CODE),
+ };
+ 
++static const struct nla_policy
++wonder_channel_schedule_policy[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_MAX + 1] = {
++	WONDER_POL_SCALAR(WONDER_VEN_ATTR_CHANNEL_SCHEDULE_LIST_LEN),
++	WONDER_POL_SCALAR(WONDER_VEN_ATTR_CHANNEL_SCHEDULE_NEXT_IDX),
++	WONDER_POL_SCALAR(WONDER_VEN_ATTR_CHANNEL_SCHEDULE_DWELL_TIME),
++	WONDER_POL_SCALAR(WONDER_VEN_ATTR_CHANNEL_SCHEDULE_SWITCH_TIME),
++	WONDER_POL_SCALAR(WONDER_VEN_ATTR_CHANNEL_SCHEDULE_TSF_OFFSET),
++	WONDER_POL_NESTED(WONDER_VEN_ATTR_CHANNEL_SCHEDULE_LIST),
++};
++
+ static const struct nla_policy
+ wonder_channel_list_entry_policy[WONDER_VEN_ATTR_CHANNEL_LIST_ENTRY_MAX + 1] = {
+ 	WONDER_POL_SCALAR(WONDER_VEN_ATTR_CHANNEL_LIST_ENTRY_FREQ),
+@@ -560,17 +571,25 @@ static int wonder_vendor_cmd_set_channel_schedule_req(struct wiphy *wiphy,
+ 	struct nlattr *tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_MAX + 1];
+ 	struct channel_schedule_request params = { 0 };
+ 	struct nlattr *nla;
+-	int rem;
++	int rem = 0;
+ 	int i = 0;
+ 
+ 	if (nla_parse(tb, WONDER_VEN_ATTR_CHANNEL_SCHEDULE_MAX, data, data_len,
+-		      NULL, NULL) < 0) {
++		      wonder_channel_schedule_policy, NULL) < 0) {
+ 		pr_err("Failed to parse channel schedule attributes\n");
+ 		return -EINVAL;
+ 	}
+ 
+-	if (!tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_LIST_LEN] ||
+-	    !tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_NEXT_IDX] ||
++	if (!tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_LIST_LEN])
++		return -EINVAL;
++	params.channel_list_len = nla_get_u8(tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_LIST_LEN]);
++	/* Cancellation needs neither a TSF capture nor a channel list. It must
++	 * also work when the provider has no usable clock for a new schedule.
++	 */
++	if (!params.channel_list_len)
++		return wondertap_channel_schedule_request(wonder->wondertap_data, &params);
++
++	if (!tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_NEXT_IDX] ||
+ 	    !tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_DWELL_TIME] ||
+ 	    !tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_LIST]) {
+ 		pr_err("Missing mandatory attributes for channel schedule\n");
+@@ -600,6 +619,9 @@ static int wonder_vendor_cmd_set_channel_schedule_req(struct wiphy *wiphy,
+ 		}
+ 
+ 		tsf_offset_us = nla_get_u32(tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_TSF_OFFSET]);
++		if (tsf_offset_us > INT_MAX ||
++		    cap.maximum_channel_switch_time_us > INT_MAX - tsf_offset_us)
++			return -ERANGE;
+ 		params.target_switch_time_tsf =
+ 			mac_tsf + cap.maximum_channel_switch_time_us + tsf_offset_us;
+ 	} else if (tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_SWITCH_TIME]) {
+@@ -611,7 +633,6 @@ static int wonder_vendor_cmd_set_channel_schedule_req(struct wiphy *wiphy,
+ 		return -EINVAL;
+ 	}
+ 
+-	params.channel_list_len = nla_get_u8(tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_LIST_LEN]);
+ 	params.next_channel_index = nla_get_u32(tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_NEXT_IDX]);
+ 	params.dwell_time_tu = nla_get_u32(tb[WONDER_VEN_ATTR_CHANNEL_SCHEDULE_DWELL_TIME]);
+ 
+@@ -654,6 +675,10 @@ static int wonder_vendor_cmd_set_channel_schedule_req(struct wiphy *wiphy,
+ 			i++;
+ 		}
+ 	}
++	if (rem || i != params.channel_list_len) {
++		kfree(params.channel_list);
++		return -EINVAL;
++	}
+ 
+ 	i = wondertap_channel_schedule_request(wonder->wondertap_data, &params);
+ 
+diff --git a/wonder/ssr.c b/wonder/ssr.c
+index 58ac3690eb483963309d1fd3305ee10a8507a7fb..accc01c1bb909b6845c52304ea4af15609630b69 100644
+--- a/wonder/ssr.c
++++ b/wonder/ssr.c
+@@ -28,9 +28,29 @@ static int wonder_netdev_event(struct notifier_block *nb, unsigned long event, v
+ 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+ 	struct wonder_data *wonder = container_of(nb, struct wonder_data, netdev_notifier);
+ 
+-	/* Onyx unbinds/rebinds this auxiliary device around its WLAN SSR. */
+-	if (wonder->wondertap_data->monitor_backend)
++	/* Onyx unbinds/rebinds this auxiliary device around its WLAN SSR.
++	 * Failed PM reconfiguration can skip .remove_interface/.stop, however,
++	 * so never retain an unreferenced virtual netdev after its deletion.
++	 */
++	if (wonder->wondertap_data->monitor_backend) {
++		if (event == NETDEV_UNREGISTER && dev == READ_ONCE(wonder->vdev)) {
++			struct wondertap_data *wondertap = wonder->wondertap_data;
++
++			mutex_lock(&wondertap->lock);
++			if (dev == wonder->vdev) {
++				if (!wondertap->monitor_pm_suspended)
++					wondertap->monitor_pm_resume_pending = true;
++				WRITE_ONCE(wondertap->monitor_pm_suspended, true);
++				cancel_delayed_work_sync(&wonder->tx_work);
++				synchronize_net();
++				wonder->vdev = NULL;
++				wonder->vif = NULL;
++				wonder->iftype = NL80211_IFTYPE_MONITOR;
++			}
++			mutex_unlock(&wondertap->lock);
++		}
+ 		return NOTIFY_DONE;
++	}
+ 	if (!wonder || !wonder->pdev || dev != wonder->pdev)
+ 		return NOTIFY_DONE;
+ 
+diff --git a/wonder/wondertap.c b/wonder/wondertap.c
+index 1294b0a5e0c82c1009344da30b7292ec065bef6f..c068c9a13e219b1bef124e0637eb3c42b732de39 100644
+--- a/wonder/wondertap.c
++++ b/wonder/wondertap.c
+@@ -15,6 +15,9 @@
+ #include <wondertap_monitor.h>
+ #include <linux/delay.h>
+ #include <linux/slab.h>
++#include <linux/ktime.h>
++#include <linux/limits.h>
++#include <linux/math64.h>
+ #include <net/mac80211.h>
+ 
+ #include "wondertap_internal.h"
+@@ -53,9 +56,86 @@ static void wondertap_dump_init_params(struct wondertap_init_params *params)
+ 	pr_debug("===============================================\n");
+ }
+ 
++int wondertap_replay_channel_schedule_locked(struct wondertap_data *wondertap,
++					   bool first_start)
++{
++	struct channel_schedule_request schedule = wondertap->cached_channel_schedule;
++	struct wondertap_capability caps = { 0 };
++	u64 sampled_ns = 0, elapsed_us, now_ns;
++	s64 replay_window_us;
++	u32 mac_tsf = 0, elapsed_tsf_us;
++	int ret;
++
++	lockdep_assert_held(&wondertap->lock);
++	if (!schedule.channel_list_len ||
++	    !wondertap->init_params.channel_hopping_enable)
++		return 0;
++	if (!wondertap_is_up(wondertap) || !wondertap->vendor_handle)
++		return -ENODEV;
++	if (!wondertap->wonder_ops || !wondertap->wonder_ops->channel_schedule_request)
++		return -EOPNOTSUPP;
++	ret = wondertap_get_capabilities(wondertap, &caps);
++	if (ret)
++		return ret;
++	if (!caps.bits.channel_hopping)
++		return -EOPNOTSUPP;
++
++	if (first_start) {
++		/* A request cached while DOWN has no live TSF anchor yet. Only
++		 * this initial application chooses a target from an actual sample.
++		 */
++		if (caps.maximum_channel_switch_time_us > INT_MAX)
++			return -ERANGE;
++		sampled_ns = ktime_get_boottime_ns();
++		ret = wondertap_get_mac_tsf(wondertap, &mac_tsf);
++		if (ret)
++			return ret;
++		schedule.target_switch_time_tsf = mac_tsf + caps.maximum_channel_switch_time_us;
++	} else {
++		/* The monitor provider first proves continuity of its real TSF
++		 * clock across PM. Keep the accepted anchor and phase; reject an
++		 * anchor too old to resolve safely through the shared 32-bit ABI.
++		 */
++		if (!wondertap->channel_schedule_accepted)
++			return -ESTALE;
++		now_ns = ktime_get_boottime_ns();
++		if (now_ns < wondertap->channel_schedule_accepted_boottime_ns)
++			return -ESTALE;
++		elapsed_us = div_u64(now_ns - wondertap->channel_schedule_accepted_boottime_ns,
++				     NSEC_PER_USEC);
++		replay_window_us = (s64)INT_MAX + wondertap->channel_schedule_target_delta_us;
++		if (replay_window_us < 0 || elapsed_us > INT_MAX ||
++		    elapsed_us > (u64)replay_window_us)
++			return -ESTALE;
++		ret = wondertap_get_mac_tsf(wondertap, &mac_tsf);
++		if (ret)
++			return ret;
++		elapsed_tsf_us = mac_tsf - (schedule.target_switch_time_tsf -
++					   (u32)wondertap->channel_schedule_target_delta_us);
++		if (elapsed_tsf_us > INT_MAX ||
++		    (s64)wondertap->channel_schedule_target_delta_us - elapsed_tsf_us < -INT_MAX)
++			return -ESTALE;
++	}
++
++	ret = wondertap->wonder_ops->channel_schedule_request(wondertap->vendor_handle,
++							      &schedule);
++	if (ret)
++		return ret;
++	if (first_start) {
++		wondertap->cached_channel_schedule.target_switch_time_tsf =
++			schedule.target_switch_time_tsf;
++		wondertap->channel_schedule_accepted_boottime_ns = sampled_ns;
++		wondertap->channel_schedule_target_delta_us =
++			(s32)(schedule.target_switch_time_tsf - mac_tsf);
++		wondertap->channel_schedule_accepted = true;
++	}
++	return 0;
++}
++
+ int wondertap_init(struct wondertap_data *wondertap, const struct wondertap_init_params *_params)
+ {
+ 	struct wondertap_init_params params = {};
++	bool initialized_this_call = false;
+ 	int ret = -EOPNOTSUPP;
+ 	int retry;
+ 
+@@ -104,8 +184,9 @@ int wondertap_init(struct wondertap_data *wondertap, const struct wondertap_init
+ 	wondertap_dump_init_params(&params);
+ 	for (retry = 0; retry <= WONDER_INIT_RETRY_CNT; retry++) {
+ 
+-		if (!wondertap->wonder_ops || !wondertap->wonder_ops->init) {
+-			pr_err("Vendor operation 'init' is not implemented\n");
++		if (!wondertap->wonder_ops || !wondertap->wonder_ops->init ||
++		    !wondertap->wonder_ops->deinit) {
++			pr_err("Vendor init/deinit operations must be supplied as a pair\n");
+ 			ret = -EOPNOTSUPP;
+ 			goto out;
+ 		}
+@@ -123,42 +204,29 @@ int wondertap_init(struct wondertap_data *wondertap, const struct wondertap_init
+ 	}
+ 
+ 	if (ret == 0) {
++		initialized_this_call = true;
+ 		wondertap->state = WONDERTAP_STATE_UP;
++		wondertap->init_params = params;
+ 		pr_debug("Vendor init successful. State set to UP.\n");
+ 
+-		if (_params->channel_hopping_enable &&
+-			wondertap->wonder_ops->channel_schedule_request &&
+-			wondertap->cached_channel_schedule.channel_list_len > 0) {
+-			struct wondertap_capability caps;
+-			u32 delta = 0;
+-			u32 mac_tsf;
+-
+-			ret = wondertap_get_capabilities(wondertap, &caps);
+-			if (ret) {
+-				pr_err(
+-					"Failed to get capabilities for channel schedule\n");
+-				goto out;
+-			}
+-
+-			ret = wondertap_get_mac_tsf(wondertap, &mac_tsf);
+-			if (ret) {
+-				pr_err("Failed to get TSF for channel schedule\n");
+-				goto out;
+-			}
+-
+-			wondertap->cached_channel_schedule.target_switch_time_tsf =
+-				mac_tsf + caps.maximum_channel_switch_time_us + delta;
+-			wondertap->wonder_ops->channel_schedule_request(
+-				wondertap->vendor_handle,
+-				&wondertap->cached_channel_schedule);
+-			pr_debug("Applied cached channel schedule\n");
+-		}
++		ret = wondertap_replay_channel_schedule_locked(wondertap, true);
++		if (ret)
++			goto out;
+ 	} else {
+ 		pr_err("Vendor init failed: %d\n", ret);
+ 		goto out;
+ 	}
+ 
+ out:
++	if (ret && initialized_this_call) {
++		struct wondertap_deinit_params deinit = { 0 };
++
++		memcpy(deinit.country_code, params.country_code, sizeof(deinit.country_code));
++		if (wondertap->wonder_ops->deinit)
++			wondertap->wonder_ops->deinit(wondertap->vendor_handle, &deinit);
++		wondertap->vendor_handle = NULL;
++		wondertap->state = WONDERTAP_STATE_DOWN;
++	}
+ 	mutex_unlock(&wondertap->lock);
+ 	return ret;
+ }
+@@ -171,7 +239,8 @@ void wondertap_deinit(struct wondertap_data *wondertap)
+ 	mutex_lock(&wondertap->lock);
+ 
+ 	/* Auto-flush active stations on interface deinit / shutdown */
+-	if (wondertap->wonder_ops && wondertap->wonder_ops->set_station_info) {
++	if (wondertap->vendor_handle && wondertap->wonder_ops &&
++	    wondertap->wonder_ops->set_station_info) {
+ 		for (i = 0; i < WONDERTAP_MAX_STATION_TABLE_SIZE; i++) {
+ 			if (wondertap->station_table[i].in_use) {
+ 				struct wondertap_station_info *info =
+@@ -189,7 +258,7 @@ void wondertap_deinit(struct wondertap_data *wondertap)
+ 		}
+ 	}
+ 
+-	if (wondertap->wonder_ops && wondertap->wonder_ops->deinit) {
++	if (wondertap->vendor_handle && wondertap->wonder_ops && wondertap->wonder_ops->deinit) {
+ 		memset(&params, 0, sizeof(params));
+ 		memcpy(params.country_code, wondertap->cached_country_code,
+ 		       sizeof(wondertap->cached_country_code));
+@@ -198,15 +267,19 @@ void wondertap_deinit(struct wondertap_data *wondertap)
+ 		pr_debug("=================================================\n");
+ 		wondertap->wonder_ops->deinit(wondertap->vendor_handle, &params);
+ 		wondertap->vendor_handle = NULL;
+-	} else {
++	} else if (!wondertap->wonder_ops || !wondertap->wonder_ops->deinit) {
+ 		pr_err("Vendor operation 'deinit' is not implemented\n");
+ 	}
+ 
+ 	kfree(wondertap->cached_channel_schedule.channel_list);
+-	wondertap->cached_channel_schedule.channel_list = NULL;
+-	wondertap->cached_channel_schedule.channel_list_len = 0;
++	memset(&wondertap->cached_channel_schedule, 0, sizeof(wondertap->cached_channel_schedule));
++	wondertap->channel_schedule_accepted = false;
++	wondertap->channel_schedule_accepted_boottime_ns = 0;
++	wondertap->channel_schedule_target_delta_us = 0;
+ 
+ 	wondertap->state = WONDERTAP_STATE_DOWN;
++	WRITE_ONCE(wondertap->monitor_pm_suspended, false);
++	wondertap->monitor_pm_resume_pending = false;
+ 	mutex_unlock(&wondertap->lock);
+ }
+ 
+@@ -217,6 +290,10 @@ int wondertap_set_freq(struct wondertap_data *wondertap,
+ 	unsigned long flags;
+ 
+ 	mutex_lock(&wondertap->lock);
++	if (READ_ONCE(wondertap->monitor_pm_suspended)) {
++		ret = -EHOSTDOWN;
++		goto out_unlock;
++	}
+ 	if (wondertap_is_up(wondertap)) {
+ 		if (wondertap->wonder_ops && wondertap->wonder_ops->set_freq) {
+ 			ret = wondertap->wonder_ops->set_freq(wondertap->vendor_handle, params);
+@@ -233,31 +310,56 @@ int wondertap_set_freq(struct wondertap_data *wondertap,
+ 		wondertap->cached_freq = *params;
+ 		spin_unlock_irqrestore(&wondertap->tx_config_lock, flags);
+ 		wondertap->cache_flags |= WONDERTAP_CACHE_FREQ_SET;
++		if (wondertap->monitor_backend) {
++			kfree(wondertap->cached_channel_schedule.channel_list);
++			memset(&wondertap->cached_channel_schedule, 0,
++			       sizeof(wondertap->cached_channel_schedule));
++			wondertap->channel_schedule_accepted = false;
++			wondertap->channel_schedule_accepted_boottime_ns = 0;
++			wondertap->channel_schedule_target_delta_us = 0;
++		}
+ 	}
+ 
++out_unlock:
+ 	mutex_unlock(&wondertap->lock);
+ 	return ret;
+ }
+ 
+-int wondertap_set_filter(struct wondertap_data *wondertap, enum wondertap_filter_type filter_type,
+-			 const void *params)
++int wondertap_set_filter(struct wondertap_data *wondertap,
++			 enum wondertap_filter_type filter_type, const void *params)
+ {
+-	int ret = -EOPNOTSUPP;
++	const struct wondertap_frame_filter_params *filter = params;
++	unsigned long flags;
++	int ret = 0;
+ 
++	if (!params)
++		return -EINVAL;
++	if (wondertap->monitor_backend && filter_type != WONDERTAP_FILTER_TYPE_FRAME)
++		return -EINVAL;
++	if (wondertap->monitor_backend && filter->enabled &&
++	    ((filter->frame_type & ~IEEE80211_FCTL_FTYPE) ||
++	     (filter->frame_subtype & ~IEEE80211_FCTL_STYPE) ||
++	     filter->frame_type == IEEE80211_FCTL_FTYPE))
++		return -EINVAL;
+ 	mutex_lock(&wondertap->lock);
++	if (READ_ONCE(wondertap->monitor_pm_suspended)) {
++		ret = -EHOSTDOWN;
++		goto unlock;
++	}
+ 	if (wondertap_is_up(wondertap)) {
+-		if (wondertap->wonder_ops && wondertap->wonder_ops->set_filter) {
+-			ret = wondertap->wonder_ops->set_filter(wondertap->vendor_handle,
+-				filter_type, params);
+-		} else {
+-			pr_err("Vendor operation 'set_filter' is not implemented\n");
++		if (!wondertap->wonder_ops || !wondertap->wonder_ops->set_filter)
+ 			ret = -EOPNOTSUPP;
+-		}
+-	} else {
+-		pr_err("wondertap is invalid or not up.\n");
++		else
++			ret = wondertap->wonder_ops->set_filter(wondertap->vendor_handle, filter_type, params);
++	} else if (!wondertap->monitor_backend) {
+ 		ret = -ENODEV;
+ 	}
+-
++	if (!ret && filter_type == WONDERTAP_FILTER_TYPE_FRAME) {
++		spin_lock_irqsave(&wondertap->tx_config_lock, flags);
++		wondertap->cached_frame_filter = *filter;
++		spin_unlock_irqrestore(&wondertap->tx_config_lock, flags);
++	}
++unlock:
+ 	mutex_unlock(&wondertap->lock);
+ 	return ret;
+ }
+@@ -275,6 +377,10 @@ int wondertap_set_fixed_tx_rate(struct wondertap_data *wondertap,
+ 	}
+ 
+ 	mutex_lock(&wondertap->lock);
++	if (READ_ONCE(wondertap->monitor_pm_suspended)) {
++		ret = -EHOSTDOWN;
++		goto out_unlock;
++	}
+ 	if (wondertap_is_up(wondertap)) {
+ 		if (wondertap->wonder_ops && wondertap->wonder_ops->set_fixed_tx_rate) {
+ 			ret = wondertap->wonder_ops->set_fixed_tx_rate(wondertap->vendor_handle,
+@@ -294,6 +400,7 @@ int wondertap_set_fixed_tx_rate(struct wondertap_data *wondertap,
+ 		wondertap->cache_flags |= WONDERTAP_CACHE_TX_RATE_SET;
+ 	}
+ 
++out_unlock:
+ 	mutex_unlock(&wondertap->lock);
+ 	return ret;
+ }
+@@ -332,15 +439,23 @@ int wondertap_set_tx_rate_mask(struct wondertap_data *wondertap,
+ 
+ int wondertap_set_reg(struct wondertap_data *wondertap, const char *country_code)
+ {
+-	mutex_lock(&wondertap->lock);
+-
+-	memcpy(wondertap->cached_country_code, country_code,
+-	       sizeof(wondertap->cached_country_code));
+-	wondertap->cache_flags |= WONDERTAP_CACHE_COUNTRY_CODE_SET;
++	int ret = 0;
+ 
++	if (!country_code || !country_code[0] || !country_code[1] || country_code[2])
++		return -EINVAL;
++	mutex_lock(&wondertap->lock);
++	if (READ_ONCE(wondertap->monitor_pm_suspended))
++		ret = -EHOSTDOWN;
++	else if (wondertap->monitor_backend && wondertap_is_up(wondertap) &&
++		 memcmp(wondertap->cached_country_code, country_code, 2))
++		ret = -EOPNOTSUPP;
++	else {
++		memcpy(wondertap->cached_country_code, country_code,
++		       sizeof(wondertap->cached_country_code));
++		wondertap->cache_flags |= WONDERTAP_CACHE_COUNTRY_CODE_SET;
++	}
+ 	mutex_unlock(&wondertap->lock);
+-
+-	return 0;
++	return ret;
+ }
+ 
+ int wondertap_get_mac_tsf(struct wondertap_data *wondertap, u32 *mac_tsf)
+@@ -382,90 +497,81 @@ int wondertap_get_interface_mac_address(struct wondertap_data *wondertap, u8 (*m
+ 
+ int wondertap_set_bssid_filter(struct wondertap_data *wondertap, const u8 *bssid)
+ {
++	int ret = 0;
++
+ 	mutex_lock(&wondertap->lock);
++	if (READ_ONCE(wondertap->monitor_pm_suspended)) {
++		ret = -EHOSTDOWN;
++		goto unlock;
++	}
+ 	memcpy(wondertap->cached_bssid, bssid, sizeof(u8) * ETH_ALEN);
+ 	wondertap->cache_flags |= WONDERTAP_CACHE_BSSID_SET;
+ 	pr_warn("Caching incoming BSSID filter settings.\n");
++unlock:
+ 	mutex_unlock(&wondertap->lock);
+-	return 0;
++	return ret;
+ }
+ 
+ int wondertap_channel_schedule_request(struct wondertap_data *wondertap,
+ 				       const struct channel_schedule_request *request)
+ {
+-	struct channel_schedule_request *cached_schedule = &wondertap->cached_channel_schedule;
+-	int i;
+-	int ret = 0;
+-	size_t list_size;
+-
+-	if (wondertap->monitor_backend && request->channel_list_len)
+-		return -EOPNOTSUPP;
+-
++	struct channel_schedule_request next;
++	struct wondertap_channel_list_params *old;
++	u64 sampled_ns = 0;
++	u32 mac_tsf = 0;
++	bool accepted = false;
++	int i, ret = 0;
++
++	if (!request || (request->channel_list_len &&
++	    (!request->channel_list || !request->dwell_time_tu ||
++	     request->next_channel_index >= request->channel_list_len)))
++		return -EINVAL;
++	next = *request;
++	next.channel_list = NULL;
++	for (i = 0; i < request->channel_list_len; i++) {
++		if ((u32)request->channel_list[i].role >= WONDERTAP_ROLE_MAX ||
++		    (u32)request->channel_list[i].bandwidth > WONDERTAP_RATE_BW_80)
++			return -EINVAL;
++	}
++	if (request->channel_list_len) {
++		next.channel_list = kmemdup(request->channel_list,
++			request->channel_list_len * sizeof(*next.channel_list), GFP_KERNEL);
++		if (!next.channel_list)
++			return -ENOMEM;
++	}
+ 	mutex_lock(&wondertap->lock);
+-
+-	list_size = request->channel_list_len *
+-			sizeof(struct wondertap_channel_list_params);
+-
+-	if (cached_schedule->channel_list_len != request->channel_list_len) {
+-		kfree(cached_schedule->channel_list);
+-		cached_schedule->channel_list = NULL;
+-
+-		if (request->channel_list_len > 0) {
+-			cached_schedule->channel_list = kmalloc(list_size, GFP_KERNEL);
+-			if (!cached_schedule->channel_list) {
+-				pr_err("Failed to allocate memory for channel list\n");
+-				cached_schedule->channel_list_len = 0;
+-				ret = -ENOMEM;
+-				goto out_unlock;
+-			}
+-		}
++	if (READ_ONCE(wondertap->monitor_pm_suspended)) {
++		ret = -EHOSTDOWN;
++		goto unlock;
+ 	}
+-
+-	cached_schedule->channel_list_len = request->channel_list_len;
+-	cached_schedule->next_channel_index = request->next_channel_index;
+-	cached_schedule->dwell_time_tu = request->dwell_time_tu;
+-	cached_schedule->target_switch_time_tsf =
+-		request->target_switch_time_tsf;
+-
+-	if (request->channel_list && request->channel_list_len > 0)
+-		memcpy(cached_schedule->channel_list, request->channel_list, list_size);
+-
+ 	if (wondertap_is_up(wondertap)) {
+-		if (request->channel_list_len > 0) {
+-			if (wondertap->wonder_ops &&
+-			    wondertap->wonder_ops->channel_schedule_request) {
+-				ret = wondertap->wonder_ops->channel_schedule_request(
+-									wondertap->vendor_handle,
+-									request);
+-			} else {
+-				pr_err("Vendor ops 'channel_schedule_request' not implemented\n");
+-				ret = -EOPNOTSUPP;
+-			}
+-		} else {
+-			pr_warn("Channel list is empty. Skip sending cached schedule to vendor\n");
++		if (!wondertap->wonder_ops || !wondertap->wonder_ops->channel_schedule_request) {
++			ret = -EOPNOTSUPP;
++			goto unlock;
+ 		}
+-	} else {
+-		pr_warn("wondertap is inactive, caching incoming schedule settings.\n");
+-	}
+-
+-	pr_debug("========== [ Channel Schedule Request ] ==========\n");
+-	pr_debug("    List Len: %u\n", cached_schedule->channel_list_len);
+-	pr_debug("    Next Idx: %u\n", cached_schedule->next_channel_index);
+-	pr_debug("    Dwell TU: %u\n", cached_schedule->dwell_time_tu);
+-	pr_debug("    Switch TSF: 0x%016x\n", cached_schedule->target_switch_time_tsf);
+-
+-	if (cached_schedule->channel_list) {
+-		for (i = 0; i < cached_schedule->channel_list_len; i++) {
+-			pr_debug("    Entry %d: [Freq: %u, BW: %u, Role: %u]\n",
+-				    i, cached_schedule->channel_list[i].freq,
+-				    cached_schedule->channel_list[i].bandwidth,
+-				    cached_schedule->channel_list[i].role);
++		if (next.channel_list_len) {
++			sampled_ns = ktime_get_boottime_ns();
++			ret = wondertap_get_mac_tsf(wondertap, &mac_tsf);
++			if (ret)
++				goto unlock;
+ 		}
++		/* An empty list is a real cancellation request, including at the vendor. */
++		ret = wondertap->wonder_ops->channel_schedule_request(wondertap->vendor_handle, &next);
++		if (ret)
++			goto unlock;
++		accepted = next.channel_list_len != 0;
+ 	}
+-	pr_debug("==================================================\n");
+-
+-out_unlock:
++	old = wondertap->cached_channel_schedule.channel_list;
++	wondertap->cached_channel_schedule = next;
++	wondertap->channel_schedule_accepted = accepted;
++	wondertap->channel_schedule_accepted_boottime_ns = accepted ? sampled_ns : 0;
++	wondertap->channel_schedule_target_delta_us =
++		accepted ? (s32)(next.target_switch_time_tsf - mac_tsf) : 0;
++	next.channel_list = NULL;
++	kfree(old);
++unlock:
+ 	mutex_unlock(&wondertap->lock);
++	kfree(next.channel_list);
+ 	return ret;
+ }
+ 
+@@ -476,6 +582,10 @@ int wondertap_get_channel_status_report(struct wondertap_data *wondertap,
+ 	struct channel_schedule_request *cached_schedule = &wondertap->cached_channel_schedule;
+ 
+ 	mutex_lock(&wondertap->lock);
++	if (READ_ONCE(wondertap->monitor_pm_suspended)) {
++		ret = -EHOSTDOWN;
++		goto out_unlock;
++	}
+ 
+ 	if (!wondertap_is_up(wondertap)) {
+ 		pr_warn("wondertap is inactive.\n");
+@@ -521,6 +631,10 @@ int wondertap_set_station_info(struct wondertap_data *wondertap,
+ 	int i, free_slot = -1;
+ 
+ 	mutex_lock(&wondertap->lock);
++	if (READ_ONCE(wondertap->monitor_pm_suspended)) {
++		ret = -EHOSTDOWN;
++		goto out_unlock;
++	}
+ 
+ 	if (!wondertap_is_up(wondertap)) {
+ 		pr_warn("wondertap is inactive.\n");
+diff --git a/wonder/wondertap_internal.h b/wonder/wondertap_internal.h
+index f88436797cc16889e8b9b3699f0ddd9a049d1b67..d14ac16e8a5f9cef18212f486aaabb38327082a9 100644
+--- a/wonder/wondertap_internal.h
++++ b/wonder/wondertap_internal.h
+@@ -5,6 +5,8 @@
+ 
+ #include <wondertap.h>
+ 
++struct wondertap_monitor_ops;
++
+ enum wondertap_state {
+ 	WONDERTAP_STATE_DOWN,
+ 	WONDERTAP_STATE_UP,
+@@ -50,6 +52,11 @@ struct wondertap_data {
+ 	/* Packet TX snapshots cannot take the sleeping control-operation lock. */
+ 	spinlock_t tx_config_lock;
+ 	bool monitor_backend;
++	/* Retain the vendor session and physical RX registration through PM. */
++	bool monitor_pm_suspended;
++	/* Provider is live while its vif is gated for removal or restoration. */
++	bool monitor_pm_resume_pending;
++	const struct wondertap_monitor_ops *monitor_ops;
+ 	u8 mac_addr[ETH_ALEN];
+ 	u32 cache_flags;
+ 	struct wondertap_set_freq_params cached_freq;
+@@ -58,6 +65,10 @@ struct wondertap_data {
+ 	struct wondertap_capability cap;
+ 	struct wondertap_init_params init_params;
+ 	struct channel_schedule_request cached_channel_schedule;
++	/* The accepted TSF anchor must remain unambiguous across a PM replay. */
++	u64 channel_schedule_accepted_boottime_ns;
++	s32 channel_schedule_target_delta_us;
++	bool channel_schedule_accepted;
+ 	u8 cached_bssid[ETH_ALEN];
+ 	char cached_country_code[3];
+ 	enum wondertap_ver ver;
+@@ -80,6 +91,9 @@ struct wondertap_data {
+ static inline void wondertap_prep(struct wondertap_data *wondertap)
+ {
+ 	wondertap->state = WONDERTAP_STATE_DOWN;
++	wondertap->monitor_pm_suspended = false;
++	wondertap->monitor_pm_resume_pending = false;
++	wondertap->channel_schedule_accepted = false;
+ 	memset(wondertap->station_table, 0, sizeof(wondertap->station_table));
+ 	mutex_init(&wondertap->lock);
+ 	spin_lock_init(&wondertap->tx_config_lock);
+@@ -233,6 +247,10 @@ int wondertap_set_bssid_filter(struct wondertap_data *wondertap, const u8 *bssid
+ int wondertap_channel_schedule_request(struct wondertap_data *wondertap,
+ 				       const struct channel_schedule_request *request);
+ 
++/* Caller holds the control mutex; PM replay retains the accepted TSF anchor. */
++int wondertap_replay_channel_schedule_locked(struct wondertap_data *wondertap,
++					   bool first_start);
++
+ /**
+  * @brief Get Current MAC TSF from the vendor
+  *

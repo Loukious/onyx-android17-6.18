@@ -1,0 +1,619 @@
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_main.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_main.h
+index 8a697a60c..ab1a2f56d 100644
+--- a/qcacld-3.0/core/hdd/inc/wlan_hdd_main.h
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_main.h
+@@ -1359,6 +1359,11 @@ struct hdd_adapter {
+ 
+ 	struct net_device *dev;
+ 
++#ifdef FEATURE_WLAN_WONDER
++	/* Only the Wonder session may destroy or change this monitor interface. */
++	bool wonder_owned;
++#endif
++
+ 	enum QDF_OPMODE device_mode;
+ 
+ 	struct work_struct ipv4_notifier_work;
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+index c9a0c9db8..8fc802457 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+@@ -26369,6 +26369,11 @@ static int __wlan_hdd_cfg80211_change_iface(struct wiphy *wiphy,
+ 
+ 	hdd_enter();
+ 
++#ifdef FEATURE_WLAN_WONDER
++	if (READ_ONCE(adapter->wonder_owned))
++		return -EBUSY;
++#endif
++
+ 	if (hdd_get_conparam() == QDF_GLOBAL_FTM_MODE) {
+ 		hdd_err("Command not allowed in FTM mode");
+ 		return -EINVAL;
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index 7ffeff08f..905872d9c 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -28,6 +28,7 @@
+ #include <wbuff.h>
+ #include "cfg_ucfg_api.h"
+ #include <wlan_hdd_includes.h>
++#include <wlan_hdd_wonder.h>
+ #include <cds_api.h>
+ #include <cds_sched.h>
+ #include <linux/cpu.h>
+@@ -13893,6 +13894,9 @@ void hdd_wlan_exit(struct hdd_context *hdd_ctx)
+ 
+ 	hdd_enter();
+ 
++	/* Unbind Wonder and drain its RX handler before closing WLAN adapters. */
++	hdd_wonder_unregister(hdd_ctx);
++
+ 	dp_wait_complete_tasks(gp_dp_ctx);
+ 	qdf_mutex_destroy(&mibstats_lock);
+ 	hdd_psoc_idle_timer_stop(hdd_ctx);
+@@ -20544,6 +20548,8 @@ QDF_STATUS hdd_psoc_create_vdevs(struct hdd_context *hdd_ctx)
+ 	    driver_mode != QDF_GLOBAL_EPPING_MODE)
+ 		hdd_psoc_idle_timer_start(hdd_ctx);
+ 
++	hdd_wonder_register(hdd_ctx);
++
+ 	return QDF_STATUS_SUCCESS;
+ }
+ 
+@@ -22980,6 +22986,8 @@ static int __hdd_driver_mode_change(struct hdd_context *hdd_ctx,
+ 	if (!hdd_sta_mon_prepare_stop(hdd_ctx))
+ 		return -EBUSY;
+ 
++	hdd_wonder_unregister(hdd_ctx);
++
+ 	hdd_psoc_idle_timer_stop(hdd_ctx);
+ 
+ 	/* ensure adapters are stopped */
+@@ -23049,6 +23057,8 @@ static int __hdd_driver_mode_change(struct hdd_context *hdd_ctx,
+ 	param.policy_info.driver_mode = con_mode;
+ 	ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
+ 
++	hdd_wonder_register(hdd_ctx);
++
+ 	return 0;
+ }
+ 
+@@ -24706,6 +24716,18 @@ next_adapter:
+ 	return allowed && have_sta;
+ }
+ 
++#ifdef FEATURE_WLAN_WONDER
++bool hdd_wonder_can_start(struct hdd_context *hdd_ctx)
++{
++	return hdd_get_conparam() == QDF_GLOBAL_MISSION_MODE &&
++	       ucfg_mlme_is_sta_mon_conc_supported(hdd_ctx->psoc) &&
++	       !hdd_get_adapter(hdd_ctx, QDF_MONITOR_MODE) &&
++	       ucfg_pkt_capture_get_mode(hdd_ctx->psoc) ==
++						PACKET_CAPTURE_MODE_DISABLE &&
++	       hdd_monitor_can_start_standalone(hdd_ctx);
++}
++#endif
++
+ int
+ wlan_hdd_add_monitor_check(struct hdd_context *hdd_ctx,
+ 			   struct hdd_adapter **adapter,
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_p2p.c b/qcacld-3.0/core/hdd/src/wlan_hdd_p2p.c
+index c2fc63d73..35966ed61 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_p2p.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_p2p.c
+@@ -1360,6 +1360,11 @@ int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
+ 
+ 	hdd_enter();
+ 
++#ifdef FEATURE_WLAN_WONDER
++	if (READ_ONCE(adapter->wonder_owned))
++		return -EBUSY;
++#endif
++
+ 	if (QDF_GLOBAL_FTM_MODE == hdd_get_conparam()) {
+ 		hdd_err("Command not allowed in FTM mode");
+ 		return -EINVAL;
+@@ -1433,6 +1438,11 @@ int wlan_hdd_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
+ 		hdd_sta_ap_monitor_coexist_enabled();
+ 	bool owner_delete = ap_delete || sta_delete;
+ 
++#ifdef FEATURE_WLAN_WONDER
++	if (READ_ONCE(adapter->wonder_owned))
++		return -EBUSY;
++#endif
++
+ 	if (hdd_preserve_station_for_monitor(hdd_ctx, adapter))
+ 		return 0;
+ 	/* Keep real owners registered while the optional monitor owns resources.
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_power.c b/qcacld-3.0/core/hdd/src/wlan_hdd_power.c
+index 14f7eca54..e15c7a520 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_power.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_power.c
+@@ -41,6 +41,7 @@
+ #include <mac_init_api.h>
+ #include <wlan_qct_sys.h>
+ #include <wlan_hdd_main.h>
++#include <wlan_hdd_wonder.h>
+ extern qdf_wake_lock_t wlan_wake_lock;
+ #include <wlan_hdd_assoc.h>
+ #include <wlan_nlink_srv.h>
+@@ -1975,6 +1976,7 @@ QDF_STATUS hdd_wlan_shutdown(void)
+ 		}
+ 	}
+ 
++	hdd_wonder_unregister(hdd_ctx);
+ 	hdd_reset_all_adapters(hdd_ctx);
+ 
+ 	ucfg_ipa_uc_ssr_cleanup(hdd_ctx->pdev);
+@@ -2246,6 +2248,8 @@ QDF_STATUS hdd_wlan_re_init(void)
+ 	if (hdd_ctx->hdd_wlan_suspended)
+ 		hdd_ctx->hdd_wlan_suspended = false;
+ 
++	hdd_wonder_register(hdd_ctx);
++
+ 	return QDF_STATUS_SUCCESS;
+ 
+ err_re_init:
+diff --git a/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h
+new file mode 100644
+index 000000000..e21eb9ae9
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/inc/wlan_hdd_wonder.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef WLAN_HDD_WONDER_H
++#define WLAN_HDD_WONDER_H
++
++#include <linux/types.h>
++
++struct hdd_context;
++
++#ifdef FEATURE_WLAN_WONDER
++void hdd_wonder_register(struct hdd_context *hdd_ctx);
++void hdd_wonder_unregister(struct hdd_context *hdd_ctx);
++bool hdd_wonder_can_start(struct hdd_context *hdd_ctx);
++#else
++static inline void hdd_wonder_register(struct hdd_context *hdd_ctx) { }
++static inline void hdd_wonder_unregister(struct hdd_context *hdd_ctx) { }
++#endif
++
++#endif /* WLAN_HDD_WONDER_H */
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c
+new file mode 100644
+index 000000000..48ab314d5
+--- /dev/null
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wonder.c
+@@ -0,0 +1,432 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Experimental Wonder provider for Onyx's existing ICNSS2 WLAN transport. */
++#include <linux/auxiliary_bus.h>
++#include <linux/etherdevice.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/rtnetlink.h>
++#include <linux/slab.h>
++#include <net/cfg80211.h>
++#include <wondertap.h>
++#include <wondertap_monitor.h>
++#include <wlan_hdd_includes.h>
++#include <wlan_hdd_main.h>
++#include <wlan_hdd_wonder.h>
++#include "osif_psoc_sync.h"
++#include "osif_vdev_sync.h"
++#include "wlan_reg_ucfg_api.h"
++
++#ifdef FEATURE_WLAN_WONDER
++
++#define HDD_WONDER_NETDEV "wondertap0"
++
++struct hdd_wonder_session {
++	struct hdd_adapter *adapter;
++};
++
++struct hdd_wonder_provider {
++	struct wondertap_aux_dev tap;
++	struct hdd_context *hdd_ctx;
++	struct hdd_wonder_session *session;
++	bool removing;
++};
++
++/* The Wonder API's init callback has no provider argument. Onyx has one radio. */
++static DEFINE_MUTEX(hdd_wonder_lock);
++static DEFINE_MUTEX(hdd_wonder_lifecycle_lock);
++static struct hdd_wonder_provider *hdd_wonder_provider;
++static bool wonder_enabled;
++module_param(wonder_enabled, bool, 0444);
++MODULE_PARM_DESC(wonder_enabled,
++	"Expose the experimental Onyx monitor-backed Wonder provider (default off)");
++
++static int hdd_wonder_validate_rate(
++		const struct wondertap_fixed_tx_rate_params *rate)
++{
++	return wondertap_monitor_validate_rate(rate);
++}
++
++/* Caller holds RTNL and hdd_wonder_lock. No core RX handler may remain. */
++static void hdd_wonder_close_session(struct hdd_wonder_provider *provider)
++{
++	struct hdd_wonder_session *session = provider->session;
++	struct hdd_adapter *adapter;
++	struct osif_vdev_sync *vdev_sync;
++
++	ASSERT_RTNL();
++	if (!session)
++		return;
++	provider->session = NULL;
++	adapter = session->adapter;
++	netif_tx_disable(adapter->dev);
++	if (adapter->dev->flags & IFF_UP)
++		dev_close(adapter->dev);
++
++	/* SSR can already own the psoc transition, causing ndo_stop to reject it. */
++	vdev_sync = osif_vdev_sync_unregister(adapter->dev);
++	if (vdev_sync)
++		osif_vdev_sync_wait_for_ops(vdev_sync);
++	if (test_bit(DEVICE_IFACE_OPENED, &adapter->event_flags) ||
++	    test_bit(SME_SESSION_OPENED, &adapter->deflink->link_flags)) {
++		hdd_stop_adapter(provider->hdd_ctx, adapter);
++		hdd_deinit_adapter(provider->hdd_ctx, adapter, true);
++	}
++	clear_bit(DEVICE_IFACE_OPENED, &adapter->event_flags);
++	WRITE_ONCE(adapter->wonder_owned, false);
++	/* cfg80211_unregister_netdevice requires the vendor wiphy mutex. */
++	wiphy_lock(provider->hdd_ctx->wiphy);
++	hdd_close_adapter(provider->hdd_ctx, adapter, true);
++	wiphy_unlock(provider->hdd_ctx->wiphy);
++	if (vdev_sync)
++		osif_vdev_sync_destroy(vdev_sync);
++	kfree(session);
++}
++
++static int hdd_wonder_set_channel(struct hdd_adapter *adapter,
++				const struct wondertap_set_freq_params *params)
++{
++	struct hdd_monitor_ctx channel = { 0 };
++	int ret;
++
++	if (!params || !params->freq)
++		return -EINVAL;
++	if (params->bandwidth != WONDERTAP_RATE_BW_20)
++		return -EOPNOTSUPP;
++	channel.freq = params->freq;
++	channel.bandwidth = CH_WIDTH_20MHZ;
++	ret = wlan_hdd_validate_mon_params(adapter, &channel, 1);
++	if (ret)
++		return ret;
++	return wlan_hdd_set_mon_chan(adapter);
++}
++
++static int hdd_wonder_init(void **handle,
++			   const struct wondertap_init_params *params)
++{
++	struct hdd_wonder_provider *provider;
++	struct hdd_wonder_session *session;
++	struct hdd_adapter_create_param create = { 0 };
++	struct osif_psoc_sync *psoc_sync;
++	struct hdd_context *hdd_ctx;
++	struct net_device *existing;
++	u8 mac[ETH_ALEN];
++	u8 country[3] = { 0 };
++	int ret;
++
++	/* mac80211 start owns RTNL; never acquire it recursively here. */
++	ASSERT_RTNL();
++	if (!handle || !params)
++		return -EINVAL;
++	*handle = NULL;
++	if (!is_valid_ether_addr(params->mac_addr) || !params->channel.freq)
++		return -EINVAL;
++	ret = hdd_wonder_validate_rate(&params->tx_rate);
++	if (ret)
++		return ret;
++	if (params->channel.bandwidth != WONDERTAP_RATE_BW_20 ||
++	    params->amsdu_enable || params->ampdu_enable ||
++	    params->rate_adaptation_enable || params->channel_hopping_enable ||
++	    params->perf_mode != WONDER_PERF_MODE_OFF)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&hdd_wonder_lock);
++	provider = hdd_wonder_provider;
++	if (!provider || provider->removing) {
++		ret = -ENODEV;
++		goto unlock;
++	}
++	if (provider->session) {
++		ret = -EBUSY;
++		goto unlock;
++	}
++	hdd_ctx = provider->hdd_ctx;
++	ret = osif_psoc_sync_op_start(hdd_ctx->parent_dev, &psoc_sync);
++	if (ret)
++		goto unlock;
++	ret = wlan_hdd_validate_context(hdd_ctx);
++	if (ret)
++		goto stop_op;
++	if (cds_is_driver_recovering() || cds_is_driver_unloading() ||
++	    !cds_is_driver_loaded()) {
++		ret = -EBUSY;
++		goto stop_op;
++	}
++	ret = hdd_trigger_psoc_idle_restart(hdd_ctx);
++	if (ret)
++		goto stop_op;
++	if (!hdd_wonder_can_start(hdd_ctx)) {
++		ret = -EBUSY;
++		goto restart_idle;
++	}
++	if (QDF_IS_STATUS_ERROR(ucfg_reg_get_current_country(hdd_ctx->psoc, country))) {
++		ret = -EIO;
++		goto restart_idle;
++	}
++	if (memcmp(country, params->country_code, 2)) {
++		/* This backend preserves the existing global regulatory domain. */
++		ret = -EOPNOTSUPP;
++		goto restart_idle;
++	}
++	existing = dev_get_by_name(&init_net, HDD_WONDER_NETDEV);
++	if (existing) {
++		dev_put(existing);
++		ret = -EEXIST;
++		goto restart_idle;
++	}
++	session = kzalloc(sizeof(*session), GFP_KERNEL);
++	if (!session) {
++		ret = -ENOMEM;
++		goto restart_idle;
++	}
++	ether_addr_copy(mac, params->mac_addr);
++	create.is_add_virtual_iface = 1;
++	create.num_sessions = 1;
++	wiphy_lock(hdd_ctx->wiphy);
++	session->adapter = hdd_open_adapter(hdd_ctx, QDF_MONITOR_MODE,
++			HDD_WONDER_NETDEV, mac, NET_NAME_USER, true, &create);
++	wiphy_unlock(hdd_ctx->wiphy);
++	if (!session->adapter) {
++		kfree(session);
++		ret = -ENOMEM;
++		goto restart_idle;
++	}
++	provider->session = session;
++	WRITE_ONCE(session->adapter->wonder_owned, true);
++	ret = dev_open(session->adapter->dev, NULL);
++	if (ret)
++		goto close_session;
++	ret = hdd_wonder_set_channel(session->adapter, &params->channel);
++	if (ret)
++		goto close_session;
++	*handle = session;
++	hdd_info("Experimental Wonder monitor transport ready on %s, %u MHz",
++		 HDD_WONDER_NETDEV, params->channel.freq);
++	ret = 0;
++	goto stop_op;
++
++close_session:
++	hdd_wonder_close_session(provider);
++restart_idle:
++	if (!hdd_is_any_interface_open(hdd_ctx))
++		hdd_psoc_idle_timer_start(hdd_ctx);
++stop_op:
++	osif_psoc_sync_op_stop(psoc_sync);
++unlock:
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
++}
++
++static void hdd_wonder_deinit(void *handle,
++			      const struct wondertap_deinit_params *params)
++{
++	struct hdd_wonder_provider *provider;
++
++	ASSERT_RTNL();
++	mutex_lock(&hdd_wonder_lock);
++	provider = hdd_wonder_provider;
++	if (provider && handle && provider->session == handle) {
++		hdd_wonder_close_session(provider);
++		if (!provider->removing &&
++		    !hdd_is_any_interface_open(provider->hdd_ctx))
++			hdd_psoc_idle_timer_start(provider->hdd_ctx);
++	}
++	mutex_unlock(&hdd_wonder_lock);
++}
++
++static int hdd_wonder_set_freq(void *handle,
++			       const struct wondertap_set_freq_params *params)
++{
++	struct hdd_wonder_provider *provider;
++	struct osif_vdev_sync *vdev_sync;
++	int ret = -ENODEV;
++
++	mutex_lock(&hdd_wonder_lock);
++	provider = hdd_wonder_provider;
++	if (!provider || provider->removing || !handle ||
++	    provider->session != handle)
++		goto unlock;
++	if (!(provider->session->adapter->dev->flags & IFF_UP)) {
++		ret = -ENETDOWN;
++		goto unlock;
++	}
++	ret = osif_vdev_sync_op_start(provider->session->adapter->dev, &vdev_sync);
++	if (ret)
++		goto unlock;
++	ret = hdd_wonder_set_channel(provider->session->adapter, params);
++	osif_vdev_sync_op_stop(vdev_sync);
++unlock:
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
++}
++
++static int hdd_wonder_set_filter(void *handle,
++				enum wondertap_filter_type type, const void *params)
++{
++	return -EOPNOTSUPP;
++}
++
++static int hdd_wonder_set_fixed_rate(void *handle,
++			const struct wondertap_fixed_tx_rate_params *params)
++{
++	struct hdd_wonder_provider *provider;
++	int ret = hdd_wonder_validate_rate(params);
++
++	if (ret)
++		return ret;
++	mutex_lock(&hdd_wonder_lock);
++	provider = hdd_wonder_provider;
++	if (!provider || provider->removing || !handle ||
++	    provider->session != handle)
++		ret = -ENODEV;
++	/* Wonder encodes this validated fixed rate into each TX radiotap header. */
++	mutex_unlock(&hdd_wonder_lock);
++	return ret;
++}
++
++static int hdd_wonder_set_rate_mask(void *handle,
++			const struct wondertap_tx_rate_mask_params *params)
++{
++	return -EOPNOTSUPP;
++}
++
++static int hdd_wonder_capabilities(void *handle,
++				 struct wondertap_capability *caps)
++{
++	if (!caps)
++		return -EINVAL;
++	memset(caps, 0, sizeof(*caps));
++	caps->version = 0;
++	caps->bits.nss = 1;
++	caps->bits.dynamic_freq = 1;
++	caps->bits.dynamic_fixed_tx_rate = 1;
++	caps->bits.fcs_not_support = 1;
++	return 0;
++}
++
++static int hdd_wonder_schedule(void *handle,
++			     const struct channel_schedule_request *request)
++{
++	return -EOPNOTSUPP;
++}
++
++static int hdd_wonder_tsf(void *handle, u32 *tsf)
++{
++	return -EOPNOTSUPP;
++}
++
++static int hdd_wonder_channel_status(void *handle,
++				struct wondertap_channel_status_report *report)
++{
++	return -EOPNOTSUPP;
++}
++
++static int hdd_wonder_station(void *handle,
++			    const enum wondertap_station_action action,
++			    struct wondertap_station_info *info)
++{
++	return -EOPNOTSUPP;
++}
++
++static const struct wondertap_ops hdd_wonder_ops = {
++	.init = hdd_wonder_init,
++	.deinit = hdd_wonder_deinit,
++	.set_freq = hdd_wonder_set_freq,
++	.set_filter = hdd_wonder_set_filter,
++	.set_fixed_tx_rate = hdd_wonder_set_fixed_rate,
++	.set_tx_rate_mask = hdd_wonder_set_rate_mask,
++	.get_capabilities = hdd_wonder_capabilities,
++	.channel_schedule_request = hdd_wonder_schedule,
++	.get_mac_tsf = hdd_wonder_tsf,
++	.get_channel_status_report = hdd_wonder_channel_status,
++	.set_station_info = hdd_wonder_station,
++};
++
++static void hdd_wonder_release(struct device *dev)
++{
++	struct auxiliary_device *adev = to_auxiliary_dev(dev);
++	struct wondertap_aux_dev *tap = container_of(adev, struct wondertap_aux_dev, adev);
++	struct hdd_wonder_provider *provider =
++		container_of(tap, struct hdd_wonder_provider, tap);
++
++	kfree(provider);
++}
++
++static void __hdd_wonder_register(struct hdd_context *hdd_ctx)
++{
++	struct hdd_wonder_provider *provider;
++	int ret;
++
++	if (!wonder_enabled || hdd_get_conparam() != QDF_GLOBAL_MISSION_MODE)
++		return;
++	provider = kzalloc(sizeof(*provider), GFP_KERNEL);
++	if (!provider)
++		return;
++	provider->hdd_ctx = hdd_ctx;
++	provider->tap.ver = WONDER_VERSION_3_6_6;
++	provider->tap.wonder_ops = &hdd_wonder_ops;
++	provider->tap.adev.name = "wondertap";
++	provider->tap.adev.id = 0;
++	provider->tap.adev.dev.parent = hdd_ctx->parent_dev;
++	provider->tap.adev.dev.release = hdd_wonder_release;
++	ret = auxiliary_device_init(&provider->tap.adev);
++	if (ret) {
++		kfree(provider);
++		return;
++	}
++	mutex_lock(&hdd_wonder_lock);
++	if (hdd_wonder_provider) {
++		mutex_unlock(&hdd_wonder_lock);
++		auxiliary_device_uninit(&provider->tap.adev);
++		return;
++	}
++	hdd_wonder_provider = provider;
++	mutex_unlock(&hdd_wonder_lock);
++	/* Probing the core can query capabilities; never hold the callback lock. */
++	ret = auxiliary_device_add(&provider->tap.adev);
++	if (ret) {
++		mutex_lock(&hdd_wonder_lock);
++		hdd_wonder_provider = NULL;
++		mutex_unlock(&hdd_wonder_lock);
++		auxiliary_device_uninit(&provider->tap.adev);
++		hdd_warn("Wonder auxiliary registration failed: %d", ret);
++	}
++}
++
++static void __hdd_wonder_unregister(struct hdd_context *hdd_ctx)
++{
++	struct hdd_wonder_provider *provider;
++
++	mutex_lock(&hdd_wonder_lock);
++	provider = hdd_wonder_provider;
++	if (!provider || provider->hdd_ctx != hdd_ctx || provider->removing) {
++		mutex_unlock(&hdd_wonder_lock);
++		return;
++	}
++	provider->removing = true;
++	mutex_unlock(&hdd_wonder_lock);
++	/* Core removal drains RX and releases its netdev reference before deinit. */
++	auxiliary_device_delete(&provider->tap.adev);
++	rtnl_lock();
++	mutex_lock(&hdd_wonder_lock);
++	hdd_wonder_close_session(provider);
++	hdd_wonder_provider = NULL;
++	mutex_unlock(&hdd_wonder_lock);
++	rtnl_unlock();
++	auxiliary_device_uninit(&provider->tap.adev);
++}
++
++void hdd_wonder_register(struct hdd_context *hdd_ctx)
++{
++	mutex_lock(&hdd_wonder_lifecycle_lock);
++	__hdd_wonder_register(hdd_ctx);
++	mutex_unlock(&hdd_wonder_lifecycle_lock);
++}
++
++void hdd_wonder_unregister(struct hdd_context *hdd_ctx)
++{
++	mutex_lock(&hdd_wonder_lifecycle_lock);
++	__hdd_wonder_unregister(hdd_ctx);
++	mutex_unlock(&hdd_wonder_lifecycle_lock);
++}
++
++#endif /* FEATURE_WLAN_WONDER */
