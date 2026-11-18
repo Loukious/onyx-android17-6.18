@@ -46,7 +46,9 @@ updated as well.
 Supported layouts use Android boot/vendor-boot headers 3 or 4, EROFS DLKM images,
 flat `lib/modules` directories and verified logical partition storage. Separate
 active/inactive storage is supported, as are exact opposite-slot DLKM aliases
-on clean Virtual A/B layouts marked read-only and updated in liblp metadata.
+on clean Virtual A/B layouts where the active target is read-only and updated
+in liblp metadata. Its opposite-slot source may be read-only without the
+updated flag.
 The shorter partition must match an exact prefix of the longer partition at the
 same logical offsets. Either slot may have an additional disjoint tail. An active
 tail is updated; an inactive tail is left untouched. Updating shared
@@ -58,6 +60,15 @@ modules by their `.modinfo` name and 6.6 vermagic. It uses reviewed 6.18 load
 profiles when retiring those drivers; unrelated or unknown modules cause an
 abort. Small `system_dlkm` partitions retain their compatible module selection;
 the full catalog remains available in `vendor_dlkm`.
+
+After a completed OTA, inactive metadata may still contain a discarded
+copy-on-write allocation whose blocks the active layout has reused. Such an
+entry is accepted only in the inactive metadata's unflagged `cow` group, with
+the exact opposite-slot COW name and a verified updated parent, and only when
+the entry is absent from active metadata. The engine rechecks clean snapshot
+state and scans live device-mapper names before accepting it. A mapped COW,
+mapped inactive parent, active metadata allocation, unknown state, or ordinary
+partition overlap still aborts installation.
 
 This is not an installer for every stock or custom Onyx layout. Missing drivers,
 unsupported image formats, active snapshots, unproven or partial shared extents,
