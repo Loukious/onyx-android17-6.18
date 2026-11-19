@@ -101,6 +101,11 @@ def build(common, output):
         allocator = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(allocator)
         allocator.adapt(tree)
+        spec = importlib.util.spec_from_file_location('susfs_runtime_fixes',
+                                                      features.INPUTS / 'susfs_runtime_fixes.py')
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        runtime.adapt(tree)
         # Canonicalize whitespace from imported additions while retaining the exact
         # upstream source files in the separately hashed vendor inventory.
         normalized = set(re.findall(r'^\+\+\+ b/([^\n\t]+)', upstream.read_text(), re.M))

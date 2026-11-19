@@ -2058,7 +2058,7 @@ index 73707b6..34b7c0c 100644
  	if (error >= 0)
  		error = buf.error;
 diff --git a/fs/stat.c b/fs/stat.c
-index 8924395..41e1234 100644
+index 8924395..9612268 100644
 --- a/fs/stat.c
 +++ b/fs/stat.c
 @@ -20,6 +20,9 @@
@@ -2091,7 +2091,7 @@ index 8924395..41e1234 100644
  /**
   * fill_mg_cmtime - Fill in the mtime and ctime and flag ctime as QUERIED
   * @stat: where to store the resulting values
-@@ -211,15 +227,42 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
+@@ -211,15 +227,43 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
  				  STATX_ATTR_VERITY);
  
  	idmap = mnt_idmap(path->mnt);
@@ -2102,9 +2102,10 @@ index 8924395..41e1234 100644
 +			if (!is_fuse) {
 +				stat->mnt_id = real_mount(path->mnt)->mnt_id;
 +				stat->result_mask |= STATX_SUS_KSTAT;
++			} else {
++				stat->mnt_id = real_mount(path->mnt)->mnt_id;
++				stat->result_mask |= STATX_SUS_KSTAT_FUSE;
 +			}
-+			stat->mnt_id = real_mount(path->mnt)->mnt_id;
-+			stat->result_mask |= STATX_SUS_KSTAT_FUSE;
 +		}
 +	}
 +#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
@@ -2134,7 +2135,7 @@ index 8924395..41e1234 100644
  	}
  
  	/*
-@@ -279,10 +322,17 @@ EXPORT_SYMBOL_NS(vfs_getattr, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem
+@@ -279,10 +323,17 @@ EXPORT_SYMBOL_NS(vfs_getattr, "ANDROID_GKI_VFS_internal_I_am_really_a_filesystem
   */
  int vfs_fstat(int fd, struct kstat *stat)
  {
@@ -2153,7 +2154,7 @@ index 8924395..41e1234 100644
  }
  
  static int statx_lookup_flags(int flags)
-@@ -304,6 +354,19 @@ static int vfs_statx_path(const struct path *path, int flags, struct kstat *stat
+@@ -304,6 +355,19 @@ static int vfs_statx_path(const struct path *path, int flags, struct kstat *stat
  	if (error)
  		return error;
  
@@ -2173,7 +2174,7 @@ index 8924395..41e1234 100644
  	if (request_mask & STATX_MNT_ID_UNIQUE) {
  		stat->mnt_id = real_mount(path->mnt)->mnt_id_unique;
  		stat->result_mask |= STATX_MNT_ID_UNIQUE;
-@@ -312,6 +375,9 @@ static int vfs_statx_path(const struct path *path, int flags, struct kstat *stat
+@@ -312,6 +376,9 @@ static int vfs_statx_path(const struct path *path, int flags, struct kstat *stat
  		stat->result_mask |= STATX_MNT_ID;
  	}
  
@@ -2183,7 +2184,7 @@ index 8924395..41e1234 100644
  	if (path_mounted(path))
  		stat->attributes |= STATX_ATTR_MOUNT_ROOT;
  	stat->attributes_mask |= STATX_ATTR_MOUNT_ROOT;
-@@ -349,6 +415,17 @@ static int vfs_statx(int dfd, struct filename *filename, int flags,
+@@ -349,6 +416,17 @@ static int vfs_statx(int dfd, struct filename *filename, int flags,
  	unsigned int lookup_flags = statx_lookup_flags(flags);
  	int error;
  
@@ -2363,10 +2364,10 @@ index 2b3a236..d2248ad 100644
  	 * Always return at least 1 from get_anon_bdev.
 diff --git a/fs/susfs.c b/fs/susfs.c
 new file mode 100644
-index 0000000..ccaaaab
+index 0000000..624b38c
 --- /dev/null
 +++ b/fs/susfs.c
-@@ -0,0 +1,2638 @@
+@@ -0,0 +1,2657 @@
 +#include <linux/version.h>
 +#include <linux/cred.h>
 +#include <linux/fs.h>
@@ -4869,6 +4870,7 @@ index 0000000..ccaaaab
 +	if (!wd->inode) {
 +		SUSFS_LOGE("wd->inode is NULL\n");
 +		path_put(&wd->kpath);
++		memset(&wd->kpath, 0, sizeof(wd->kpath));
 +		return -ENOENT;
 +	}
 +	ihold(wd->inode);
@@ -4879,6 +4881,7 @@ index 0000000..ccaaaab
 +		iput(wd->inode);
 +		wd->inode = NULL;
 +		path_put(&wd->kpath);
++		memset(&wd->kpath, 0, sizeof(wd->kpath));
 +		return ret;
 +	}
 +	SUSFS_LOGI("watching %s\n", wd->path);
@@ -4908,7 +4911,14 @@ index 0000000..ccaaaab
 +	return 0;
 +}
 +
++/* fsnotify always calls free_mark when the last mark reference is dropped. */
++static void susfs_free_sdcard_mark(struct fsnotify_mark *mark)
++{
++	kfree(mark);
++}
++
 +static const struct fsnotify_ops fsnotify_ops = {
++	.free_mark = susfs_free_sdcard_mark,
 +	.handle_inode_event = susfs_handle_sdcard_inode_event,
 +};
 +
@@ -4928,7 +4938,9 @@ index 0000000..ccaaaab
 +		fsnotify_put_mark(m);
 +		return -EINVAL;
 +	}
-+	*out = m;
++	/* The group owns the attached mark; do not keep an unowned pointer. */
++	*out = NULL;
++	fsnotify_put_mark(m);
 +	return 0;
 +}
 +
@@ -4961,10 +4973,18 @@ index 0000000..ccaaaab
 +	g = fsnotify_alloc_group(&fsnotify_ops);
 +#endif
 +	if (IS_ERR(g)) {
-+		return PTR_ERR(g);
++		ret = PTR_ERR(g);
++		g = NULL;
++		susfs_sdcard_cleanup_fn(NULL);
++		return ret;
 +	}
 +
 +	ret = watch_one_dir(&g_watch);
++	if (ret) {
++		/* Setup runs outside fsnotify SRCU, so synchronous cleanup is safe. */
++		susfs_sdcard_cleanup_fn(NULL);
++		return ret;
++	}
 +
 +	SUSFS_LOGI("ret: %d\n", ret);
 +
@@ -5612,7 +5632,7 @@ index 5267c81..bd4ed14 100644
  	if (copy_to_user(name, &tmp, sizeof(tmp)))
  		return -EFAULT;
 diff --git a/mm/memory.c b/mm/memory.c
-index 096f38d..ee7b632 100644
+index 096f38d..c64f893 100644
 --- a/mm/memory.c
 +++ b/mm/memory.c
 @@ -77,6 +77,9 @@
@@ -5625,25 +5645,33 @@ index 096f38d..ee7b632 100644
  
  #include <trace/events/kmem.h>
  #include <trace/hooks/mm.h>
-@@ -6952,8 +6955,18 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
- 		void *maddr;
+@@ -6953,11 +6956,25 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
  		struct folio *folio;
  		struct vm_area_struct *vma = NULL;
-+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-+		struct page *page = NULL;
-+
-+		if (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
-+			break;
-+
-+		page = get_user_page_vma_remote(mm, addr,
-+							     gup_flags, &vma);
-+#else
  		struct page *page = get_user_page_vma_remote(mm, addr,
- 							     gup_flags, &vma);
+-							     gup_flags, &vma);
++						     gup_flags, &vma);
++#ifdef CONFIG_KSU_SUSFS_SUS_MAP
++		/* GUP supplies the VMA and a page reference before this check. */
++		if (!IS_ERR(page) && vma && vma->vm_file &&
++		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
++			put_page(page);
++			break;
++		}
 +#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
  
  		if (IS_ERR(page)) {
  			/* We might need to expand the stack to access it */
+ 			vma = vma_lookup(mm, addr);
++#ifdef CONFIG_KSU_SUSFS_SUS_MAP
++			/* A failed GUP can still resolve a VMA for VM_IO access. */
++			if (vma && vma->vm_file &&
++			    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
++				break;
++#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+ 			if (!vma) {
+ 				vma = expand_stack(mm, addr);
+ 
 diff --git a/security/selinux/avc.c b/security/selinux/avc.c
 index bad048e..f326b9f 100644
 --- a/security/selinux/avc.c
