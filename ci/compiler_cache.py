@@ -99,10 +99,11 @@ def setup(workspace, source, cache, control, variant, diagnostic=False):
     for path in (original / 'bin').iterdir():
         target = binaries / path.name
         if path.name in ('clang', 'clang++'):
-            # Calling the original compiler by its absolute path changes Clang's
-            # automatic builtin-header directory. Keep those headers under the
-            # declared toolchain path so Bazel can validate dependency files.
-            resource = (' -resource-dir="${BASH_SOURCE[0]%/*}/../lib/clang/' + resource_versions[0] + '"'
+            # Absolute compiler invocation changes both builtin C and libc++
+            # header discovery. Retain the declared mirror as the install and
+            # resource directory so Bazel can validate all dependency paths.
+            resource = (' -ccc-install-dir "${BASH_SOURCE[0]%/*}"'
+                        ' -resource-dir="${BASH_SOURCE[0]%/*}/../lib/clang/' + resource_versions[0] + '"'
                         if resource_versions else '')
             target.write_text('#!/bin/bash\n'
                               'export CCACHE_CONFIGPATH=' + shlex.quote(str(config)) + '\n'

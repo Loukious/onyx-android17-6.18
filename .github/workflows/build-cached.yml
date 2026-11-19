@@ -143,6 +143,11 @@ jobs:
       - name: Verify real shallow repo reference behavior
         if: matrix.variant == 'balanced'
         run: ONYX_TEST_REPO_SOURCE="$RUNNER_TEMP/konoha-workspace/.repo/repo" python3 -m unittest discover -s ci/tests -p test_pinned_repo.py -v
+      - name: Verify pinned C and C++ compiler cache routing
+        run: |
+          clang_pin=$(python3 -c 'import json; print(json.load(open("source/port/sources.json"))["common"]["clang"])')
+          ONYX_TEST_CLANG_DIR="$RUNNER_TEMP/konoha-workspace/prebuilts/clang/host/linux-x86/clang-$clang_pin" \
+            python3 -m unittest discover -s ci/tests -p test_bounded_compiler.py -v
       - name: Prepare bounded pinned source objects
         if: matrix.variant == 'balanced' && steps.source-cache.outputs.cache-hit != 'true'
         run: python3 ci/pinned_cache.py save --bucket sources --root "$RUNNER_TEMP/onyx-pinned-sources" --workspace "$RUNNER_TEMP/konoha-workspace"

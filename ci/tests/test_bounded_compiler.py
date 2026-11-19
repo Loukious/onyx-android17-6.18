@@ -31,6 +31,8 @@ def fixture(root):
     pinned = os.environ.get('ONYX_TEST_CLANG_DIR')
     if pinned:
         (original / 'lib').symlink_to(Path(pinned) / 'lib', target_is_directory=True)
+        for name in ('include', 'musl'):
+            (original / name).symlink_to(Path(pinned) / name, target_is_directory=True)
     cc = str(Path(pinned) / 'bin/clang') if pinned else shutil.which('clang') or shutil.which('gcc')
     cxx = str(Path(pinned) / 'bin/clang++') if pinned else shutil.which('clang++') or shutil.which('g++')
     cc_real = str(Path(pinned) / 'bin/clang-real') if pinned else cc
@@ -55,6 +57,35 @@ def fixture(root):
 
 
 class CompilerTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('ONYX_TEST_CLANG_DIR') and shutil.which('ccache'),
+                         'pinned Android Clang and ccache required for libc++ regression')
+    def test_cpp_headers_stay_under_declared_toolchain_and_warm_compile_hits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, workspace = fixture(root)
+            state = compiler_cache.setup(workspace, source, root / 'cache', root / 'control', 'balanced')
+            toolchain = Path(state['toolchain'])
+            sysroot = Path(os.environ['ONYX_TEST_CLANG_DIR']).parents[3] / 'kernel-build-tools/sysroots/x86_64-unknown-linux-musl'
+            if not (sysroot / 'include/string.h').is_file():
+                self.skipTest('pinned kernel-build-tools musl sysroot required')
+            (workspace / 'sysroot').symlink_to(sysroot, target_is_directory=True)
+            (workspace / 'sample.cpp').write_text('#include <optional>\n#include <string>\n'
+                'int answer() {std::optional<std::string> s{"cached"}; return s->size();}\n')
+            command = [str(toolchain / 'bin/clang++'), '--target=x86_64-unknown-linux-musl',
+                       '--sysroot=' + str(workspace / 'sysroot'), '-stdlib=libc++', '-std=c++17',
+                       '-no-canonical-prefixes', '-MD', '-MF', 'sample.d', '-c', 'sample.cpp', '-o', 'sample.o']
+            subprocess.run(command, cwd=workspace, check=True, capture_output=True)
+            dependencies = (workspace / 'sample.d').read_text()
+            self.assertIn(str(toolchain / 'bin/../include/c++/v1/optional'), dependencies)
+            self.assertNotIn('workspace/prebuilts/clang/', dependencies)
+            first = (workspace / 'sample.o').read_bytes()
+            (workspace / 'sample.o').unlink()
+            subprocess.run(command, cwd=workspace, check=True, capture_output=True)
+            self.assertEqual((workspace / 'sample.o').read_bytes(), first)
+            counts = compiler_cache.stats(state['config'])
+            self.assertEqual(counts['cache_miss'], 1)
+            self.assertEqual(counts['direct_cache_hit'] + counts['preprocessed_cache_hit'], 1)
+
     @unittest.skipUnless(shutil.which('ccache'), 'ccache required for actual reuse test')
     def test_real_compile_warm_hit_source_header_flags_and_profile_invalidation(self):
         with tempfile.TemporaryDirectory() as tmp:
