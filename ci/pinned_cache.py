@@ -61,6 +61,13 @@ def identity(source, bucket):
     return record, f'onyx-pins-v1-Linux-{bucket}-{key}'
 
 
+def shared_names(expected):
+    paths = {}
+    for row in expected['projects']:
+        paths.setdefault(row['name'], set()).add(row['path'])
+    return {name for name, checkouts in paths.items() if len(checkouts) > 1}
+
+
 def validate(root, expected, limit):
     directory(root)
     if size(root) > limit:
@@ -105,7 +112,12 @@ def restore(root, reference, source, bucket, matched_key):
     if matched_key != key:
         raise ValueError('Dependency caches allow exact keys only')
     report = validate(root, expected, budgets()[bucket])
+    shared = shared_names(expected)
     for name in report['repositories']:
+        # repo keeps per-checkout shallow boundaries while sharing objects.
+        # A union of reference shallow boundaries cannot represent both pins.
+        if name in shared:
+            continue
         target = reference / (name + '.git')
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
@@ -133,9 +145,13 @@ def save(root, workspace, source, bucket):
                 1 if 'prebuilts/rust-toolchain/' in name else
                 2 if name == 'kernel/common' else 3, name)
     report = {'identity': expected, 'repositories': {}, 'omitted': []}
+    shared = shared_names(expected)
     used = 0
     for name in sorted(grouped, key=priority):
         rows = grouped[name]
+        if name in shared:
+            report['omitted'].append({'name': name, 'reason': 'shared-project'})
+            continue
         origin = workspace / '.repo/project-objects' / (name + '.git')
         objects = directory(origin / 'objects')
         # Exact hits need no resave. Cold saves must be self-contained; never
@@ -179,7 +195,7 @@ def save(root, workspace, source, bucket):
     validate(root, expected, budgets()[bucket])
     summary(f'{bucket}: prepared {size(root) / 1024**3:.2f} GiB pinned cache '
             f'(limit {budgets()[bucket] / 1024**3:.2f} GiB); '
-            f'{len(report["omitted"])} whole repositories omitted by the bound.')
+            f'{len(report["omitted"])} whole repositories omitted by the bound or shared-project layout.')
     return {'key': key, 'bytes': size(root), 'omitted': report['omitted']}
 
 

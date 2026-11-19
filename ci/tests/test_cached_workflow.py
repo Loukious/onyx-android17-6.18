@@ -39,7 +39,9 @@ class CachedWorkflowTests(unittest.TestCase):
         self.assertNotIn('restore-keys:', source + toolchain)
         self.assertLess(compile.index('Verify restored pins'), compile.index('Sync locked kernel'))
         self.assertIn('--reference "$RUNNER_TEMP/onyx-reference"', compile)
-        self.assertEqual(compile.count("if: matrix.variant == 'balanced'"), 4)
+        self.assertEqual(compile.count("if: matrix.variant == 'balanced' && steps."), 4)
+        self.assertLess(compile.index('Sync locked kernel'), compile.index('Verify real shallow repo reference behavior'))
+        self.assertIn('test_pinned_repo.py', compile)
 
     def test_compiler_cache_saved_only_after_verified_artifact_upload(self):
         compile = job('compile')

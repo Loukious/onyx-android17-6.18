@@ -76,6 +76,27 @@ class PinnedTests(unittest.TestCase):
             self.assertLess(report['bytes'], 1024**2)
             self.assertFalse((root / 'cache/kernel/common.git').exists())
 
+    def test_shared_repository_is_not_referenced_and_all_checkouts_still_require_pins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, workspace, revision = fixture(root)
+            subprocess.run(['git', 'clone', '--quiet', str(workspace / 'common'),
+                            str(workspace / 'baseline')], check=True)
+            pins = json.loads((source / 'port/sources.json').read_text())
+            pins['baseline'] = [{'repo': 'kernel/common', 'workspace_path': 'baseline',
+                                 'revision': revision}]
+            (source / 'port/sources.json').write_text(json.dumps(pins))
+            cache, reference = root / 'cache', root / 'reference'
+            saved = pinned_cache.save(cache, workspace, source, 'sources')
+            self.assertEqual(saved['omitted'], [{'name': 'kernel/common', 'reason': 'shared-project'}])
+            restored = pinned_cache.restore(cache, reference, source, 'sources', saved['key'])
+            self.assertEqual(restored['repositories'], {})
+            self.assertFalse((reference / 'kernel/common.git').exists())
+            pins['baseline'][0]['revision'] = 'a' * 40
+            (source / 'port/sources.json').write_text(json.dumps(pins))
+            with self.assertRaisesRegex(ValueError, 'unpinned revision'):
+                pinned_cache.save(root / 'invalid-cache', workspace, source, 'sources')
+
     def test_changed_lock_corrupt_objects_links_and_extra_files_rejected(self):
         for change in ('lock', 'object', 'link', 'extra'):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:

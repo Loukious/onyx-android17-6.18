@@ -342,6 +342,11 @@ downloads are retained first; repositories that do not fit are omitted whole
 and fetched normally. At these defaults the full Rust repository may not fit
 after Clang; this is reported explicitly.
 
+Repositories shared by multiple manifest paths, such as Wonder at two locked
+revisions, are also fetched normally. Their shallow boundaries belong to each
+checkout and cannot be combined safely in a reference repository. The Balanced
+job runs a real `repo --reference` regression check with two shared revision pins.
+
 The dispatch inputs make each limit configurable and check that **both** compiler
 stores plus dependencies fit the declared repository budget, reserving 512 MiB
 for overhead. The default allocation is 9.5 GiB under GitHub's default 10 GiB
