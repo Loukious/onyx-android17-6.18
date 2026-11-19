@@ -1,6 +1,7 @@
 """Real compilation proves cache reuse and content/flag invalidation."""
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -57,6 +58,19 @@ def fixture(root):
 
 
 class CompilerTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('ccache'), 'ccache required for minimum budget configuration')
+    def test_minimum_budget_keeps_automatic_cleanup_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, workspace = fixture(root)
+            with patch.object(compiler_cache, 'budgets', return_value={'compiler': 256 * 1024**2}):
+                state = compiler_cache.setup(workspace, source, root / 'cache', root / 'control', 'balanced')
+            setting = subprocess.check_output(['ccache', '--get-config', 'max_size'], text=True,
+                      env={**os.environ, 'CCACHE_CONFIGPATH': state['config']}).strip()
+            self.assertGreater(float(re.match(r'\d+(?:\.\d+)?', setting)[0]), 0)
+            configured = re.search(r'^max_size = (\d+)MiB$', Path(state['config']).read_text(), re.M)
+            self.assertLess(int(configured[1]) * 1024**2, state['limit'])
+
     @unittest.skipUnless(os.environ.get('ONYX_TEST_CLANG_DIR') and shutil.which('ccache'),
                          'pinned Android Clang and ccache required for libc++ regression')
     def test_cpp_headers_stay_under_declared_toolchain_and_warm_compile_hits(self):
@@ -164,6 +178,59 @@ class CompilerTests(unittest.TestCase):
 
 
 class BoundTests(unittest.TestCase):
+    def test_live_lock_symlinks_are_counted_without_following_and_cannot_be_archived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / 'cache'
+            (cache / '4/b').mkdir(parents=True)
+            (cache / 'lock').mkdir()
+            payload = cache / 'valueR'
+            payload.write_bytes(b'cached')
+            outside = root / 'outside'
+            outside.write_bytes(b'x' * 100000)
+            locks = [cache / '4/stats.lock', cache / '4/b/stats.lock',
+                     cache / 'lock/subdir_4f.lock', cache / 'lock/auto_cleanup.lock']
+            for lock in locks:
+                lock.symlink_to(outside)
+            expected = max(payload.stat().st_size, payload.stat().st_blocks * 512)
+            expected += sum(max(p.lstat().st_size, p.lstat().st_blocks * 512) for p in locks)
+            self.assertEqual(compiler_cache.runtime_size(cache), expected)
+            with self.assertRaisesRegex(ValueError, 'link or special'):
+                bounded_cache.size(cache)
+            (cache / 'escape').symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, 'Unexpected live'):
+                compiler_cache.runtime_size(cache)
+
+    def test_real_running_build_survives_cache_lock_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, cache, control = root / 'source', root / 'cache', root / 'control'
+            (source / 'port').mkdir(parents=True)
+            cache.mkdir()
+            control.mkdir()
+            (cache / 'identity.json').write_text('{}')
+            (source / 'port/build.py').write_text(
+                'from pathlib import Path\nimport time\n'
+                f'cache = Path({str(cache)!r})\n'
+                '(cache / "4/b").mkdir(parents=True)\n(cache / "lock").mkdir()\n'
+                'locks = [cache / "4/stats.lock", cache / "4/b/stats.lock", '
+                'cache / "lock/subdir_4f.lock", cache / "lock/auto_cleanup.lock"]\n'
+                'for path in locks: path.symlink_to("host-123-456")\n'
+                'time.sleep(0.3)\n'
+                'for path in locks: path.unlink()\n'
+                '(cache / "resultR").write_text("compiled")\n')
+            state = {'config': str(root / 'ccache.conf'), 'identity': {}, 'limit': 1024**2}
+            with patch.object(compiler_cache, 'setup', return_value=state), \
+                 patch.object(compiler_cache, 'CHECK_INTERVAL_SECONDS', 0.01), \
+                 patch.object(compiler_cache, 'runtime_size', wraps=compiler_cache.runtime_size) as scan, \
+                 patch.object(compiler_cache, 'stats', return_value={'direct_cache_hit': 1, 'cache_miss': 1}), \
+                 patch.object(compiler_cache.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+                report = compiler_cache.build(root, source, cache, control, 'balanced', 2, 4096)
+                self.assertEqual(report['exit_code'], 0)
+                self.assertGreater(scan.call_count, 1)
+            self.assertEqual((cache / 'resultR').read_text(), 'compiled')
+            self.assertEqual(bounded_cache.size(cache), report['bounds']['bytes_after'])
+
     def test_default_and_increased_limits_validate_both_variants_and_budget(self):
         self.assertEqual(bounded_cache.budgets({})['compiler'], 3 * 1024**3)
         with self.assertRaisesRegex(ValueError, 'fit the declared'):

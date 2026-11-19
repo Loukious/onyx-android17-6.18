@@ -9,11 +9,37 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import time
 
-from bounded_cache import COMPILER_LIMIT, digest, directory, size, summary, trim_compiler, budgets
+from bounded_cache import COMPILER_LIMIT, digest, directory, summary, trim_compiler, budgets
 from pinned_cache import identity as dependency_identity
+
+CHECK_INTERVAL_SECONDS = 30
+LIVE_LOCK = re.compile(r'(?:(?:[0-9a-f]/){1,2}stats\.lock|lock/(?:subdir_[0-9a-f]{2}|auto_cleanup)\.lock)')
+
+
+def runtime_size(root):
+    """Count live storage without following ccache's transient lock symlinks."""
+    root = directory(root)
+    total = 0
+    for parent, directories, names in os.walk(root, followlinks=False):
+        for name in directories + names:
+            path = Path(parent) / name
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue  # Writers atomically rename results and release locks.
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += max(info.st_size, info.st_blocks * 512)
+            elif stat.S_ISLNK(info.st_mode) and LIVE_LOCK.fullmatch(path.relative_to(root).as_posix()):
+                total += max(info.st_size, info.st_blocks * 512)
+            else:
+                raise ValueError('Unexpected live compiler cache link or special file: ' + str(path))
+    return total
 
 
 def compatibility(source, variant, diagnostic=False, ccache=None):
@@ -47,6 +73,7 @@ def setup(workspace, source, cache, control, variant, diagnostic=False):
         raise ValueError('Compiler control directory must be new')
     record, prefix = compatibility(source, variant, diagnostic)
     limit = budgets()['compiler']
+    automatic_limit = limit - min(256 * 1024**2, limit // 4)
     metadata = cache / 'identity.json'
     if metadata.exists() and json.loads(metadata.read_text()) != record:
         raise ValueError('Restored compiler cache has an incompatible identity')
@@ -93,7 +120,7 @@ def setup(workspace, source, cache, control, variant, diagnostic=False):
         f'base_dir = {workspace}', f'extra_files_to_hash = {identity_file}',
         f'namespace = {prefix}', 'compiler_check = content', 'hash_dir = true',
         'direct_mode = true', 'sloppiness =', 'compression = true',
-        'compression_level = 3', f'max_size = {limit // 1024**2 - 256}MiB', 'limit_multiple = 0.8',
+        'compression_level = 3', f'max_size = {automatic_limit // 1024**2}MiB', 'limit_multiple = 0.8',
         'hard_link = false', 'file_clone = false', 'stats = true', 'remote_storage =', '',
     ]))
     for path in (original / 'bin').iterdir():
@@ -122,7 +149,7 @@ def setup(workspace, source, cache, control, variant, diagnostic=False):
     environment = {**os.environ, 'CCACHE_CONFIGPATH': str(config)}
     subprocess.run([str(ccache), '--zero-stats'], env=environment, check=True)
     trim_compiler(cache, limit)
-    summary(f'{variant}: bounded compiler cache configured ({(limit - 256 * 1024**2) / 1024**3:.2f} GiB automatic LRU, '
+    summary(f'{variant}: bounded compiler cache configured ({automatic_limit / 1024**3:.2f} GiB automatic LRU, '
             f'{limit / 1024**3:.2f} GiB archive ceiling); exact pinned {clang_name}.')
     return {'config': str(config), 'toolchain': str(toolchain), 'cache': str(cache),
             'identity': compiler_identity, 'prefix': prefix, 'limit': limit}
@@ -148,14 +175,14 @@ def build(workspace, source, cache, control, variant, jobs, memory, diagnostic=F
     try:
         while process.poll() is None:
             try:
-                process.wait(timeout=30)
+                process.wait(timeout=CHECK_INTERVAL_SECONDS)
             except subprocess.TimeoutExpired:
-                if size(cache) > limit:
+                if runtime_size(cache) > limit:
                     subprocess.run(['ccache', '--cleanup'], check=True,
                                    env={**os.environ, 'CCACHE_CONFIGPATH': state['config']})
                     # Concurrent ccache writes may briefly exceed its soft LRU
                     # quota. Never trim arbitrary files while writers are active.
-                    if size(cache) > limit:
+                    if runtime_size(cache) > limit:
                         raise ValueError('Compiler cache exceeded bounded runtime storage')
     finally:
         if process.poll() is None:
