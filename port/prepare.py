@@ -88,7 +88,9 @@ def main():
             pending.append(path)
         elif path == "common" and (root / "drivers/kernelsu").exists():
             from integrate_kernelsu import verify
-            verify(root)
+            # Validate the owned previous snapshot before integrate_kernelsu upgrades it.
+            # The final integration verification requires the new committed source lock.
+            verify(root, require_lock=False)
             if git(root, "rev-parse", "HEAD") != revision:
                 parser.error("common revision changed under KernelSU Next integration")
         elif git(root, "status", "--porcelain", "-uno"):

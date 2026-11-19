@@ -1,6 +1,0 @@
-id=onyx_susfs
-name=Onyx SUSFS — @VARIANT@
-version=matched-kernel-build
-versionCode=1
-author=KernelSU Next / Onyx
-description=SUSFS from the kernel's exact official Next dev snapshot. Requires its matching Onyx @VARIANT@ kernel; feature activation is checked at boot.

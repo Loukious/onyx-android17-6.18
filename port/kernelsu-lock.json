@@ -1,9 +1,10 @@
 {
-  "repository": "https://github.com/KernelSU-Next/KernelSU-Next.git",
-  "branch": "dev",
-  "revision": "aa235b99574b5b349cdb4980bcb98fd58e6abb28",
+  "repository": "https://github.com/pershoot/KernelSU-Next.git",
+  "branch": "dev-susfs",
+  "revision": "39b15dead6fa806cb3582f866b081fa1d9e1c9e4",
+  "upstream_revision": "aa235b99574b5b349cdb4980bcb98fd58e6abb28",
   "tag": "v3.4.2",
   "git_commit_count": 3554,
   "version": 33554,
-  "sha256": "e4dbe9d44f3dfccae8fd79da98269cc32533b51546a3921caf2f011f836b6137"
+  "sha256": "ce75f0f5a2d3b45c259a39793a5e0256c144677dfca4daa1688208b465d585a4"
 }

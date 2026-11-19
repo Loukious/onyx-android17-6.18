@@ -3,10 +3,21 @@
 This repository contains the complete POCO F7 (Onyx/SM8735) module port and a
 reproducible GKI build recipe. It tracks Google's `android17-6.18-lts` branch
 and tracks the official **KernelSU Next `dev` branch through a verified source lock**.
+The current integration uses the synchronized
+[`pershoot/KernelSU-Next` `dev-susfs` fork](https://github.com/pershoot/KernelSU-Next/tree/dev-susfs)
+with built-in **SUSFS v2.4.0** from WildKernels' Android 17 / 6.18 integration.
 
 [Balanced and Performance profiles](port/features/README.md) share the same feature
-set and locked KernelSU Next/SUSFS source. Releases contain a `variants` array
-with separate matched kernel/module installers, SUSFS addons and tuning details.
+set and independently locked KernelSU Next and SUSFS inputs. The release recipe
+defines a `variants` array with separate matched kernel/module installers and
+tuning details. The recipe compiles SUSFS into the kernel and needs no SUSFS
+loader addon ZIP. A compatible optional
+[configuration module](https://github.com/sidex15/susfs4ksu-module/releases)
+can supply hiding rules.
+
+As of **2026-11-19**, this built-in SUSFS candidate has passed source and host
+verification. Its new kernel has not yet been compiled or validated on the phone.
+The hardware results linked below describe earlier image sets.
 
 The [6.18.63 runtime regression](port/kernel-runtime-regression.md) documents
 the IPA/modem crashes, the IOMMU and FunctionFS corrections, and the Fixed4
@@ -27,7 +38,7 @@ and **16 wireless firmware files** with their redistribution notices and matchin
 ATH source. The module snapshot reproduces **4,978 files** from pinned imports
 and reviewed patches. See [NetHunter and CAN support](https://github.com/Loukious/onyx-android17-6.18/blob/android17-6.18-lts/port/nethunter-can.md).
 
-The last device-validated checkpoint, source `c683c79`, used **391 platform
+The historical **2026-11-04** checkpoint, source `c683c79`, used **391 platform
 modules** and **471 matched modules**. That image set passed Android, KernelSU Next
 root, audio, enforcing SELinux and partition-identity checks on the global POCO
 F7 used for development. It includes native WALT and Qualcomm low-power idle,
@@ -85,7 +96,8 @@ Vendor sources keep their original copyright and license notices; see COPYING.
 ## Automated updates and builds
 
 The tracker runs daily at 05:00 UTC or through **Run workflow**. It checks
-Google's LTS branch and KernelSU Next dev. A new kernel revision produces an
+Google's LTS branch, official KernelSU Next dev and the synchronized `dev-susfs`
+fork. A new kernel revision produces an
 `upstream/` branch with updated common pins, private-header blob imports,
 patch hashes and the complete module snapshot. Exact patch replay is required;
 an upstream conflict fails the update without changing the accepted source branch.
@@ -96,17 +108,21 @@ The tracker opens a pull request and explicitly dispatches its complete build
 Successful updates automatically fast-forward `android17-6.18-lts` to the exact
 tested source commit, merging the update PR. A concurrent change to the source
 branch stops promotion until a new candidate has been rebuilt. The source
-branch remains pinned and reproducible. An update to KernelSU Next rebuilds the
-accepted kernel without changing its GKI source. Successful accepted-source
+branch remains pinned and reproducible. A compatible KernelSU fork update rebuilds
+the accepted kernel without changing its GKI source. Successful accepted-source
 builds publish their verified artifacts before recording their exact revisions,
 so unchanged released inputs do not cause daily rebuilds. The daily tracker also
 rebuilds manual source-branch changes, checking out the exact detected commit.
 Active and successful builds for the same detected inputs are deduplicated.
 Failed or cancelled builds can retry up to three times; further automatic attempts
 require changed inputs. Manual workflow runs remain available for source repairs.
-The tracker selects an exact KernelSU Next dev commit for the candidate source lock.
-KernelSU Next and its SUSFS LKM build from that same snapshot; dev advancing during
-compilation cannot change either input. Both release profiles must pass before publication.
+The tracker selects an exact `dev-susfs` commit only after proving that it contains
+the latest detected official dev commit. If the fork has not incorporated an
+official update, the current built-in pin is retained while GKI/source updates can
+continue. The lock records both commits; Manager-facing version and tag metadata
+come from the official base. WildKernels' SUSFS source and local 6.18 adaptations
+are pinned separately in `port/features/lock.json`. Branch tips advancing during
+compilation cannot change these inputs. Both release profiles must pass before publication.
 
 Builds use standard `ubuntu-24.04` GitHub-hosted runners with build dependencies,
 swap, persistent compilation caches, artifact and ABI uploads. The 6.18 build uses pinned Android Kleaf/Clang/Rust instead of the
@@ -117,7 +133,8 @@ swap allocation fails visibly if space is unavailable. No persistent secrets
 are needed. Repository Actions must be allowed to create pull requests.
 
 Every build includes GKI, all 390 vendor and 11 native wireless modules, the native GKI archive,
-KernelSU Next dev's exact source archive, both device-tree variants, wireless firmware
+the exact KernelSU fork source archive and built-in SUSFS inputs, both device-tree
+variants, wireless firmware
 with licenses/source, import CRC verification, input hashes and logs. Download
 the complete GKI/module archive and `SHA256SUMS` from the build artifacts or release.
 Actions stores separate ABI files under `kernel-abi/`; releases expose those files
@@ -173,7 +190,10 @@ Kleaf path to `port/rom/build.py`; it compiles GKI, every platform/native module
 and the device trees from the verified source recipe. Android packages the boot
 images and DLKM partitions from that single build. Userspace headers are generated
 from the same synced GKI/module source. No release Image or module binaries are
-downloaded for this route. KernelSU Next dev uses the exact committed source lock for each build.
+downloaded for this route. KernelSU Next and built-in SUSFS use their exact
+committed source locks for each build. A ROM built from this recipe includes the
+SUSFS kernel implementation without a separate loader module. Users can install
+a compatible optional configuration module to manage hiding rules.
 
 The device product also inherits `port/rom/firmware.mk`, which installs all 16
 USB Wi-Fi firmware files under `/vendor/firmware` with their original request

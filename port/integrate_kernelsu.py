@@ -13,15 +13,22 @@ import tarfile
 
 HERE = Path(__file__).resolve().parent
 UPSTREAM = "https://github.com/KernelSU-Next/KernelSU-Next.git"
+SUSFS_UPSTREAM = "https://github.com/pershoot/KernelSU-Next.git"
 COMMON_REVISION = json.loads((HERE / "sources.json").read_text())["common"]["revision"]
 
 
 def validate_pin(pin):
     fields = {"repository", "branch", "revision", "tag", "git_commit_count", "version", "sha256"}
+    builtin = isinstance(pin, dict) and pin.get("repository") == SUSFS_UPSTREAM
+    if builtin:
+        fields.add("upstream_revision")
     if (not isinstance(pin, dict) or set(pin) != fields
-            or pin.get("repository") != UPSTREAM or pin.get("branch") != "dev"
+            or (pin.get("repository"), pin.get("branch")) not in {
+                (UPSTREAM, "dev"), (SUSFS_UPSTREAM, "dev-susfs")}
             or not isinstance(pin.get("revision"), str)
             or not re.fullmatch(r"[0-9a-f]{40}", pin.get("revision", ""))
+            or (builtin and (not isinstance(pin.get("upstream_revision"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", pin["upstream_revision"])))
             or not isinstance(pin.get("sha256"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", pin.get("sha256", ""))
             or type(pin.get("git_commit_count")) is not int
@@ -31,6 +38,22 @@ def validate_pin(pin):
             or not re.fullmatch(r"[A-Za-z0-9._+-]+", pin.get("tag", ""))):
         raise ValueError("invalid KernelSU Next source lock")
     return pin
+
+
+def verify_repository_pin(repo, pin):
+    """Bind fork version metadata to the included official dev commit."""
+    validate_pin(pin)
+    revision = pin["revision"]
+    base = pin.get("upstream_revision", revision)
+    if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", base, revision],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        raise ValueError("KernelSU Next fork does not include its locked official dev revision")
+    count = int(subprocess.check_output([
+        "git", "-C", str(repo), "rev-list", "--count", base], text=True).strip())
+    tag = subprocess.check_output([
+        "git", "-C", str(repo), "describe", "--tags", "--abbrev=0", base], text=True).strip()
+    if count != pin["git_commit_count"] or tag != pin["tag"]:
+        raise ValueError("KernelSU Next version metadata differs from the locked official dev base")
 
 
 def locked_pin():
@@ -65,8 +88,12 @@ def expected(common, require_lock=True):
     start = kbuild.index("LPATH :=")
     end = kbuild.index("KSU_NEW_DCACHE_FLUSH :=")
     # Resolve Git metadata before entering Kleaf's hermetic build sandbox.
-    # The source lock freezes upstream's commit-count version and tag as well.
-    kbuild = (kbuild[:start] + f"# Upstream dev {pin['revision']}; see artifact inputs/kernelsu-next.\n"
+    # Fork commits do not change the official Manager-facing version and tag.
+    upstream_revision = pin.get("upstream_revision", pin["revision"])
+    description = (f"# Pinned {pin['branch']} {pin['revision']}; official dev {upstream_revision}.\n"
+                   if "upstream_revision" in pin else
+                   f"# Upstream dev {pin['revision']}; see artifact inputs/kernelsu-next.\n")
+    kbuild = (kbuild[:start] + description
               + f"ccflags-y += -DKSU_VERSION={pin['version']}\n"
               + 'ccflags-y += -DKSU_VERSION_TAG=\\"' + pin['tag'] + '\\"\n\n'
               + kbuild[end:])
@@ -117,19 +144,26 @@ def integrate(common):
     data = archive.read_bytes() if archive.exists() else None
     if data is None or hashlib.sha256(data).hexdigest() != pin["sha256"]:
         if repo.exists():
-            if subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain"]):
+            bare = subprocess.check_output([
+                "git", "-C", str(repo), "rev-parse", "--is-bare-repository"], text=True).strip()
+            if bare != "true" and subprocess.check_output([
+                    "git", "-C", str(repo), "status", "--porcelain"]):
                 raise ValueError("preserve local changes in the KernelSU Next checkout")
             remote = subprocess.check_output([
                 "git", "-C", str(repo), "remote", "get-url", "origin"], text=True).strip()
-            if remote != UPSTREAM:
+            if remote != pin["repository"] and not (
+                    pin["repository"] == SUSFS_UPSTREAM and remote == UPSTREAM):
                 raise ValueError("unexpected KernelSU Next origin")
         else:
-            subprocess.run(["git", "clone", "--no-checkout", UPSTREAM, str(repo)], check=True)
+            subprocess.run(["git", "clone", "--bare", pin["repository"], str(repo)], check=True)
         revision = pin["revision"]
         available = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", revision + "^{commit}"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if available.returncode:
-            subprocess.run(["git", "-C", str(repo), "fetch", "origin", revision], check=True)
+            # An existing verified official checkout can supply the base objects without
+            # changing its remote; the new immutable fork revision comes from its own URL.
+            subprocess.run(["git", "-C", str(repo), "fetch", pin["repository"], revision], check=True)
+        verify_repository_pin(repo, pin)
         data = subprocess.check_output([
             "git", "-C", str(repo), "archive", "--format=tar", revision, "kernel", "uapi", "LICENSE"])
         if hashlib.sha256(data).hexdigest() != pin["sha256"]:

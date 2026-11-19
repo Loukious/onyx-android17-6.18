@@ -2,7 +2,7 @@
   "format": 1,
   "shared_features": [
     "kernelsu-next-dev",
-    "susfs-next-lkm",
+    "susfs-next-builtin",
     "nomount",
     "mountify-overlayfs",
     "baseband-guard",
@@ -84,7 +84,18 @@
     "CONFIG_LSM": "\"landlock,lockdown,yama,loadpin,safesetid,selinux,bpf,baseband_guard\"",
     "CONFIG_ANDROID_KABI_RESERVE": "y",
     "CONFIG_GENDWARFKSYMS": "y",
-    "CONFIG_CIFS_POSIX": "y"
+    "CONFIG_CIFS_POSIX": "y",
+    "CONFIG_KSU_SUSFS": "y",
+    "CONFIG_KSU_SUSFS_SUS_PATH": "y",
+    "CONFIG_KSU_SUSFS_SUS_MOUNT": "y",
+    "CONFIG_KSU_SUSFS_SUS_KSTAT": "y",
+    "CONFIG_KSU_SUSFS_SPOOF_UNAME": "y",
+    "CONFIG_KSU_SUSFS_ENABLE_LOG": "y",
+    "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS": "y",
+    "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG": "y",
+    "CONFIG_KSU_SUSFS_SUS_MAP": "y",
+    "CONFIG_KSU_SUSFS_OPEN_REDIRECT": "y",
+    "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER": "y"
   },
   "profiles": [
     {
@@ -140,7 +151,7 @@
           {
             "source": "minimise_wakeup_time.patch",
             "change": "Alarmtimer hold uses the nearest deadline plus 1 ms",
-            "adaptation": "Clamp to 1–2000 ms, including negative deadlines that are already overdue"
+            "adaptation": "Clamp to 1\u20132000 ms, including negative deadlines that are already overdue"
           },
           {
             "source": "int_sqrt.patch",
@@ -228,6 +239,10 @@
     {
       "path": "patches/performance-gated.patch",
       "sha256": "7be2553e90e13e5125aefbe85c9d74e14bcf540cade3d0f8d139fa70c3170303"
+    },
+    {
+      "path": "patches/susfs-6.18.patch",
+      "sha256": "7acff4a86d5c4a3904f7471c6fae07799367ff349a3bdbd025175b19022a24a1"
     }
   ],
   "install_options": {
@@ -244,8 +259,8 @@
       "switch_requires_reboot": true
     },
     "susfs": {
-      "implementation": "official-next-dev-lkm",
-      "activation": "install matched SUSFS KernelSU addon",
+      "implementation": "wildkernels-builtin",
+      "activation": "built into the kernel; no loader addon",
       "configuration_module_url": "https://github.com/sidex15/susfs4ksu-module/releases"
     }
   }

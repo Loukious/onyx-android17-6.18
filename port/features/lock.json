@@ -41,11 +41,26 @@
     }
   },
   "susfs": {
-    "repository": "https://github.com/KernelSU-Next/KernelSU-Next.git",
-    "source": "kernel/susfs",
-    "revision_source": "port/kernelsu-lock.json",
-    "module": "susfs_guard_lkm.ko",
-    "loader": "ksud insmod",
-    "classic_patches": false
+    "implementation": "wildkernels-builtin",
+    "repository": "https://github.com/WildKernels/GKI_KernelSU_SUSFS.git",
+    "revision": "2e82dcc4aabdecc9542cb47df695be85b881bae6",
+    "source": ".github/actions/susfs/susfs618/kernel_patches",
+    "upstream_repository": "https://gitlab.com/simonpunk/susfs4ksu.git",
+    "upstream_revision": "68f62fae75ada3959f816841a3c64299383521ed",
+    "version": "v2.4.0",
+    "kernel_family": "android17-6.18",
+    "kernelsu_revision_source": "port/kernelsu-lock.json",
+    "classic_patches": true,
+    "files": {
+      "vendor/susfs/50_add_susfs_in_gki-android17-6.18.patch": "856340550d2da1d38aa158cae3323f58632986778bfbf1d7f2fe7f7afdb5a74c",
+      "vendor/susfs/compat/susfs_618_compile_fixes.py": "873e8376c5b5fd7ad486341bb85aa24cefc573e834cf1078029056e9759199ff",
+      "vendor/susfs/compat/susfs_618_namespace_mnt_t_flags.py": "6f40d623022c976a12573d3ba2cc991ab568bc557737daa02d7dd69b2c96687d",
+      "vendor/susfs/compat/susfs_618_prototypes.py": "3a0e02d04cab787d707ed1ceb1f48208f28fcfec9dba8413cd84ac0656ae3ca0",
+      "vendor/susfs/compat/susfs_618_task_mmu.py": "e0bd3071f396e9ce803e555daf2308adf240c650edbc71de0805dc98e15ca96b",
+      "vendor/susfs/compat/susfs_restore_context.py": "35074c977283f67c865298224ebbcae614bd49281368c0290917868ab26f3678",
+      "vendor/susfs/fs/susfs.c": "2a8bb10bca2ad5134cd65bf02ef56863795949b1d9cbed603c380b58d9bc61bf",
+      "vendor/susfs/include/linux/susfs.h": "763a502a37c3ffa3807ba2cab46af31807b8bd87cccb86d12e552d0532a96573",
+      "vendor/susfs/include/linux/susfs_def.h": "e8a1cee4b41bcdce43998ae337e60fca9888b2f8bea47074fe3b3377220794d8"
+    }
   }
 }

@@ -110,7 +110,7 @@ def main():
             command.append("--verify-only")
         subprocess.run(command, check=True)
 
-    from features import stage as stage_features, applied as feature_fixes, package_addon
+    from features import stage as stage_features, applied as feature_fixes, verify_builtin
     variant = stage_features(workspace, args.variant)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -200,7 +200,7 @@ def main():
     command = [*bazel, "build", *cache_flags, "--keep_going", f"--jobs={args.jobs}",
                f"--local_resources=memory={args.memory_mb}",
                "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx_features:kmi_symbol_lists",
-               "//common:kernel_aarch64", "//onyx:platform_modules", "//onyx_features:susfs"]
+               "//common:kernel_aarch64", "//onyx:platform_modules"]
     print(f"Building; log: {artifacts / 'build.log'}", flush=True)
     from qdss_diagnostic import applied
     from common_fixes import applied as common_fixes
@@ -221,7 +221,7 @@ def main():
             query = subprocess.check_output([
                 *bazel, "cquery", *cache_flags, "--output=files",
                 "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx_features:kmi_symbol_lists",
-                "//common:kernel_aarch64 + //onyx:platform_modules + //onyx_features:susfs"
+                "//common:kernel_aarch64 + //onyx:platform_modules"
             ], cwd=workspace, text=True)
     (artifacts / "bazel-outputs.txt").write_text(query)
     outputs = [execution_root / line for line in query.splitlines()]
@@ -245,11 +245,10 @@ def main():
     for option, value in native_configs().items():
         if selections.get("CONFIG_" + option, "n") != value:
             raise ValueError("Native wireless Kconfig selection differs: " + option)
+    susfs_verification = verify_builtin(kernel_dir)
+    addon_verification = []
     native_verification, native_abi_validation, native_import_admission = verify_native_modules(
         kernel_dir, symvers, release, modules)
-
-    addon = next(p for p in outputs if p.name == 'susfs_guard_lkm.ko')
-    addon_verification = package_addon(addon, kernel_dir, artifacts, workspace, args.variant)
 
     for path in outputs:
         if 'onyx_features' in path.relative_to(execution_root).parts:
@@ -322,6 +321,7 @@ def main():
     report = {
         "variant": variant,
         "platform_addon_verification": addon_verification,
+        "susfs": susfs_verification,
         "command": command,
         "automation_revision": os.environ.get("KONOHA_CI_REVISION"),
         "qdss_diagnostic": args.qdss_diagnostic,

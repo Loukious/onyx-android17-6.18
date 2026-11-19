@@ -230,24 +230,10 @@ def required_config(variant):
 
 
 def stage(workspace, variant):
-    """Stage the same Next snapshot's standalone SUSFS module and profile."""
+    """Stage build-profile and KMI inputs; SUSFS is compiled in common/fs."""
     workspace = Path(workspace)
-    from integrate_kernelsu import expected
-    files, _ = expected(workspace / 'common')
-    sources = {n.removeprefix('drivers/kernelsu/susfs/'): d for n, d in files.items()
-               if n.startswith('drivers/kernelsu/susfs/')}
-    if not sources or 'Makefile' not in sources:
-        raise ValueError('Locked official Next dev snapshot has no SUSFS LKM')
     target = workspace / 'onyx_features'
-    wanted = {'susfs/' + name: data for name, data in sources.items()}
-    for name, template in [('Kbuild', 'susfs.Kbuild'),
-                           ('onyx_gki_namespace.c', 'gki_namespace.c')]:
-        if name in sources:
-            raise ValueError('Official SUSFS source collides with the GKI build adapter: ' + name)
-        wanted['susfs/' + name] = (INPUTS / template).read_bytes()
-    wanted['Makefile'] = (INPUTS / 'module.Makefile').read_bytes()
-    wanted['Kbuild'] = (INPUTS / 'module.Kbuild').read_bytes()
-    wanted['BUILD.bazel'] = (INPUTS / 'module.BUILD.bazel').read_bytes()
+    wanted = {'BUILD.bazel': (INPUTS / 'module.BUILD.bazel').read_bytes()}
     wanted['droidspaces-kmi-symbols'] = (INPUTS / 'droidspaces-kmi-symbols').read_bytes()
     wanted['feature_defconfig'] = ''.join(
         '# ' + n + ' is not set\n' if v == 'n' else n + '=' + v + '\n'
@@ -258,7 +244,7 @@ def stage(workspace, variant):
         actual = {p.relative_to(target).as_posix(): sha(p.read_bytes())
                   for p in target.rglob('*') if p.is_file() and p != fingerprint}
         if old != actual:
-            raise ValueError('Preserve changed standalone feature module sources')
+            raise ValueError('Preserve changed feature profile sources')
         shutil.rmtree(target)
     target.mkdir()
     for name, data in wanted.items():
@@ -298,53 +284,63 @@ def verify_artifact(artifact, report):
         sorted((artifact / 'platform').glob('*.ko')), artifact / 'gki/vmlinux')
     if report.get('core_import_admission_validation') != admission:
         raise ValueError('Core import admission receipt differs from the actual kernel exports')
-    rows = report['platform_addon_verification']
-    if len(rows) != 1 or rows[0]['module'] != 'susfs_guard_lkm.ko' or rows[0].get('imports_checked', 0) < 1:
-        raise ValueError('SUSFS matched module verification is absent')
-    row = rows[0]
-    module = artifact / 'platform-addon/susfs_guard_lkm.ko'
-    if row != verify_addon(module, artifact / 'gki', report['kernel_release']):
-        raise ValueError('SUSFS module belongs to another kernel build')
-    source = json.loads((artifact / 'platform-addon/source.json').read_text())
-    if (source['kernelsu_revision'] != report['kernelsu_next']['revision']
-            or source['kernel_sha256'] != sha((artifact / 'gki/Image').read_bytes())
-            or source['susfs_source_sha256'] != susfs_source_hash(artifact / 'inputs/kernelsu-next/source.tar')):
-        raise ValueError('SUSFS and KernelSU Next revisions differ')
-    notes = kernel_notes_hash(artifact / 'gki/vmlinux')
-    if (source.get('kernel_notes_sha256') != notes
-            or (artifact / 'platform-addon/kernel.notes.sha256').read_text().strip() != notes):
-        raise ValueError('SUSFS runtime kernel fingerprint differs')
-    with tarfile.open(artifact / 'inputs/kernelsu-next/source.tar') as archive:
-        gate = archive.getmember('kernel/susfs/ksu_allow_gate.c')
-        names = set(re.findall(rb'"((?:__)?ksu_[A-Za-z0-9_]+)"', archive.extractfile(gate).read()))
-    kernel_symbols = {f[2].encode() for line in (artifact / 'gki/System.map').read_text().splitlines()
-                      if len(f := line.split()) >= 3}
-    if not names or not names & kernel_symbols:
-        raise ValueError('SUSFS cannot resolve the KernelSU allow predicate in this kernel')
-    if (artifact / 'platform-addon/kernel.release').read_text().strip() != report['kernel_release']:
-        raise ValueError('SUSFS loader expects another kernel')
-    for name in ('post-fs-data.sh', 'verify-runtime.sh', 'module.prop'):
-        if (artifact / 'platform-addon' / name).read_bytes() != addon_file(name, variant):
-            raise ValueError('SUSFS loader input differs: ' + name)
+    susfs = verify_builtin(artifact / 'gki')
+    if report.get('susfs') != susfs:
+        raise ValueError('Built-in SUSFS receipt differs from the compiled kernel')
+    if report.get('platform_addon_verification') != []:
+        raise ValueError('Built-in SUSFS must not ship a standalone addon')
+    addon = artifact / 'platform-addon'
+    if addon.exists() and any(addon.iterdir()):
+        raise ValueError('Stale standalone SUSFS addon files are present')
+    pin = json.loads((HERE / 'kernelsu-lock.json').read_text())
+    for name in ('revision', 'upstream_revision', 'sha256'):
+        if report['kernelsu_next'].get(name) != pin.get(name):
+            raise ValueError('Built-in SUSFS and KernelSU source pins differ: ' + name)
     return {'status': 'PASS', 'variant': variant, 'configs_verified': len(required_config(variant)),
-            'susfs_source_revision': source['kernelsu_revision'],
+            'susfs_source_revision': susfs['source_revision'], 'susfs': susfs,
             'runtime_verified': False}
 
 
-def addon_file(name, variant):
-    data = (INPUTS / 'susfs-module' / name).read_bytes()
-    return data.replace(b'@VARIANT@', variant.encode())
+def builtin_metadata():
+    pin = json.loads((INPUTS / 'lock.json').read_text())['susfs']
+    if (pin.get('implementation') != 'wildkernels-builtin'
+            or not re.fullmatch(r'[0-9a-f]{40}', pin.get('revision', ''))
+            or pin.get('version') != 'v2.4.0' or not pin.get('files')):
+        raise ValueError('Invalid built-in SUSFS source lock')
+    contents = {}
+    for name, expected in sorted(pin['files'].items()):
+        data = safe(INPUTS, name).read_bytes()
+        if sha(data) != expected:
+            raise ValueError('Pinned built-in SUSFS source differs: ' + name)
+        contents[name] = data
+    required = {'vendor/susfs/fs/susfs.c', 'vendor/susfs/include/linux/susfs.h',
+                'vendor/susfs/include/linux/susfs_def.h'}
+    if not required <= contents.keys():
+        raise ValueError('Built-in SUSFS source inventory is incomplete')
+    return {'implementation': 'wildkernels-builtin', 'built_in': True,
+            'source_revision': pin['revision'],
+            'source_sha256': sha(b''.join(n.encode() + b'\0' + d for n, d in contents.items())),
+            'version': pin['version'], 'runtime_verified': False}
 
 
-def susfs_source_hash(archive):
-    files = {}
-    with tarfile.open(archive) as tar:
-        for entry in tar:
-            if entry.isfile() and entry.name.startswith('kernel/susfs/'):
-                files[entry.name] = tar.extractfile(entry).read()
-    if not files:
-        raise ValueError('SUSFS source missing from official Next archive')
-    return sha(b''.join(n.encode() + b'\0' + d for n, d in sorted(files.items())))
+def verify_builtin(kernel_dir):
+    """Require selected builtin features and real kernel-side entry points."""
+    kernel_dir = Path(kernel_dir)
+    metadata = builtin_metadata()
+    config = selections((kernel_dir / 'kernel_aarch64_dot_config').read_text())
+    wanted = {'CONFIG_KSU': 'y', **{n: v for n, v in manifest()['configs'].items()
+              if n.startswith('CONFIG_KSU_SUSFS')}}
+    for name, value in wanted.items():
+        if config.get(name, 'n') != value:
+            raise ValueError('Built-in SUSFS kernel config differs: ' + name)
+    symbols = {f[2] for line in (kernel_dir / 'System.map').read_text().splitlines()
+               if len(f := line.split()) >= 3}
+    required = {'susfs_init', 'susfs_add_sus_path', 'susfs_add_sus_kstat',
+                'susfs_add_sus_map', 'susfs_get_enabled_features'}
+    missing = required - symbols
+    if missing:
+        raise ValueError('Built-in SUSFS kernel entry points are absent: ' + ', '.join(sorted(missing)))
+    return metadata
 
 
 def kernel_notes_hash(path):
@@ -374,60 +370,3 @@ def kernel_notes_hash(path):
                     raise ValueError('Missing or truncated kernel linker notes')
                 return sha(data)
     raise ValueError('Kernel has no runtime linker-note fingerprint')
-
-
-def verify_addon(module, kernel_dir, release):
-    """Check exports' CRCs and special-loader imports against this exact kernel."""
-    from verify_modules import elf_sections, versioned_imports
-    sections = elf_sections(module)
-    vermagic = next((s.removeprefix(b'vermagic=').decode() for s in sections.get('.modinfo', b'').split(b'\0')
-                     if s.startswith(b'vermagic=')), '')
-    if not vermagic.startswith(release + ' ') or 'modversions' not in vermagic.split():
-        raise ValueError('SUSFS module vermagic mismatch')
-    exports = {f[1]: int(f[0], 16) for line in (kernel_dir / 'kernel_aarch64_Module.symvers').read_text().splitlines()
-               if len(f := line.split()) >= 3}
-    imports = versioned_imports(module)
-    if not imports or any(exports.get(n) != crc for n, crc in imports.items()):
-        raise ValueError('SUSFS versioned import CRC mismatch')
-    strings = sections.get('.strtab', b'')
-    symbols = sections.get('.symtab', b'')
-    if len(symbols) % 24:
-        raise ValueError('SUSFS symbol table is malformed')
-    undefined = set()
-    for offset in range(0, len(symbols), 24):
-        name, info, _, index, _, _ = struct.unpack_from('<IBBHQQ', symbols, offset)
-        if index == 0 and info >> 4 in (1, 2) and name:
-            end = strings.find(b'\0', name)
-            if end < 0:
-                raise ValueError('SUSFS import name is malformed')
-            undefined.add(strings[name:end].decode())
-    kernel_symbols = {f[2] for line in (kernel_dir / 'System.map').read_text().splitlines()
-                      if len(f := line.split()) >= 3}
-    missing = undefined - kernel_symbols
-    if missing:
-        raise ValueError('SUSFS imports unavailable in this kernel: ' + ', '.join(sorted(missing)))
-    return {'module': module.name, 'sha256': sha(module.read_bytes()), 'vermagic': vermagic,
-            'imports_checked': len(undefined), 'versioned_imports_checked': len(imports),
-            'loader': 'KernelSU Next ksud insmod'}
-
-
-def package_addon(module, kernel_dir, artifacts, workspace, variant):
-    target = artifacts / 'platform-addon'
-    target.mkdir()
-    shutil.copyfile(module, target / module.name)
-    release = (kernel_dir / 'include/config/kernel.release').read_text().strip()
-    for name in ('post-fs-data.sh', 'verify-runtime.sh', 'module.prop'):
-        path = target / name
-        path.write_bytes(addon_file(name, variant))
-        path.chmod(0o755 if name.endswith('.sh') else 0o644)
-    (target / 'kernel.release').write_text(release + '\n')
-    notes = kernel_notes_hash(kernel_dir / 'vmlinux')
-    (target / 'kernel.notes.sha256').write_text(notes + '\n')
-    pin = json.loads((workspace / '.kernelsu-next/source.json').read_text())
-    (target / 'source.json').write_text(json.dumps({
-        'format': 1, 'kernelsu_revision': pin['revision'], 'kernelsu_source_sha256': pin['sha256'],
-        'susfs_source_sha256': susfs_source_hash(workspace / '.kernelsu-next/source.tar'),
-        'kernel_sha256': sha((kernel_dir / 'Image').read_bytes()), 'variant': variant,
-        'kernel_notes_sha256': notes,
-        'runtime_verified': False}, indent=2) + '\n')
-    return [verify_addon(module, kernel_dir, release)]

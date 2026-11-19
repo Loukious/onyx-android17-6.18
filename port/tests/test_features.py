@@ -1,11 +1,9 @@
-"""Adversarial feature replay transactions and owned-file restoration."""
-import io
+"""Adversarial feature replay and built-in SUSFS artifact verification."""
 import json
 from pathlib import Path
 import shutil
 import struct
 import sys
-import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -151,9 +149,9 @@ class FeatureReplayTests(unittest.TestCase):
 RELEASE = '6.18.63-android17-6-maybe-dirty-4k-onyx-balanced'
 
 
-def addon_elf(release=RELEASE, crc=0x12345678, broken_symbols=False,
+def core_elf(release=RELEASE, crc=0x12345678, broken_symbols=False,
               linked_kernel=False, core_protected=False):
-    """A small ELF fixture with exported and special-loader-only imports."""
+    """A small ELF fixture for actual vendor-to-core export admission."""
     strings = b'\0ordinary\0hidden_symbol\0'
     symbols = bytes(24) + b''.join(struct.pack('<IBBHQQ', strings.index(name), 0x10, 0, 0, 0, 0)
                                   for name in (b'ordinary', b'hidden_symbol'))
@@ -185,127 +183,209 @@ def addon_elf(release=RELEASE, crc=0x12345678, broken_symbols=False,
     return bytes(data)
 
 
+BUILTIN_SYMBOLS = ('susfs_init', 'susfs_add_sus_path', 'susfs_add_sus_kstat',
+                   'susfs_add_sus_map', 'susfs_get_enabled_features')
+
+
 class FeatureArtifactTests(unittest.TestCase):
-    def fixture(self, root):
+    def fixture(self, root, variant='balanced'):
         artifact = root / 'artifact'
         (artifact / 'gki').mkdir(parents=True)
-        (artifact / 'platform-addon').mkdir()
         (artifact / 'inputs').mkdir()
         source_inputs = root / 'locked-features'
         shutil.copytree(features.INPUTS, source_inputs, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
         shutil.copytree(source_inputs, artifact / 'inputs/features')
         shutil.copyfile(Path(features.__file__), artifact / 'inputs/features.py')
         shutil.copyfile(features.HERE / 'verify_modules.py', artifact / 'inputs/verify_modules.py')
+        pin = json.loads((features.HERE / 'kernelsu-lock.json').read_text())
+        (artifact / 'inputs/kernelsu-next').mkdir()
+        (artifact / 'inputs/kernelsu-next/source.json').write_text(json.dumps(pin))
+        (artifact / 'inputs/kernelsu-lock.json').write_text(json.dumps(pin))
         (artifact / 'gki/Image').write_bytes(b'fixture kernel')
-        (artifact / 'gki/vmlinux').write_bytes(addon_elf(linked_kernel=True))
+        (artifact / 'gki/vmlinux').write_bytes(core_elf(linked_kernel=True))
         (artifact / 'platform').mkdir()
         from test_core_import_admission import vendor
         from verify_modules import verify_vendor_core_imports
         vendor(artifact / 'platform/vendor.ko', [('ordinary', 0x12345678)])
-        notes = features.kernel_notes_hash(artifact / 'gki/vmlinux')
-        (artifact / 'platform-addon/kernel.notes.sha256').write_text(notes + '\n')
         (artifact / 'gki/kernel_aarch64_Module.symvers').write_text('0x12345678 ordinary vmlinux EXPORT_SYMBOL\n')
-        (artifact / 'gki/System.map').write_text('0000000000000001 T ordinary\n0000000000000002 T hidden_symbol\n'
-                                               '0000000000000003 T __ksu_is_allow_uid_for_current\n')
-        module = artifact / 'platform-addon/susfs_guard_lkm.ko'
-        module.write_bytes(addon_elf())
+        symbols = ('ordinary', 'hidden_symbol', '__ksu_is_allow_uid_for_current') + BUILTIN_SYMBOLS
+        (artifact / 'gki/System.map').write_text(''.join(
+            '%016x T %s\n' % (index, name) for index, name in enumerate(symbols, 1)))
         with patch.object(features, 'INPUTS', source_inputs):
             (artifact / 'gki/kernel_aarch64_dot_config').write_text(''.join(
-                name + '=' + value + '\n' for name, value in features.required_config('balanced').items()))
-            for name in ('post-fs-data.sh', 'verify-runtime.sh', 'module.prop'):
-                (artifact / 'platform-addon' / name).write_bytes(features.addon_file(name, 'balanced'))
-            variant = features.profile('balanced')
-        (artifact / 'platform-addon/kernel.release').write_text(RELEASE + '\n')
-        (artifact / 'inputs/kernelsu-next').mkdir()
-        source_archive = artifact / 'inputs/kernelsu-next/source.tar'
-        with tarfile.open(source_archive, 'w') as archive:
-            data = b'official source fixture'
-            member = tarfile.TarInfo('kernel/susfs/susfs.c')
-            member.size = len(data)
-            archive.addfile(member, io.BytesIO(data))
-            data = b'static const char *symbols[] = { "__ksu_is_allow_uid_for_current", "ksu_is_allow_uid_for_current" };'
-            member = tarfile.TarInfo('kernel/susfs/ksu_allow_gate.c')
-            member.size = len(data)
-            archive.addfile(member, io.BytesIO(data))
-        source = {'kernelsu_revision': 'a' * 40,
-                  'kernel_notes_sha256': notes,
-                  'kernel_sha256': features.sha((artifact / 'gki/Image').read_bytes()),
-                  'susfs_source_sha256': features.susfs_source_hash(source_archive)}
-        (artifact / 'platform-addon/source.json').write_text(json.dumps(source))
-        report = {'variant': variant, 'kernel_release': RELEASE,
-                  'kernelsu_next': {'revision': 'a' * 40},
+                name + '=' + value + '\n' for name, value in
+                {'CONFIG_KSU': 'y', **features.required_config(variant)}.items()))
+            selected = features.profile(variant)
+            receipt = features.verify_builtin(artifact / 'gki')
+        report = {'variant': selected, 'kernel_release': RELEASE.replace('balanced', variant),
+                  'kernelsu_next': pin,
                   'core_import_admission_validation': verify_vendor_core_imports(
                       [artifact / 'platform/vendor.ko'], artifact / 'gki/vmlinux'),
-                  'platform_addon_verification': [features.verify_addon(module, artifact / 'gki', RELEASE)]}
+                  'platform_addon_verification': [], 'susfs': receipt}
         return artifact, report, source_inputs
 
-    def test_real_elf_checks_export_crc_and_special_loader_symbol_availability(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            artifact, report, inputs = self.fixture(Path(temporary))
-            row = report['platform_addon_verification'][0]
-            self.assertEqual(row['imports_checked'], 2)
-            self.assertEqual(row['versioned_imports_checked'], 1)
-            with patch.object(features, 'INPUTS', inputs):
-                result = features.verify_artifact(artifact, report)
-            self.assertEqual(result['status'], 'PASS')
-            self.assertFalse(result['runtime_verified'])
+    def verify(self, artifact, report, inputs):
+        with patch.object(features, 'INPUTS', inputs):
+            return features.verify_artifact(artifact, report)
 
-    def test_module_crc_missing_private_import_vermagic_and_malformed_symbols_reject(self):
-        for changed in ('crc', 'private-import', 'vermagic', 'symbols'):
-            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
-                artifact, _, _ = self.fixture(Path(temporary))
-                module = artifact / 'platform-addon/susfs_guard_lkm.ko'
-                if changed == 'crc':
-                    module.write_bytes(addon_elf(crc=0x87654321))
-                elif changed == 'vermagic':
-                    module.write_bytes(addon_elf(release=RELEASE.replace('balanced', 'performance')))
-                elif changed == 'symbols':
-                    module.write_bytes(addon_elf(broken_symbols=True))
-                else:
-                    (artifact / 'gki/System.map').write_text('0000000000000001 T ordinary\n')
-                with self.assertRaises(ValueError):
-                    features.verify_addon(module, artifact / 'gki', RELEASE)
+    def test_both_profiles_verify_builtin_provenance_without_an_addon_or_runtime_claim(self):
+        for variant in ('balanced', 'performance'):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
+                artifact, report, inputs = self.fixture(Path(temporary), variant)
+                lock = json.loads((inputs / 'lock.json').read_text())['susfs']
+                receipt = report['susfs']
+                self.assertEqual(receipt['implementation'], 'wildkernels-builtin')
+                self.assertIs(receipt['built_in'], True)
+                self.assertEqual(receipt['source_revision'], lock['revision'])
+                self.assertEqual(receipt['version'], 'v2.4.0')
+                contents = b''.join(name.encode() + b'\0' + (inputs / name).read_bytes()
+                                    for name in sorted(lock['files']))
+                self.assertEqual(receipt['source_sha256'], features.sha(contents))
+                self.assertIs(receipt['runtime_verified'], False)
+                self.assertEqual(report['platform_addon_verification'], [])
+                self.assertFalse((artifact / 'platform-addon').exists())
+                result = self.verify(artifact, report, inputs)
+                self.assertEqual(result['status'], 'PASS')
+                self.assertFalse(result['runtime_verified'])
 
-    def test_capability_source_loader_kernel_and_revision_tampering_reject(self):
-        for changed in ('config', 'source', 'loader', 'kernel', 'revision', 'allow-predicate', 'kernel-notes'):
+    def test_each_required_builtin_symbol_must_exist_in_the_linked_kernel(self):
+        for missing in BUILTIN_SYMBOLS:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                artifact, _, inputs = self.fixture(Path(temporary))
+                mapping = artifact / 'gki/System.map'
+                mapping.write_text(''.join(line + '\n' for line in mapping.read_text().splitlines()
+                                           if line.split()[-1] != missing))
+                with patch.object(features, 'INPUTS', inputs), self.assertRaises(ValueError):
+                    features.verify_builtin(artifact / 'gki')
+
+    def test_module_disabled_or_missing_susfs_config_cannot_claim_builtin_capability(self):
+        for value in ('m', 'n', None):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
+                artifact, _, inputs = self.fixture(Path(temporary))
+                config = artifact / 'gki/kernel_aarch64_dot_config'
+                lines = [line for line in config.read_text().splitlines() if not line.startswith('CONFIG_KSU_SUSFS=')]
+                if value is not None:
+                    lines.append('CONFIG_KSU_SUSFS=' + value)
+                config.write_text('\n'.join(lines) + '\n')
+                with patch.object(features, 'INPUTS', inputs), self.assertRaises(ValueError):
+                    features.verify_builtin(artifact / 'gki')
+
+    def test_general_and_profile_configs_are_still_required(self):
+        for changed in ('CONFIG_NTSYNC', 'CONFIG_DEFAULT_TCP_CONG', 'CONFIG_LOCALVERSION'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
                 artifact, report, inputs = self.fixture(Path(temporary))
-                if changed == 'config':
-                    path = artifact / 'gki/kernel_aarch64_dot_config'
-                    path.write_text(path.read_text().replace('CONFIG_NTSYNC=y\n', ''))
-                elif changed == 'source':
-                    (artifact / 'inputs/features/manifest.json').write_text('{}\n')
-                elif changed == 'loader':
-                    (artifact / 'platform-addon/post-fs-data.sh').write_text('# altered loader\n')
-                elif changed == 'kernel':
-                    (artifact / 'gki/Image').write_bytes(b'other kernel')
-                elif changed == 'revision':
-                    report['kernelsu_next']['revision'] = 'b' * 40
-                elif changed == 'allow-predicate':
-                    path = artifact / 'gki/System.map'
-                    path.write_text(path.read_text().replace('0000000000000003 T __ksu_is_allow_uid_for_current\n', ''))
-                else:
-                    (artifact / 'platform-addon/kernel.notes.sha256').write_text('0' * 64 + '\n')
+                path = artifact / 'gki/kernel_aarch64_dot_config'
+                path.write_text(''.join(line + '\n' for line in path.read_text().splitlines()
+                                        if not line.startswith(changed + '=')))
+                with self.assertRaises(ValueError):
+                    self.verify(artifact, report, inputs)
+
+    def test_each_enabled_susfs_hook_and_kernelsu_are_required(self):
+        configs = {'CONFIG_KSU': 'y', **{name: value for name, value in features.manifest()['configs'].items()
+                   if name.startswith('CONFIG_KSU_SUSFS') and value == 'y'}}
+        for missing in configs:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                artifact, _, inputs = self.fixture(Path(temporary))
+                config = artifact / 'gki/kernel_aarch64_dot_config'
+                config.write_text(config.read_text().replace(missing + '=y\n', missing + '=n\n'))
                 with patch.object(features, 'INPUTS', inputs), self.assertRaises(ValueError):
-                    features.verify_artifact(artifact, report)
+                    features.verify_builtin(artifact / 'gki')
+
+    def test_vendor_source_bytes_and_locked_vendor_hash_must_agree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact, _, inputs = self.fixture(Path(temporary))
+            lock = json.loads((inputs / 'lock.json').read_text())['susfs']
+            name = next(iter(lock['files']))
+            source = inputs / name
+            source.write_bytes(source.read_bytes() + b'\n/* changed vendor source */\n')
+            with patch.object(features, 'INPUTS', inputs), self.assertRaises(ValueError):
+                features.verify_builtin(artifact / 'gki')
+
+    def test_invalid_source_provenance_hash_or_incomplete_vendor_inventory_reject(self):
+        for changed in ('implementation', 'revision', 'version', 'hash', 'inventory'):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                artifact, _, inputs = self.fixture(Path(temporary))
+                lock_path = inputs / 'lock.json'
+                lock = json.loads(lock_path.read_text())
+                pin = lock['susfs']
+                if changed == 'implementation':
+                    pin['implementation'] = 'official-next-dev-lkm'
+                elif changed == 'revision':
+                    pin['revision'] = 'unresolved-branch'
+                elif changed == 'version':
+                    pin['version'] = 'v2.3.0'
+                elif changed == 'hash':
+                    pin['files'][next(iter(pin['files']))] = 'f' * 64
+                else:
+                    del pin['files']['vendor/susfs/fs/susfs.c']
+                lock_path.write_text(json.dumps(lock))
+                with patch.object(features, 'INPUTS', inputs), self.assertRaises(ValueError):
+                    features.verify_builtin(artifact / 'gki')
+
+    def test_forged_builtin_source_or_capability_receipts_reject(self):
+        for field, value in (('implementation', 'official-next-dev-lkm'), ('built_in', False),
+                             ('source_revision', 'f' * 40), ('source_sha256', 'f' * 64),
+                             ('version', 'v2.3.0'), ('runtime_verified', True)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                artifact, report, inputs = self.fixture(Path(temporary))
+                report['susfs'][field] = value
+                with self.assertRaises(ValueError):
+                    self.verify(artifact, report, inputs)
+
+    def test_changed_source_inputs_verifiers_and_kernelsu_pins_reject(self):
+        for changed in ('manifest', 'vendor', 'feature-verifier', 'core-verifier', 'revision',
+                        'upstream-revision', 'kernelsu-sha256'):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                artifact, report, inputs = self.fixture(Path(temporary))
+                if changed == 'manifest':
+                    (artifact / 'inputs/features/manifest.json').write_text('{}\n')
+                elif changed == 'vendor':
+                    lock = json.loads((inputs / 'lock.json').read_text())['susfs']
+                    name = next(iter(lock['files']))
+                    (artifact / 'inputs/features' / name).write_bytes(b'altered vendor source')
+                elif changed == 'feature-verifier':
+                    (artifact / 'inputs/features.py').write_text('# altered feature verifier\n')
+                elif changed == 'core-verifier':
+                    (artifact / 'inputs/verify_modules.py').write_text('# altered verifier\n')
+                else:
+                    field = {'revision': 'revision', 'upstream-revision': 'upstream_revision',
+                             'kernelsu-sha256': 'sha256'}[changed]
+                    report['kernelsu_next'][field] = 'f' * (64 if field == 'sha256' else 40)
+                with self.assertRaises(ValueError):
+                    self.verify(artifact, report, inputs)
+
+    def test_stale_addon_inventory_module_or_loader_reject(self):
+        for changed in ('inventory', 'module', 'loader'):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                artifact, report, inputs = self.fixture(Path(temporary))
+                if changed == 'inventory':
+                    report['platform_addon_verification'] = [{'module': 'susfs_guard_lkm.ko'}]
+                else:
+                    (artifact / 'platform-addon').mkdir()
+                    name = 'susfs_guard_lkm.ko' if changed == 'module' else 'post-fs-data.sh'
+                    (artifact / 'platform-addon' / name).write_bytes(b'stale LKM addon')
+                with self.assertRaises(ValueError):
+                    self.verify(artifact, report, inputs)
 
     def test_recorded_success_cannot_admit_newly_protected_actual_core_exports(self):
         with tempfile.TemporaryDirectory() as temporary:
             artifact, report, inputs = self.fixture(Path(temporary))
-            (artifact / 'gki/vmlinux').write_bytes(addon_elf(linked_kernel=True, core_protected=True))
-            with patch.object(features, 'INPUTS', inputs), self.assertRaisesRegex(ValueError, 'protected core export'):
-                features.verify_artifact(artifact, report)
+            (artifact / 'gki/vmlinux').write_bytes(core_elf(linked_kernel=True, core_protected=True))
+            with self.assertRaisesRegex(ValueError, 'protected core export'):
+                self.verify(artifact, report, inputs)
 
-    def test_changed_core_verifier_or_forged_admission_receipt_rejects(self):
-        for changed in ('verifier', 'receipt'):
-            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
-                artifact, report, inputs = self.fixture(Path(temporary))
-                if changed == 'verifier':
-                    (artifact / 'inputs/verify_modules.py').write_text('# altered verifier\n')
-                else:
-                    report['core_import_admission_validation']['core_imports_checked'] = 0
-                with patch.object(features, 'INPUTS', inputs), self.assertRaises(ValueError):
-                    features.verify_artifact(artifact, report)
+    def test_forged_core_admission_receipt_rejects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact, report, inputs = self.fixture(Path(temporary))
+            report['core_import_admission_validation']['core_imports_checked'] = 0
+            with self.assertRaises(ValueError):
+                self.verify(artifact, report, inputs)
+
+    def test_kernel_note_hash_remains_independent_of_addon_packaging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            kernel = Path(temporary) / 'vmlinux'
+            kernel.write_bytes(core_elf(linked_kernel=True))
+            self.assertEqual(features.kernel_notes_hash(kernel), features.sha(b'fixture linker notes'))
 
 
 if __name__ == '__main__':

@@ -1,15 +1,17 @@
 # Onyx kernel feature profiles
 
-Both profiles include the same peripheral support, KernelSU Next dev, a matched
-SUSFS LKM from that exact Next commit, NoMount's kernel backend, OverlayFS for
+Both profiles include the same peripheral support, KernelSU Next from the
+synchronized `pershoot/dev-susfs` fork, built-in SUSFS v2.4.0, NoMount's kernel
+backend, OverlayFS for
 Mountify, Baseband Guard, WireGuard, BBRv1/BBRv3 and the other TCP algorithms,
 IPSet, IPv6 NAT, TTL/hop-limit targets, connection marking, CAKE, CIFS xattrs,
 TMPFS xattrs/ACLs, BPF/BTF/tracing/FUSE-BPF, NTSync, USB DVD emulation, Unicode
 basename protection during file creation and Droidspaces' required namespaces/IPC support.
 
 `manifest.json` is the canonical feature/configuration/profile inventory.
-`lock.json` binds NoMount's source archive; SUSFS always follows
-`../kernelsu-lock.json`, rather than an independently selected source revision.
+`lock.json` binds NoMount's source archive and WildKernels' Android 17 / 6.18
+SUSFS v2.4.0 source, patch and local compatibility files. `../kernelsu-lock.json`
+separately pins the `dev-susfs` integration and its included official Next dev base.
 The ordered, hash-bound patches reproduce the committed Common source snapshot.
 Conflicting upstream updates stop the tracker and preserve the accepted source.
 
@@ -34,20 +36,32 @@ the selected metamodule and reboot before installing the other. For Mountify's
 KernelSU unmount integration, use its documented `MOUNT_DEVICE_NAME="KSU"` option.
 A future NoMount module requiring a newer API needs a matching kernel update.
 
-## Activating SUSFS
+## Built-in SUSFS
 
-The build adapter preserves the official SUSFS Makefile and adds its required
-Android GKI filesystem namespace declaration. Install the release's SUSFS
-KernelSU addon for the selected profile. It uses
-Next's `ksud insmod` special loader and checks the running kernel's linker-note
-fingerprint as well as its version. This also rejects old addons after a
-KernelSU-only update that leaves the kernel version unchanged.
-Ordinary `modules.load`/modprobe must not load this module: it resolves private
-kernel symbols through the official Next loader. The addon checks the reported
-active hooks at boot and records its result in `runtime-status.txt`.
-Use a compatible [SUSFS configuration module](https://github.com/sidex15/susfs4ksu-module/releases)
-to configure hiding rules. Classic in-built SUSFS must not be combined with
-this LKM implementation. Reported hook activation needs separate behavioral tests.
+The pinned WildKernels integration adds SUSFS to `common/fs` and the kernel's
+filesystem hooks. Both profiles select `CONFIG_KSU=y`, `CONFIG_KSU_SUSFS=y`
+and the enabled SUSFS features in `manifest.json`. They use the same v2.4.0
+source and compile it into each kernel image.
+
+No `susfs_guard_lkm.ko`, special loader or matched SUSFS addon ZIP is required.
+A source-built ROM includes this implementation in its kernel. The optional
+[SUSFS configuration module](https://github.com/sidex15/susfs4ksu-module/releases)
+can configure hiding rules; its userspace configuration role is separate from
+the former LKM loader addon.
+
+Artifact verification checks the exact vendor-source inventory and hashes,
+required configuration, linked kernel entry points and recorded KernelSU/SUSFS
+pins. It rejects stale standalone addon files. These checks record
+`runtime_verified: false`; active hooks and hiding behavior need device tests.
+As of **2026-11-19**, the new built-in kernel has not yet been compiled or tested
+on the development phone.
+
+### Earlier LKM releases — before the 2026-11-19 transition
+
+Earlier releases used official Next's standalone SUSFS LKM and a matching
+KernelSU special-loader addon bound to the exact kernel build. Their published
+runtime results and addon downloads describe that implementation. They do not
+establish runtime behavior for the new built-in v2.4.0 kernel.
 
 ## Building
 
