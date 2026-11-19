@@ -90,17 +90,21 @@ class BuildCache(unittest.TestCase):
                 build_cache.saved('owner/repo', key.replace('v4', epoch),
                                   lambda _: self.fail('Invalid cache keys cannot reach GitHub'))
 
-    def test_workflow_executes_uncached_dual_profiles_and_retains_legacy_cache_flags(self):
+    def test_workflow_executes_one_profile_per_runner_and_retains_legacy_cache_flags(self):
         workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/build.yml').read_text()
-        section = workflow.split('      - name: Build both matched kernel', 1)[1].split(
-            '      - name: Verify both variants', 1)[0]
-        script = textwrap.dedent(section.split('        run: |\n', 1)[1])
+        feature = workflow.split('      - name: Build the selected matched kernel', 1)[1].split(
+            '      - name: Verify and archive the compiler output', 1)[0]
+        legacy = workflow.split('      - name: Build legacy kernel and modules', 1)[1].split(
+            '      - name: Download both current-run', 1)[0]
         required = 30 * 1024**3
-        for features, supported, diagnostic, available in [
-                (True, True, False, required), (True, True, True, required * 2),
-                (True, True, False, required - 1), (False, True, True, 1),
-                (False, False, False, 1)]:
-            with self.subTest(features=features, supported=supported, diagnostic=diagnostic), \
+        for variant, supported, diagnostic, available in [
+                ('balanced', True, False, required), ('performance', True, True, required * 2),
+                ('balanced', True, False, required - 1), ('legacy', True, True, 1),
+                ('legacy', False, False, 1)]:
+            features = variant != 'legacy'
+            section = feature if features else legacy
+            script = textwrap.dedent(section.split('        run: |\n', 1)[1])
+            with self.subTest(variant=variant, supported=supported, diagnostic=diagnostic), \
                     tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 port = root / 'source/port'
@@ -112,9 +116,6 @@ class BuildCache(unittest.TestCase):
                     'printf "Avail\\n%s\\n" "$FEATURE_TEST_AVAILABLE"\n'
                     'else printf "fixture filesystem\\n"; fi\n')
                 (commands / 'df').chmod(0o755)
-                if features:
-                    (port / 'features').mkdir()
-                    (port / 'features/manifest.json').write_text('{}')
                 records, outputs = root / 'calls.jsonl', root / 'github-output'
                 help_text = '--cache-dir' if supported else '--jobs'
                 (port / 'build.py').write_text(textwrap.dedent(f'''\
@@ -128,7 +129,7 @@ class BuildCache(unittest.TestCase):
                             output.write(json.dumps(sys.argv[1:]) + '\\n')
                     '''))
                 environment = {'PATH': str(commands) + os.pathsep + os.defpath,
-                               'FEATURE_TEST_AVAILABLE': str(available),
+                               'FEATURE_TEST_AVAILABLE': str(available), 'VARIANT': variant,
                                'DIAGNOSTIC': str(diagnostic).lower(),
                                'RUNNER_TEMP': str(root / 'temporary'), 'GITHUB_OUTPUT': str(outputs),
                                'KONOHA_BUILD_JOBS': '3', 'KONOHA_BUILD_MEMORY_MB': '8192'}
@@ -141,29 +142,26 @@ class BuildCache(unittest.TestCase):
                     continue
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = [json.loads(line) for line in records.read_text().splitlines()]
-                self.assertEqual(len(calls), 2 if features else 1)
-                for call in calls:
-                    self.assertEqual(call[call.index('--jobs') + 1], '3')
-                    self.assertEqual(call[call.index('--memory-mb') + 1], '8192')
-                    self.assertEqual('--qdss-diagnostic' in call, diagnostic)
-                    self.assertEqual('--cache-dir' in call, not features and supported)
+                self.assertEqual(len(calls), 1)
+                call = calls[0]
+                self.assertEqual(call[call.index('--jobs') + 1], '3')
+                self.assertEqual(call[call.index('--memory-mb') + 1], '8192')
+                self.assertEqual('--qdss-diagnostic' in call, diagnostic)
+                self.assertEqual('--cache-dir' in call, not features and supported)
                 recorded = outputs.read_text() if outputs.exists() else ''
                 if features:
-                    self.assertEqual([call[call.index('--variant') + 1] for call in calls],
-                                     ['balanced', 'performance'])
-                    self.assertTrue(all('--bazel-batch' in call for call in calls))
-                    self.assertEqual(recorded.strip(), 'cache_enabled=false')
+                    self.assertEqual(call[call.index('--variant') + 1], variant)
+                    self.assertIn('--bazel-batch', call)
+                    self.assertEqual(recorded, '')
                 elif supported:
-                    self.assertEqual(calls[0][calls[0].index('--cache-dir') + 1],
-                                     str(root / 'temporary/kleaf-cache'))
+                    self.assertEqual(call[call.index('--cache-dir') + 1], str(root / 'temporary/kleaf-cache'))
                     self.assertEqual(recorded.strip(), 'cache_enabled=true')
-
-        # Restoring a large prior local-mode cache would consume disk even when
-        # the two-profile compile command itself is correctly sandboxed.
+        compiler = workflow.split('  compile:\n', 1)[1].split('  build:\n', 1)[0]
+        self.assertNotIn('actions/cache/', compiler)
         for label in ('Restore Kleaf incremental build cache',
                       'Restore independent compiler cache files and timestamps'):
             step = workflow.split('      - name: ' + label, 1)[1].split('      - name:', 1)[0]
-            self.assertIn("if: steps.source.outputs.feature_variants != 'true'", step)
+            self.assertIn("if: needs.resolve.outputs.feature_variants != 'true'", step)
 
     def test_cleanup_follows_upload_and_shutdown_and_save_is_confirmed(self):
         workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/build.yml').read_text()
@@ -172,7 +170,7 @@ class BuildCache(unittest.TestCase):
         offsets = [workflow.index(label) for label in labels]
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn('python3 ci/build_cache.py confirm "$CACHE_KEY"', workflow)
-        self.assertLess(workflow.index('python3 ci/build_cache.py restore'), workflow.index('name: Build both matched kernel'))
+        self.assertLess(workflow.index('python3 ci/build_cache.py restore'), workflow.index('name: Build legacy kernel and modules'))
         self.assertEqual(workflow.count('${{ runner.temp }}/kleaf-cache-links.json'), 2)
 
     def test_missing_manifest_is_only_allowed_for_a_cold_cache_miss(self):

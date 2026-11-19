@@ -29,7 +29,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: build-${{ inputs.source_ref || 'android17-6.18-lts' }}-${{ inputs.diagnostic || false }}
+  group: build-parallel-v1-${{ inputs.source_ref || 'android17-6.18-lts' }}-${{ inputs.diagnostic || false }}
   cancel-in-progress: false
 
 env:
@@ -37,55 +37,60 @@ env:
   KONOHA_SOURCE_ROOT: ${{ github.workspace }}/source
 
 jobs:
-  build:
+  resolve:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 15
     outputs:
-      kernel_revision: ${{ steps.export.outputs.kernel_revision }}
-      kernelsu_revision: ${{ steps.export.outputs.kernelsu_revision }}
-      source_revision: ${{ steps.source.outputs.revision }}
-      artifact_name: ${{ steps.export.outputs.artifact_name }}
-      build_attempt: ${{ steps.export.outputs.build_attempt }}
+      source_revision: ${{ steps.inputs.outputs.source_revision }}
+      automation_revision: ${{ steps.inputs.outputs.automation_revision }}
+      kernelsu_revision: ${{ steps.inputs.outputs.kernelsu_revision }}
+      feature_variants: ${{ steps.inputs.outputs.feature_variants }}
     steps:
       - name: Checkout CI automation
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Checkout selected source
+      - name: Checkout selected source once
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_revision || inputs.source_ref || 'android17-6.18-lts' }}
           path: source
-      - name: Resolve CI automation commit
-        id: automation
-        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Resolve source commit
-        id: source
-        run: |
-          echo "revision=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          if [[ -f source/port/features/manifest.json ]]; then
-            echo "feature_variants=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "feature_variants=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Resolve immutable build inputs
+        id: inputs
+        env:
+          EXPECTED_KERNELSU_REVISION: ${{ inputs.kernelsu_revision }}
+        run: python3 ci/build_inputs.py --expected-kernelsu "$EXPECTED_KERNELSU_REVISION"
       - name: Mark source build pending
         env:
           GH_TOKEN: ${{ github.token }}
-          REVISION: ${{ steps.source.outputs.revision }}
+          REVISION: ${{ steps.inputs.outputs.source_revision }}
         run: python3 ci/post_status.py "$REVISION" pending
-      - name: Verify committed KernelSU build input
-        env:
-          EXPECTED_KERNELSU_REVISION: ${{ inputs.kernelsu_revision }}
-        run: python3 ci/kernelsu_lock.py --expected "$EXPECTED_KERNELSU_REVISION"
       - name: Validate automation
         run: python3 -m unittest discover -s ci/tests -v
-      - name: Set up the pinned recovery helper compiler
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+
+  compile:
+    needs: resolve
+    if: needs.resolve.outputs.feature_variants == 'true'
+    name: Compile ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        variant: [balanced, performance]
+    steps:
+      - name: Checkout pinned CI automation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          go-version: '1.25.4'
-          cache: false
-      - name: Verify recovery helper sources, binaries and regression cases
-        run: |
-          python3 ci/recovery/check_tools.py --rebuild-engine
-          go -C ci/recovery/engine test ./...
+          ref: ${{ needs.resolve.outputs.automation_revision }}
+      - name: Checkout pinned source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_revision }}
+          path: source
+      - name: Verify resolved KernelSU build input
+        env:
+          EXPECTED_KERNELSU_REVISION: ${{ needs.resolve.outputs.kernelsu_revision }}
+        run: python3 ci/kernelsu_lock.py --expected "$EXPECTED_KERNELSU_REVISION"
       - name: Prepare standard hosted runner
         run: bash ci/bootstrap_runner.sh
       - name: Sync locked kernel and vendor sources
@@ -103,8 +108,128 @@ jobs:
             python3 source/port/verify_mi_thermal.py \
               "$RUNNER_TEMP/konoha-workspace/onyx/drivers/thermal/xiaomi/mi_thermal_interface.c"
           fi
+      - name: Build the selected matched kernel and module variant
+        env:
+          VARIANT: ${{ matrix.variant }}
+          DIAGNOSTIC: ${{ inputs.diagnostic || false }}
+          KONOHA_CI_REVISION: ${{ needs.resolve.outputs.automation_revision }}
+        run: |
+          flags=()
+          if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--qdss-diagnostic); fi
+          available=$(df --output=avail -B1 "$RUNNER_TEMP/konoha-workspace" | tail -1)
+          if (( available < 30 * 1024 * 1024 * 1024 )); then
+            echo 'At least 30 GiB free disk is required before a feature build.' >&2
+            df -h "$RUNNER_TEMP/konoha-workspace"
+            exit 1
+          fi
+          python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" --variant "$VARIANT" --bazel-batch \
+            --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
+      - name: Verify and archive the compiler output
+        id: transfer
+        env:
+          VARIANT: ${{ matrix.variant }}
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          CI_REVISION: ${{ needs.resolve.outputs.automation_revision }}
+          KERNELSU_REVISION: ${{ needs.resolve.outputs.kernelsu_revision }}
+        run: |
+          python3 ci/matrix_artifacts.py pack "$RUNNER_TEMP/konoha-workspace" compiler-output \
+            --variant "$VARIANT" --source-revision "$SOURCE_REVISION" \
+            --automation-revision "$CI_REVISION" --kernelsu-revision "$KERNELSU_REVISION"
+      - name: Upload the verified compiler output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.transfer.outputs.artifact_name }}
+          path: compiler-output/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload compiler failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failed-build-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/konoha-workspace/artifacts/*/build.log
+            ${{ runner.temp }}/konoha-workspace/artifacts/*/common-fixes/receipt.json
+            source/port/validation/clock_suspend_resume/platform-remove-validation.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  build:
+    needs: [resolve, compile]
+    if: ${{ always() && needs.resolve.result == 'success' && (needs.compile.result == 'success' || needs.compile.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      kernel_revision: ${{ steps.export.outputs.kernel_revision }}
+      kernelsu_revision: ${{ steps.export.outputs.kernelsu_revision }}
+      source_revision: ${{ steps.source.outputs.revision }}
+      artifact_name: ${{ steps.export.outputs.artifact_name }}
+      build_attempt: ${{ steps.export.outputs.build_attempt }}
+    steps:
+      - name: Checkout CI automation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.automation_revision }}
+      - name: Checkout selected source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_revision }}
+          path: source
+      - name: Resolve CI automation commit
+        id: automation
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Resolve source commit
+        id: source
+        run: |
+          echo "revision=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -f source/port/features/manifest.json ]]; then
+            echo "feature_variants=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "feature_variants=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify committed KernelSU build input
+        env:
+          EXPECTED_KERNELSU_REVISION: ${{ needs.resolve.outputs.kernelsu_revision }}
+        run: python3 ci/kernelsu_lock.py --expected "$EXPECTED_KERNELSU_REVISION"
+      - name: Set up the pinned recovery helper compiler
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.4'
+          cache: false
+      - name: Verify recovery helper sources, binaries and regression cases
+        run: |
+          python3 ci/recovery/check_tools.py --rebuild-engine
+          go -C ci/recovery/engine test ./...
+      - name: Install module metadata reader for bundle assembly
+        if: needs.resolve.outputs.feature_variants == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends kmod
+      - name: Prepare standard hosted runner
+        if: needs.resolve.outputs.feature_variants != 'true'
+        run: bash ci/bootstrap_runner.sh
+      - name: Sync locked kernel and vendor sources
+        if: needs.resolve.outputs.feature_variants != 'true'
+        run: python3 source/port/prepare.py "$RUNNER_TEMP/konoha-workspace" --jobs 4
+      - name: Replay patches and verify complete committed kernel and module sources
+        if: needs.resolve.outputs.feature_variants != 'true'
+        run: |
+          python3 source/port/stage.py "$RUNNER_TEMP/konoha-workspace"
+          python3 ci/snapshot.py "$RUNNER_TEMP/konoha-workspace/onyx"
+          python3 ci/snapshot_common.py "$RUNNER_TEMP/konoha-workspace"
+      - name: Verify CoreSight lifecycle correction
+        if: needs.resolve.outputs.feature_variants != 'true'
+        run: python3 source/port/validation/clock_suspend_resume/verify_platform_remove.py "$RUNNER_TEMP/konoha-workspace"
+      - name: Verify Xiaomi thermal control and cleanup
+        if: needs.resolve.outputs.feature_variants != 'true'
+        run: |
+          if [[ -f source/port/verify_mi_thermal.py ]]; then
+            python3 source/port/verify_mi_thermal.py \
+              "$RUNNER_TEMP/konoha-workspace/onyx/drivers/thermal/xiaomi/mi_thermal_interface.c"
+          fi
       - name: Restore Kleaf incremental build cache
-        if: steps.source.outputs.feature_variants != 'true'
+        if: needs.resolve.outputs.feature_variants != 'true'
         id: kleaf-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -117,40 +242,42 @@ jobs:
           restore-keys: |
             kleaf-v4-${{ runner.os }}-${{ hashFiles('source/port/dependency-lock.xml', 'source/common/arch/arm64/configs/gki_defconfig', 'source/port/platform_defconfig', 'source/port/features/manifest.json') }}-${{ inputs.diagnostic || false }}-
       - name: Restore independent compiler cache files and timestamps
-        if: steps.source.outputs.feature_variants != 'true'
+        if: needs.resolve.outputs.feature_variants != 'true'
         env:
           CACHE_MATCHED_KEY: ${{ steps.kleaf-cache.outputs.cache-matched-key }}
         run: python3 ci/build_cache.py restore
-      - name: Build both matched kernel and module variants with the same committed sources
+      - name: Build legacy kernel and modules
+        if: needs.resolve.outputs.feature_variants != 'true'
         id: compile
         env:
           DIAGNOSTIC: ${{ inputs.diagnostic || false }}
-          KONOHA_CI_REVISION: ${{ steps.automation.outputs.revision }}
+          KONOHA_CI_REVISION: ${{ needs.resolve.outputs.automation_revision }}
         run: |
           flags=()
           if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--qdss-diagnostic); fi
-          if [[ -f source/port/features/manifest.json ]]; then
-            # Local-mode Kleaf copies consumed 49 GiB for one feature profile.
-            # Keep dual builds sandboxed without retaining those per-module trees.
-            echo "cache_enabled=false" >> "$GITHUB_OUTPUT"
-            available=$(df --output=avail -B1 "$RUNNER_TEMP/konoha-workspace" | tail -1)
-            if (( available < 30 * 1024 * 1024 * 1024 )); then
-              echo 'At least 30 GiB free disk is required before dual feature builds.' >&2
-              df -h "$RUNNER_TEMP/konoha-workspace"
-              exit 1
-            fi
-            for variant in balanced performance; do
-              python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" --variant "$variant" --bazel-batch \
-                --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
-            done
-          else
-            if python3 source/port/build.py --help | grep -q -- --cache-dir; then
-              flags+=(--cache-dir "$RUNNER_TEMP/kleaf-cache")
-              echo "cache_enabled=true" >> "$GITHUB_OUTPUT"
-            fi
-            python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" \
-              --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
+          if python3 source/port/build.py --help | grep -q -- --cache-dir; then
+            flags+=(--cache-dir "$RUNNER_TEMP/kleaf-cache")
+            echo "cache_enabled=true" >> "$GITHUB_OUTPUT"
           fi
+          python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" \
+            --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
+      - name: Download both current-run compiler artifacts
+        if: needs.resolve.outputs.feature_variants == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: Onyx-GKI-Input-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: compiler-inputs
+          merge-multiple: false
+      - name: Reverify and collect both pinned compiler outputs
+        if: needs.resolve.outputs.feature_variants == 'true'
+        env:
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          CI_REVISION: ${{ needs.resolve.outputs.automation_revision }}
+          KERNELSU_REVISION: ${{ needs.resolve.outputs.kernelsu_revision }}
+        run: |
+          python3 ci/matrix_artifacts.py collect compiler-inputs "$RUNNER_TEMP/konoha-workspace" \
+            --source-revision "$SOURCE_REVISION" --automation-revision "$CI_REVISION" \
+            --kernelsu-revision "$KERNELSU_REVISION"
       - name: Verify both variants and export their complete matched bundles
         id: export
         run: python3 ci/export_artifacts.py "$RUNNER_TEMP/konoha-workspace" artifacts
@@ -201,17 +328,37 @@ jobs:
             source/port/validation/clock_suspend_resume/platform-remove-validation.json
           retention-days: 7
           if-no-files-found: warn
-      - name: Record source commit status
-        if: always() && steps.source.outcome == 'success'
+
+  status:
+    needs: [resolve, compile, build]
+    if: ${{ always() && needs.resolve.outputs.source_revision != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout pinned status reporter
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.automation_revision }}
+      - name: Record complete source build result
         env:
           GH_TOKEN: ${{ github.token }}
-          REVISION: ${{ steps.source.outputs.revision }}
-          BUILD_STATUS: ${{ job.status }}
-        run: python3 ci/post_status.py "$REVISION" "$BUILD_STATUS"
+          REVISION: ${{ needs.resolve.outputs.source_revision }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          COMPILE_RESULT: ${{ needs.compile.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          state=failure
+          if [[ "$RESOLVE_RESULT" == success && "$BUILD_RESULT" == success && \
+                ( "$COMPILE_RESULT" == success || "$COMPILE_RESULT" == skipped ) ]]; then
+            state=success
+          elif [[ "$RESOLVE_RESULT" == cancelled || "$COMPILE_RESULT" == cancelled || "$BUILD_RESULT" == cancelled ]]; then
+            state=cancelled
+          fi
+          python3 ci/post_status.py "$REVISION" "$state"
 
   release:
     needs: build
-    if: github.ref == 'refs/heads/ci' && (inputs.source_ref == '' || inputs.source_ref == 'android17-6.18-lts' || startsWith(inputs.source_ref, 'upstream/')) && inputs.diagnostic != true
+    if: ${{ always() && needs.build.result == 'success' && github.ref == 'refs/heads/ci' && (inputs.source_ref == '' || inputs.source_ref == 'android17-6.18-lts' || startsWith(inputs.source_ref, 'upstream/')) && inputs.diagnostic != true }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     concurrency:

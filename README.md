@@ -2,7 +2,8 @@
 
 This repository contains the complete POCO F7 (Onyx/SM8735) module port and a
 reproducible GKI build recipe. It tracks Google's `android17-6.18-lts` branch
-and fetches the official **KernelSU Next `dev` branch on every build**.
+and tracks the official **KernelSU Next `dev` branch**, freezing its exact source
+revision in the committed build lock.
 
 Feature-enabled source builds produce **Balanced** and **Performance** variants
 from the same committed GKI, KernelSU and feature inputs. Each variant has a
@@ -113,13 +114,25 @@ rebuilds manual source-branch changes, checking out the exact detected commit.
 Active and successful builds for the same detected inputs are deduplicated.
 Failed or cancelled builds can retry up to three times; further automatic attempts
 require changed inputs. Manual workflow runs remain available for source repairs.
-KernelSU Next is fetched from dev at build time; the release records the revision
-actually built if dev advances between detection and compilation.
+The tracker freezes the selected KernelSU Next dev revision in the source lock;
+all runners use that exact revision even if dev advances during compilation.
 
-Builds use standard `ubuntu-24.04` GitHub-hosted runners with build dependencies,
-swap, persistent compilation caches, artifact and ABI uploads. The 6.18 build uses pinned Android Kleaf/Clang/Rust instead of the
-6.6 build script. Build parallelism follows the runner's available CPUs (up to
-four), with 3,000 MB reserved for the OS.
+Feature builds first resolve the source, CI and KernelSU commits once, then run
+Balanced and Performance concurrently on separate `ubuntu-24.04` GitHub-hosted
+runners (`max-parallel: 2`, `fail-fast: false`). Each runner builds one kernel
+and its matching modules. Its verified archive is bound to the same source and
+CI commits, KernelSU lock, workflow run and attempt. The final `build` job
+requires both compiler jobs to succeed, independently rechecks both downloaded
+archives, then assembles the complete installers and combined release bundle.
+Missing, mixed or stale compiler outputs cannot produce a release. The existing
+release-recovery workflow still consumes that complete attempt-specific bundle.
+
+Each compiler has its own dependencies, swap and disk budget; feature builds use
+sandbox mode without retaining the optional local-mode Kleaf cache copies.
+Legacy single-profile builds retain their persistent compilation cache.
+The 6.18 build uses pinned Android Kleaf/Clang/Rust instead of the 6.6 build script.
+Build parallelism follows each runner's available CPUs (up to four), with
+3,000 MB reserved for the OS.
 Runner cleanup must leave at least 55 GiB free before source sync; bounded
 swap allocation fails visibly if space is unavailable. No persistent secrets
 are needed. Repository Actions must be allowed to create pull requests.
