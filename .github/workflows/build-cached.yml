@@ -1,0 +1,353 @@
+name: Cached Android 17 6.18 variant builds
+run-name: Cached ${{ inputs.source_ref }}${{ inputs.source_revision && format(' @ {0}', inputs.source_revision) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source branch, tag or commit
+        type: string
+        default: android17-6.18-lts
+      source_revision:
+        description: Exact source commit (blank resolves source_ref once)
+        type: string
+        default: ''
+      kernelsu_revision:
+        description: Expected committed KernelSU lock (blank uses the source lock)
+        type: string
+        default: ''
+      diagnostic:
+        description: Include the opt-in AMBA/QDSS diagnostic build
+        type: boolean
+        default: false
+      compiler_cache_mib:
+        description: Maximum compiler cache per variant in MiB
+        type: number
+        default: 3072
+      toolchain_cache_mib:
+        description: Maximum pinned toolchain Git objects in MiB
+        type: number
+        default: 2560
+      source_cache_mib:
+        description: Maximum pinned source Git objects in MiB
+        type: number
+        default: 1024
+      repository_cache_budget_mib:
+        description: Existing repository cache storage budget in MiB (does not change billing)
+        type: number
+        default: 10240
+
+permissions:
+  contents: read
+  actions: read
+
+# Separate from the release workflow; it never cancels that workflow's runs.
+concurrency:
+  group: onyx-cached-variants-v1
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  KONOHA_SOURCE_ROOT: ${{ github.workspace }}/source
+  ONYX_COMPILER_CACHE_MIB: ${{ inputs.compiler_cache_mib }}
+  ONYX_TOOLCHAINS_CACHE_MIB: ${{ inputs.toolchain_cache_mib }}
+  ONYX_SOURCES_CACHE_MIB: ${{ inputs.source_cache_mib }}
+  ONYX_BUDGET_CACHE_MIB: ${{ inputs.repository_cache_budget_mib }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      source_revision: ${{ steps.inputs.outputs.source_revision }}
+      automation_revision: ${{ steps.inputs.outputs.automation_revision }}
+      kernelsu_revision: ${{ steps.inputs.outputs.kernelsu_revision }}
+      feature_variants: ${{ steps.inputs.outputs.feature_variants }}
+    steps:
+      - name: Checkout CI automation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout selected source once
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_revision || inputs.source_ref || 'android17-6.18-lts' }}
+          path: source
+      - name: Resolve immutable build inputs
+        id: inputs
+        env:
+          EXPECTED_KERNELSU_REVISION: ${{ inputs.kernelsu_revision }}
+        run: python3 ci/build_inputs.py --expected-kernelsu "$EXPECTED_KERNELSU_REVISION"
+      - name: Validate automation
+        run: python3 -m unittest discover -s ci/tests -v
+      - name: Validate declared cache bounds
+        run: python3 -c 'import sys; sys.path.insert(0, "ci"); from bounded_cache import budgets; print(budgets())'
+      - name: Require the complete two-variant source recipe
+        env:
+          FEATURE_VARIANTS: ${{ steps.inputs.outputs.feature_variants }}
+        run: test "$FEATURE_VARIANTS" = true
+
+  compile:
+    needs: resolve
+    if: needs.resolve.outputs.feature_variants == 'true'
+    name: Cached compile ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        variant: [balanced, performance]
+    steps:
+      - name: Checkout pinned CI automation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.automation_revision }}
+      - name: Checkout pinned source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_revision }}
+          path: source
+      - name: Verify resolved KernelSU build input
+        env:
+          EXPECTED_KERNELSU_REVISION: ${{ needs.resolve.outputs.kernelsu_revision }}
+        run: python3 ci/kernelsu_lock.py --expected "$EXPECTED_KERNELSU_REVISION"
+      - name: Prepare standard hosted runner
+        run: bash ci/bootstrap_runner.sh
+      - name: Install compiler cache engine
+        run: sudo apt-get install -y --no-install-recommends ccache
+      - name: Resolve pinned dependency cache identities
+        id: pins
+        run: python3 ci/pinned_cache.py keys
+      - name: Restore exact pinned source objects
+        id: source-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-pinned-sources
+          key: ${{ steps.pins.outputs.sources_key }}
+      - name: Restore exact pinned toolchain objects
+        id: toolchain-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-pinned-toolchains
+          key: ${{ steps.pins.outputs.toolchains_key }}
+      - name: Verify restored pins, object checksums and Git connectivity
+        env:
+          SOURCE_MATCH: ${{ steps.source-cache.outputs.cache-matched-key }}
+          TOOLCHAIN_MATCH: ${{ steps.toolchain-cache.outputs.cache-matched-key }}
+        run: |
+          python3 ci/pinned_cache.py restore --bucket sources --root "$RUNNER_TEMP/onyx-pinned-sources" \
+            --reference "$RUNNER_TEMP/onyx-reference" --matched-key "$SOURCE_MATCH"
+          python3 ci/pinned_cache.py restore --bucket toolchains --root "$RUNNER_TEMP/onyx-pinned-toolchains" \
+            --reference "$RUNNER_TEMP/onyx-reference" --matched-key "$TOOLCHAIN_MATCH"
+      - name: Sync locked kernel and vendor sources
+        run: python3 source/port/prepare.py "$RUNNER_TEMP/konoha-workspace" --jobs 4 --reference "$RUNNER_TEMP/onyx-reference"
+      - name: Prepare bounded pinned source objects
+        if: matrix.variant == 'balanced' && steps.source-cache.outputs.cache-hit != 'true'
+        run: python3 ci/pinned_cache.py save --bucket sources --root "$RUNNER_TEMP/onyx-pinned-sources" --workspace "$RUNNER_TEMP/konoha-workspace"
+      - name: Save bounded pinned source objects
+        if: matrix.variant == 'balanced' && steps.source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-pinned-sources
+          key: ${{ steps.pins.outputs.sources_key }}
+      - name: Prepare bounded pinned toolchain objects
+        if: matrix.variant == 'balanced' && steps.toolchain-cache.outputs.cache-hit != 'true'
+        run: python3 ci/pinned_cache.py save --bucket toolchains --root "$RUNNER_TEMP/onyx-pinned-toolchains" --workspace "$RUNNER_TEMP/konoha-workspace"
+      - name: Save bounded pinned toolchain objects
+        if: matrix.variant == 'balanced' && steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-pinned-toolchains
+          key: ${{ steps.pins.outputs.toolchains_key }}
+      - name: Replay patches and verify complete committed kernel and module sources
+        run: |
+          python3 source/port/stage.py "$RUNNER_TEMP/konoha-workspace"
+          python3 ci/snapshot.py "$RUNNER_TEMP/konoha-workspace/onyx"
+          python3 ci/snapshot_common.py "$RUNNER_TEMP/konoha-workspace"
+      - name: Verify CoreSight lifecycle correction
+        run: python3 source/port/validation/clock_suspend_resume/verify_platform_remove.py "$RUNNER_TEMP/konoha-workspace"
+      - name: Verify Xiaomi thermal control and cleanup
+        run: |
+          if [[ -f source/port/verify_mi_thermal.py ]]; then
+            python3 source/port/verify_mi_thermal.py \
+              "$RUNNER_TEMP/konoha-workspace/onyx/drivers/thermal/xiaomi/mi_thermal_interface.c"
+          fi
+      - name: Resolve variant compiler cache compatibility
+        id: compiler-key
+        env:
+          VARIANT: ${{ matrix.variant }}
+          DIAGNOSTIC: ${{ inputs.diagnostic }}
+        run: |
+          flags=()
+          if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--diagnostic); fi
+          python3 ci/compiler_cache.py key --variant "$VARIANT" "${flags[@]}"
+      - name: Restore separate variant compiler results
+        id: compiler-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-ccache-${{ matrix.variant }}
+          key: ${{ steps.compiler-key.outputs.key }}
+          restore-keys: ${{ steps.compiler-key.outputs.prefix }}
+      - name: Build the selected matched kernel and module variant
+        env:
+          VARIANT: ${{ matrix.variant }}
+          DIAGNOSTIC: ${{ inputs.diagnostic || false }}
+          KONOHA_CI_REVISION: ${{ needs.resolve.outputs.automation_revision }}
+        run: |
+          flags=()
+          if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--diagnostic); fi
+          available=$(df --output=avail -B1 "$RUNNER_TEMP/konoha-workspace" | tail -1)
+          if (( available < 30 * 1024 * 1024 * 1024 )); then
+            echo 'At least 30 GiB free disk is required before a feature build.' >&2
+            df -h "$RUNNER_TEMP/konoha-workspace"
+            exit 1
+          fi
+          python3 ci/compiler_cache.py build --workspace "$RUNNER_TEMP/konoha-workspace" --variant "$VARIANT" \
+            --cache "$RUNNER_TEMP/onyx-ccache-$VARIANT" --control "$RUNNER_TEMP/onyx-compiler-control" \
+            --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
+      - name: Verify and archive the compiler output
+        id: transfer
+        env:
+          VARIANT: ${{ matrix.variant }}
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          CI_REVISION: ${{ needs.resolve.outputs.automation_revision }}
+          KERNELSU_REVISION: ${{ needs.resolve.outputs.kernelsu_revision }}
+        run: |
+          python3 ci/matrix_artifacts.py pack "$RUNNER_TEMP/konoha-workspace" compiler-output \
+            --variant "$VARIANT" --source-revision "$SOURCE_REVISION" \
+            --automation-revision "$CI_REVISION" --kernelsu-revision "$KERNELSU_REVISION"
+      - name: Upload the verified compiler output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.transfer.outputs.artifact_name }}
+          path: compiler-output/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+      - name: Save bounded verified variant compiler results
+        if: success() && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-ccache-${{ matrix.variant }}
+          key: ${{ steps.compiler-key.outputs.key }}
+      - name: Confirm actual repository cache retention
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPILER_KEY: ${{ steps.compiler-key.outputs.key }}
+          SOURCE_KEY: ${{ steps.pins.outputs.sources_key }}
+          TOOLCHAIN_KEY: ${{ steps.pins.outputs.toolchains_key }}
+        run: python3 ci/cache_retention.py "$COMPILER_KEY" "$SOURCE_KEY" "$TOOLCHAIN_KEY"
+      - name: Upload cache sizes and measured compiler reuse
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cache-report-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/onyx-compiler-control/compiler-cache-report.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload compiler failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failed-build-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/konoha-workspace/artifacts/*/build.log
+            ${{ runner.temp }}/konoha-workspace/artifacts/*/common-fixes/receipt.json
+            source/port/validation/clock_suspend_resume/platform-remove-validation.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  build:
+    needs: [resolve, compile]
+    if: ${{ always() && needs.resolve.result == 'success' && needs.compile.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      kernel_revision: ${{ steps.export.outputs.kernel_revision }}
+      kernelsu_revision: ${{ steps.export.outputs.kernelsu_revision }}
+      source_revision: ${{ steps.source.outputs.revision }}
+      artifact_name: ${{ steps.export.outputs.artifact_name }}
+      build_attempt: ${{ steps.export.outputs.build_attempt }}
+    steps:
+      - name: Checkout CI automation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.automation_revision }}
+      - name: Checkout selected source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_revision }}
+          path: source
+      - name: Resolve CI automation commit
+        id: automation
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Resolve source commit
+        id: source
+        run: |
+          echo "revision=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -f source/port/features/manifest.json ]]; then
+            echo "feature_variants=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "feature_variants=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify committed KernelSU build input
+        env:
+          EXPECTED_KERNELSU_REVISION: ${{ needs.resolve.outputs.kernelsu_revision }}
+        run: python3 ci/kernelsu_lock.py --expected "$EXPECTED_KERNELSU_REVISION"
+      - name: Set up the pinned recovery helper compiler
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.4'
+          cache: false
+      - name: Verify recovery helper sources, binaries and regression cases
+        run: |
+          python3 ci/recovery/check_tools.py --rebuild-engine
+          go -C ci/recovery/engine test ./...
+      - name: Install module metadata reader for bundle assembly
+        if: needs.resolve.outputs.feature_variants == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends kmod
+      - name: Download both current-run compiler artifacts
+        if: needs.resolve.outputs.feature_variants == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: Onyx-GKI-Input-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: compiler-inputs
+          merge-multiple: false
+      - name: Reverify and collect both pinned compiler outputs
+        if: needs.resolve.outputs.feature_variants == 'true'
+        env:
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          CI_REVISION: ${{ needs.resolve.outputs.automation_revision }}
+          KERNELSU_REVISION: ${{ needs.resolve.outputs.kernelsu_revision }}
+        run: |
+          python3 ci/matrix_artifacts.py collect compiler-inputs "$RUNNER_TEMP/konoha-workspace" \
+            --source-revision "$SOURCE_REVISION" --automation-revision "$CI_REVISION" \
+            --kernelsu-revision "$KERNELSU_REVISION"
+      - name: Verify both variants and export their complete matched bundles
+        id: export
+        run: python3 ci/export_artifacts.py "$RUNNER_TEMP/konoha-workspace" artifacts
+      - name: Package verified AnyKernel and WLAN installers
+        run: python3 ci/installer_assets.py artifacts source
+      - name: Package the complete Onyx recovery installer
+        run: python3 ci/recovery_assets.py artifacts source
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.export.outputs.artifact_name }}
+          path: artifacts/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failed-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/konoha-workspace/artifacts/*/build.log
+            ${{ runner.temp }}/konoha-workspace/artifacts/*/common-fixes/receipt.json
+            source/port/validation/clock_suspend_resume/platform-remove-validation.json
+          retention-days: 7
+          if-no-files-found: warn

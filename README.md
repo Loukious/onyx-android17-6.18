@@ -317,6 +317,45 @@ complete commit to build a candidate. The `diagnostic` option adds QDSS logging.
 Leave `source_revision` and `kernelsu_revision` blank for manual builds; the
 tracker supplies them to identify exact detected inputs and suppress duplicates.
 
+## Cached workflow
+
+The separate **Cached Android 17 6.18 variant builds** workflow on `ci` is a
+manual cache-validation build. It keeps Balanced and Performance on separate
+runners and exports the same complete verified installer bundles as the release
+workflow. It does not publish releases or update the tracker's source status.
+The release workflow and its running jobs remain independent.
+
+Compiler results use separate content-addressed ccache stores, with a default
+3 GiB ceiling for each variant and automatic LRU cleanup at 2.75 GiB. This
+preserves Kleaf sandbox builds and avoids duplicating its large local Kbuild
+output directories. Ccache hashes the compiler, source, included/generated
+headers and flags; config, variant, diagnostic mode and toolchain compatibility
+are also bound to the cache identity. Ordinary driver changes can reuse the
+unchanged compilations. Rust, linking, patch replay and all source/artifact/KMI
+checks still run.
+
+Pinned dependency caches store Git objects, not duplicate toolchain working
+trees: 2.5 GiB for toolchains and 1 GiB for sources by default, shared across both
+variants. Exact locked revisions, SHA-256 file checksums and Git connectivity
+are checked before using them as `repo --reference` inputs. The largest useful
+downloads are retained first; repositories that do not fit are omitted whole
+and fetched normally. At these defaults the full Rust repository may not fit
+after Clang; this is reported explicitly.
+
+The dispatch inputs make each limit configurable and check that **both** compiler
+stores plus dependencies fit the declared repository budget, reserving 512 MiB
+for overhead. The default allocation is 9.5 GiB under GitHub's default 10 GiB
+repository cache budget. Increasing the budget input does not change GitHub's
+storage policy or billing; use it only to describe a larger budget already
+configured for the repository. Runners and workflows share that repository
+quota. Old cache generations can still be evicted by GitHub.
+
+Every compile uploads a `cache-report-<variant>-<run>-<attempt>` artifact and
+reports actual hits, misses, elapsed compilation time, cleanup counts and cache
+sizes in the job summary. Cache persistence is queried after saving so a failed
+save cannot silently look like a warm build. The first run populates the caches;
+compare a later run of the same pins to measure the real speedup.
+
 ## Local build
 
 Requirements: Linux x86-64, Git, Python 3.12+, Android `repo`, GNU patch, C
