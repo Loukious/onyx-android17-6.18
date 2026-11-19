@@ -29,6 +29,8 @@ def fixture(root):
     (original / 'bin').mkdir(parents=True)
     (original / 'AndroidVersion.txt').write_text('test compiler\nbased on r123\n')
     pinned = os.environ.get('ONYX_TEST_CLANG_DIR')
+    if pinned:
+        (original / 'lib').symlink_to(Path(pinned) / 'lib', target_is_directory=True)
     cc = str(Path(pinned) / 'bin/clang') if pinned else shutil.which('clang') or shutil.which('gcc')
     cxx = str(Path(pinned) / 'bin/clang++') if pinned else shutil.which('clang++') or shutil.which('g++')
     cc_real = str(Path(pinned) / 'bin/clang-real') if pinned else cc
@@ -64,7 +66,7 @@ class CompilerTests(unittest.TestCase):
                     stream.write('compiler_type = gcc\n')
             binary = Path(state['toolchain']) / 'bin/clang'
             (workspace / 'value.h').write_text('#define VALUE 1\n')
-            (workspace / 'sample.c').write_text('#include "value.h"\nint answer(void) {return VALUE;}\n')
+            (workspace / 'sample.c').write_text('#include <stddef.h>\n#include <stdbool.h>\n#include "value.h"\nint answer(void) {return VALUE;}\n')
             output = workspace / 'sample.o'
             command = [str(binary), '-c', '-O2', '-I.', 'sample.c', '-o', 'sample.o']
             def compile():

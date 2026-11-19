@@ -74,6 +74,10 @@ def setup(workspace, source, cache, control, variant, diagnostic=False):
     compiler_identity = {**record, 'clang_version': version,
                          'clang_binaries': {name: digest(original / 'bin' / name)
                                             for name in ('clang', 'clang++', 'clang-real', 'clang++-real')}}
+    resource_versions = sorted(p.name for p in (original / 'lib/clang').glob('*') if p.is_dir())
+    if len(resource_versions) > 1:
+        raise ValueError('Pinned Clang has ambiguous builtin resource directories')
+    compiler_identity['resource_version'] = resource_versions[0] if resource_versions else None
     identity_file.write_text(json.dumps(compiler_identity, sort_keys=True) + '\n')
     toolchain = control / 'clang'
     toolchain.mkdir()
@@ -95,9 +99,14 @@ def setup(workspace, source, cache, control, variant, diagnostic=False):
     for path in (original / 'bin').iterdir():
         target = binaries / path.name
         if path.name in ('clang', 'clang++'):
+            # Calling the original compiler by its absolute path changes Clang's
+            # automatic builtin-header directory. Keep those headers under the
+            # declared toolchain path so Bazel can validate dependency files.
+            resource = (' -resource-dir="${BASH_SOURCE[0]%/*}/../lib/clang/' + resource_versions[0] + '"'
+                        if resource_versions else '')
             target.write_text('#!/bin/bash\n'
                               'export CCACHE_CONFIGPATH=' + shlex.quote(str(config)) + '\n'
-                              'exec ' + shlex.quote(str(ccache)) + ' ' + shlex.quote(str(path)) + ' "$@"\n')
+                              'exec ' + shlex.quote(str(ccache)) + ' ' + shlex.quote(str(path)) + resource + ' "$@"\n')
             target.chmod(0o755)
         else:
             target.symlink_to(path, target_is_directory=path.is_dir())
