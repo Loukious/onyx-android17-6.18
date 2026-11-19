@@ -44,7 +44,7 @@ def build(common, output):
     imported = features.nomount_files()
     names = set(re.findall(r'^\+\+\+ b/([^\n\t]+)', upstream.read_text(), re.M))
     names |= set(imported) | {n for _, _, files in series for n in files}
-    names.add('fs/mount.h')
+    names.update(('fs/mount.h', 'include/linux/namei.h'))
     common_manifest = json.loads((PORT / 'common-patches/manifest.json').read_text())
     names.update(common_manifest['files'])
     with tempfile.TemporaryDirectory(prefix='onyx-susfs-rebuild-') as directory:
@@ -106,6 +106,7 @@ def build(common, output):
         runtime = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(runtime)
         runtime.adapt(tree)
+        runtime.adapt_namei(tree)
         # Canonicalize whitespace from imported additions while retaining the exact
         # upstream source files in the separately hashed vendor inventory.
         normalized = set(re.findall(r'^\+\+\+ b/([^\n\t]+)', upstream.read_text(), re.M))

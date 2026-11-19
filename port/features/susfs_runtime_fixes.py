@@ -1,4 +1,5 @@
 """Correct 6.18 SUSFS mark lifetime and VMA/stat hook placement before patch generation."""
+import ast
 from pathlib import Path
 import re
 
@@ -130,6 +131,119 @@ def fix_stat(source):
         '\t\t\t\tstat->result_mask |= STATX_SUS_KSTAT_FUSE;\n'
         '\t\t\t}')
     return replace_function(source, 'vfs_getattr_nosec', body)
+
+
+def flag_definitions(source, prefix):
+    """Read native flag definitions without evaluating arbitrary source text."""
+    source = re.sub(r'/\*[\s\S]*?\*/', '', source.replace('\\\n', ''))
+    definitions = {}
+    for name, value in re.findall(r'(?m)^#define\s+(' + re.escape(prefix) +
+                                  r'\w+)\s+([^\n]+)', source):
+        if name in definitions:
+            raise ValueError('Duplicate native flag: ' + name)
+        definitions[name] = value.strip()
+    if not definitions:
+        raise ValueError('Missing native flags: ' + prefix)
+    return definitions
+
+
+def flag_value(expression, definitions, seen=()):
+    """Evaluate the integer/BIT/OR forms used by the pinned flag headers."""
+    def evaluate(node):
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            return node.value
+        if isinstance(node, ast.Name) and node.id in definitions and node.id not in seen:
+            return flag_value(definitions[node.id], definitions, seen + (node.id,))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and
+                node.func.id == 'BIT' and len(node.args) == 1 and not node.keywords):
+            return 1 << evaluate(node.args[0])
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return evaluate(node.left) | evaluate(node.right)
+        raise ValueError('Unsupported native flag expression: ' + expression)
+    return evaluate(ast.parse(expression, mode='eval').body)
+
+
+def validate_namei_flags(source, native_lookup):
+    native_state = flag_definitions(source, 'ND_')
+    lookup_bit = 1 << 11
+    for name, value in native_lookup.items():
+        if flag_value(value, native_lookup) & lookup_bit:
+            raise ValueError('SUSFS private lookup bit collides with ' + name)
+    for name, value in native_state.items():
+        if flag_value(value, native_state) & (32 | 64):
+            raise ValueError('SUSFS private state bits collide with ' + name)
+    return native_state
+
+
+def fix_namei(source, native_lookup):
+    native_state = validate_namei_flags(source, native_lookup)
+    lookup_mask = ' |\n\t '.join(' | '.join(list(native_lookup)[i:i + 4])
+                                 for i in range(0, len(native_lookup), 4))
+    state_mask = ' | '.join(native_state)
+    guard = ('\n#ifdef CONFIG_KSU_SUSFS_SUS_PATH\n'
+             '/* SUSFS metadata must never enable native path-resolution restrictions. */\n'
+             'static_assert(!(ND_FLAGS_LOOKUP_LAST &\n\t(' + lookup_mask + ')));\n'
+             'static_assert(!((ND_STATE_LOOKUP_LAST | ND_STATE_OPEN_LAST) &\n'
+             '\t(' + state_mask + ')));\n'
+             'static_assert(!(ND_STATE_LOOKUP_LAST & ND_STATE_OPEN_LAST));\n'
+             '#endif\n')
+    # Guard exactly the native names seen at generation; new flags are checked
+    # before a regenerated patch can be written.
+    anchor = re.search(r'(?m)^#define ND_JUMPED[^\n]+\n', source)
+    if not anchor:
+        raise ValueError('SUSFS native nameidata state anchor changed')
+    source = source[:anchor.end()] + guard + source[anchor.end():]
+    body = function(source, '__lookup_slow')
+    body = once(body,
+        '\tbool is_nd_flags_lookup_last = (flags & ND_FLAGS_LOOKUP_LAST);',
+        '\tbool is_nd_flags_lookup_last = (flags & ND_FLAGS_LOOKUP_LAST);\n'
+        '\n\t/* Consume the private marker before filesystem lookup/revalidation. */\n'
+        '\tflags &= ~ND_FLAGS_LOOKUP_LAST;')
+    source = replace_function(source, '__lookup_slow', body)
+    body = function(source, 'walk_component')
+    body = once(body,
+        '#ifdef CONFIG_KSU_SUSFS_SUS_PATH\n'
+        '\t\tif (nd->state & ND_STATE_LOOKUP_LAST) {\n'
+        '\t\t\tnd->flags |= ND_FLAGS_LOOKUP_LAST;\n'
+        '\t\t}\n'
+        '#endif\n'
+        '\t\tdentry = lookup_slow(&nd->last, nd->path.dentry, nd->flags);',
+        '#ifdef CONFIG_KSU_SUSFS_SUS_PATH\n'
+        '\t\t/* Keep SUSFS metadata out of the persistent pathwalk flags. */\n'
+        '\t\tunsigned int lookup_flags = nd->flags;\n'
+        '\n\t\tif (nd->state & ND_STATE_LOOKUP_LAST)\n'
+        '\t\t\tlookup_flags |= ND_FLAGS_LOOKUP_LAST;\n'
+        '\t\tdentry = lookup_slow(&nd->last, nd->path.dentry, lookup_flags);\n'
+        '#else\n'
+        '\t\tdentry = lookup_slow(&nd->last, nd->path.dentry, nd->flags);\n'
+        '#endif')
+    return replace_function(source, 'walk_component', body)
+
+
+def adapt_namei(common: Path):
+    """Isolate the upstream SUSFS final-component marker from native lookup flags."""
+    common = Path(common)
+    namei = common / 'fs/namei.c'
+    definitions = common / 'include/linux/susfs_def.h'
+    source, flags = namei.read_text(), definitions.read_text()
+    native = flag_definitions((common / 'include/linux/namei.h').read_text(), 'LOOKUP_')
+    validate_namei_flags(source, native)
+    done = [
+        '/* SUSFS metadata must never enable native path-resolution restrictions. */' in source,
+        '/* Keep SUSFS metadata out of the persistent pathwalk flags. */' in source,
+        '\tflags &= ~ND_FLAGS_LOOKUP_LAST;' in function(source, '__lookup_slow'),
+        '#define ND_FLAGS_LOOKUP_LAST BIT(11)' in flags,
+    ]
+    if any(done):
+        if not all(done):
+            raise ValueError('Incomplete SUSFS namei adaptation')
+        return
+    source = fix_namei(source, native)
+    flags = once(flags, '#define ND_FLAGS_LOOKUP_LAST 0x2000000',
+                 '#define ND_FLAGS_LOOKUP_LAST BIT(11) /* consumed by __lookup_slow */')
+    # All anchors and bit collisions are checked before either file changes.
+    namei.write_text(source)
+    definitions.write_text(flags)
 
 
 def adapt(common: Path):
