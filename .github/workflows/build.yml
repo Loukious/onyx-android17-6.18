@@ -59,7 +59,13 @@ jobs:
         run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Resolve source commit
         id: source
-        run: echo "revision=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "revision=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -f source/port/features/manifest.json ]]; then
+            echo "feature_variants=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "feature_variants=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Mark source build pending
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,6 +104,7 @@ jobs:
               "$RUNNER_TEMP/konoha-workspace/onyx/drivers/thermal/xiaomi/mi_thermal_interface.c"
           fi
       - name: Restore Kleaf incremental build cache
+        if: steps.source.outputs.feature_variants != 'true'
         id: kleaf-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -110,6 +117,7 @@ jobs:
           restore-keys: |
             kleaf-v4-${{ runner.os }}-${{ hashFiles('source/port/dependency-lock.xml', 'source/common/arch/arm64/configs/gki_defconfig', 'source/port/platform_defconfig', 'source/port/features/manifest.json') }}-${{ inputs.diagnostic || false }}-
       - name: Restore independent compiler cache files and timestamps
+        if: steps.source.outputs.feature_variants != 'true'
         env:
           CACHE_MATCHED_KEY: ${{ steps.kleaf-cache.outputs.cache-matched-key }}
         run: python3 ci/build_cache.py restore
@@ -121,16 +129,25 @@ jobs:
         run: |
           flags=()
           if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--qdss-diagnostic); fi
-          if python3 source/port/build.py --help | grep -q -- --cache-dir; then
-            flags+=(--cache-dir "$RUNNER_TEMP/kleaf-cache")
-            echo "cache_enabled=true" >> "$GITHUB_OUTPUT"
-          fi
           if [[ -f source/port/features/manifest.json ]]; then
+            # Local-mode Kleaf copies consumed 49 GiB for one feature profile.
+            # Keep dual builds sandboxed without retaining those per-module trees.
+            echo "cache_enabled=false" >> "$GITHUB_OUTPUT"
+            available=$(df --output=avail -B1 "$RUNNER_TEMP/konoha-workspace" | tail -1)
+            if (( available < 30 * 1024 * 1024 * 1024 )); then
+              echo 'At least 30 GiB free disk is required before dual feature builds.' >&2
+              df -h "$RUNNER_TEMP/konoha-workspace"
+              exit 1
+            fi
             for variant in balanced performance; do
               python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" --variant "$variant" --bazel-batch \
                 --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
             done
           else
+            if python3 source/port/build.py --help | grep -q -- --cache-dir; then
+              flags+=(--cache-dir "$RUNNER_TEMP/kleaf-cache")
+              echo "cache_enabled=true" >> "$GITHUB_OUTPUT"
+            fi
             python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" \
               --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
           fi

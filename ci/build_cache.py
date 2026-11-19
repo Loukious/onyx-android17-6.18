@@ -85,7 +85,7 @@ def restore(environment):
 
 
 def saved(repository, key, query=None, delay=time.sleep):
-    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) or not re.fullmatch(r'kleaf-v3-[A-Za-z0-9_.-]+', key):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) or not re.fullmatch(r'kleaf-v[34]-[A-Za-z0-9_.-]+', key):
         raise ValueError('Invalid cache repository or key')
     if query is None:
         def query(path):

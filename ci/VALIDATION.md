@@ -182,6 +182,17 @@ independently verified configuration/feature inputs. Every public asset has a
 variant-specific filename. The format 3 `release.json` carries a `variants`
 array with exact profiles, downloads, checksums and shared build revisions.
 
+Dual feature builds use sandbox execution without the optional persistent Kleaf
+cache. A real native Performance build filled roughly 69 GiB, including 49 GiB
+of per-configuration Kleaf copies, so both cache restore and local-mode cache
+creation are skipped for this path. Legacy single-profile builds retain their
+incremental cache. Saved-cache confirmation accepts the workflow's v4 keys and
+the existing v3 keys.
+The source-synced dual-build path additionally requires 30 GiB free before
+compilation. This is the conservative extra sandbox/output allowance used by
+the native retry preflight, which had 51.09 GiB free; it is separate from the
+existing 55 GiB hosted bootstrap gate before source sync.
+
 Publication reopens both archives, rechecks their complete hashes and ABI/module
 identities, reruns the source-owned feature verifier, and recreates each
 installer. It cannot publish a draft until both complete installer sets exist.
