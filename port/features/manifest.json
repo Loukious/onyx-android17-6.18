@@ -242,7 +242,7 @@
     },
     {
       "path": "patches/susfs-6.18.patch",
-      "sha256": "f60d8f5a4d1fd7c61b2967877c1e4152f22195a1ec487228c4f47876b37a075e"
+      "sha256": "d6dce524d0344411c879f537e5b1bb47435fb0f5ba4d53821aa49cfd2779cf66"
     }
   ],
   "install_options": {

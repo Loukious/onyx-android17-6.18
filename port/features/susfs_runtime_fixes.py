@@ -246,6 +246,138 @@ def adapt_namei(common: Path):
     definitions.write_text(flags)
 
 
+VISIBLE_ROOT_MOUNT_HELPER = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+/*
+ * A propagated mount can sit beneath a legitimate root overmount. Hiding that
+ * parent must not hide the visible filesystem mounted at the very same path.
+ * Keep the native mount tree intact: dotdot/root checks and the caller's
+ * mount_lock sequence/refcount validation still apply to the returned mount.
+ */
+static struct mount *susfs_visible_root_mount(struct mount *mnt)
+{
+	struct mount *slow = mnt;
+	bool advance_slow = false;
+
+	while (READ_ONCE(mnt->mnt_id) >= DEFAULT_KSU_MNT_ID) {
+		struct dentry *root = READ_ONCE(mnt->mnt.mnt_root);
+		struct mount *next;
+
+		/* Do not bypass managed transit or an automount at a skipped root. */
+		if (!root || (READ_ONCE(root->d_flags) &
+			     (DCACHE_MANAGE_TRANSIT | DCACHE_NEED_AUTOMOUNT)))
+			return NULL;
+		next = READ_ONCE(mnt->overmount);
+		if (!next || next == mnt || READ_ONCE(next->mnt_parent) != mnt ||
+		    READ_ONCE(next->mnt_mountpoint) != root)
+			return NULL;
+		mnt = next;
+
+		/* Fail closed on a corrupt/transient cycle without a depth limit. */
+		if (advance_slow) {
+			slow = READ_ONCE(slow->overmount);
+			if (!slow)
+				return NULL;
+		}
+		advance_slow = !advance_slow;
+		if (mnt == slow)
+			return NULL;
+	}
+	return mnt;
+}
+#endif
+
+'''
+
+OLD_APP_MOUNT_LOOKUP = '''	if (susfs_is_current_proc_umounted()) {
+		hlist_for_each_entry_rcu(p, head, mnt_hash)
+			if (p->mnt_id < DEFAULT_KSU_MNT_ID && &p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
+				return p;
+		return NULL;
+	}'''
+
+NEW_APP_MOUNT_LOOKUP = '''	if (susfs_is_current_proc_umounted()) {
+		hlist_for_each_entry_rcu(p, head, mnt_hash) {
+			struct mount *visible;
+
+			if (READ_ONCE(p->mnt_parent) != real_mount(mnt) ||
+			    READ_ONCE(p->mnt_mountpoint) != dentry)
+				continue;
+			visible = susfs_visible_root_mount(p);
+			if (visible)
+				return visible;
+		}
+		return NULL;
+	}'''
+
+SUS_PATH_SHARED_ABI = '''/* Share the inode-only SUS_PATH ABI with every lookup caller. */
+struct inode;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+bool susfs_is_inode_sus_path(struct inode *inode);
+#endif
+
+'''
+
+
+def verify_sus_path_calls(source, expected_count):
+    calls = re.findall(r'\bsusfs_is_inode_sus_path\(([^()]*)\)', source)
+    if len(calls) != expected_count or any(',' in arguments for arguments in calls):
+        raise ValueError('SUSFS inode-only lookup ABI/call inventory changed')
+    if '#include <linux/susfs.h>' not in source:
+        raise ValueError('SUSFS lookup caller lacks the shared ABI header')
+
+
+def fix_app_mounts_and_path_api(namespace, namei, readdir, header):
+    namespace = once(namespace, '/**\n * __lookup_mnt - mount hash lookup\n',
+                     VISIBLE_ROOT_MOUNT_HELPER + '/**\n * __lookup_mnt - mount hash lookup\n')
+    signature = 'struct mount *__lookup_mnt'
+    body = function(namespace, signature)
+    body = once(body, OLD_APP_MOUNT_LOOKUP, NEW_APP_MOUNT_LOOKUP)
+    namespace = replace_function(namespace, signature, body)
+    declaration = 'extern bool susfs_is_inode_sus_path(struct mnt_idmap* idmap, struct inode *inode);\n'
+    callers = []
+    for source, old_arguments, count in ((namei, '&nop_mnt_idmap, ', 7),
+                                         (readdir, 'buf->idmap, ', 5)):
+        source = once(source, declaration, '')
+        source = once(source, '#include <linux/susfs_def.h>\n',
+                      '#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n')
+        prefix = 'susfs_is_inode_sus_path(' + old_arguments
+        if source.count(prefix) != count:
+            raise ValueError('SUSFS older idmap lookup call inventory changed')
+        source = source.replace(prefix, 'susfs_is_inode_sus_path(')
+        verify_sus_path_calls(source, count)
+        callers.append(source)
+    header = once(header, '#define SUSFS_VERSION "v2.4.0"\n',
+                  SUS_PATH_SHARED_ABI + '#define SUSFS_VERSION "v2.4.0"\n')
+    return namespace, *callers, header
+
+
+def adapt_app_mounts_and_path_api(common: Path):
+    """Preserve visible root stacks and enforce the actual inode-only SUS_PATH ABI."""
+    common = Path(common)
+    names = ('fs/namespace.c', 'fs/namei.c', 'fs/readdir.c', 'include/linux/susfs.h')
+    sources = [(common / name).read_text() for name in names]
+    # The downloaded >=6.12 implementation is inode-only; do not guess at a new ABI.
+    implementation = function((common / 'fs/susfs.c').read_text(), 'susfs_is_inode_sus_path')
+    if not re.search(r'\bsusfs_is_inode_sus_path\(struct inode \*inode\)', implementation):
+        raise ValueError('SUSFS implementation signature changed; review all callers')
+    done = ('static struct mount *susfs_visible_root_mount(' in sources[0],
+            '#include <linux/susfs.h>' in sources[1],
+            '#include <linux/susfs.h>' in sources[2],
+            SUS_PATH_SHARED_ABI in sources[3])
+    if any(done):
+        if not all(done):
+            raise ValueError('Incomplete SUSFS app mount/path ABI adaptation')
+        if NEW_APP_MOUNT_LOOKUP not in function(sources[0], 'struct mount *__lookup_mnt'):
+            raise ValueError('SUSFS app mount lookup changed after adaptation')
+        verify_sus_path_calls(sources[1], 7)
+        verify_sus_path_calls(sources[2], 5)
+        return
+    sources = fix_app_mounts_and_path_api(*sources)
+    # Validate all files and anchors before changing any generated source.
+    for name, source in zip(names, sources):
+        (common / name).write_text(source)
+
+
 def adapt(common: Path):
     common = Path(common)
     files = {name: (common / name).read_text()

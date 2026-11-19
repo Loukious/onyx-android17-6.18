@@ -107,6 +107,7 @@ def build(common, output):
         spec.loader.exec_module(runtime)
         runtime.adapt(tree)
         runtime.adapt_namei(tree)
+        runtime.adapt_app_mounts_and_path_api(tree)
         # Canonicalize whitespace from imported additions while retaining the exact
         # upstream source files in the separately hashed vendor inventory.
         normalized = set(re.findall(r'^\+\+\+ b/([^\n\t]+)', upstream.read_text(), re.M))
