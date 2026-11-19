@@ -151,7 +151,8 @@ class FeatureReplayTests(unittest.TestCase):
 RELEASE = '6.18.63-android17-6-maybe-dirty-4k-onyx-balanced'
 
 
-def addon_elf(release=RELEASE, crc=0x12345678, broken_symbols=False):
+def addon_elf(release=RELEASE, crc=0x12345678, broken_symbols=False,
+              linked_kernel=False, core_protected=False):
     """A small ELF fixture with exported and special-loader-only imports."""
     strings = b'\0ordinary\0hidden_symbol\0'
     symbols = bytes(24) + b''.join(struct.pack('<IBBHQQ', strings.index(name), 0x10, 0, 0, 0, 0)
@@ -160,17 +161,25 @@ def addon_elf(release=RELEASE, crc=0x12345678, broken_symbols=False):
                 '.notes': b'fixture linker notes',
                 '__versions': struct.pack('<Q', crc) + b'ordinary\0' + bytes(47),
                 '.strtab': strings, '.symtab': symbols + (b'x' if broken_symbols else b'')}
+    addresses = {}
+    if linked_kernel:
+        sections.update(__ksymtab=struct.pack('<iii', 0, 0x4000 - 0x1004, 0),
+                        __kcrctab=struct.pack('<I', crc),
+                        __kflagstab=bytes([2 if core_protected else 0]),
+                        __ksymtab_strings=b'ordinary\0')
+        addresses = {'__ksymtab': 0x1000, '__kcrctab': 0x2000,
+                     '__kflagstab': 0x3000, '__ksymtab_strings': 0x4000}
     names = b'\0.shstrtab\0' + b''.join(name.encode() + b'\0' for name in sections)
     sections = {'.shstrtab': names, **sections}
     data, headers = bytearray(64), [bytes(64)]
     for name, contents in sections.items():
-        headers.append(struct.pack('<IIQQQQIIQQ', names.index(name.encode()), 1, 0, 0, len(data),
+        headers.append(struct.pack('<IIQQQQIIQQ', names.index(name.encode()), 1, 0, addresses.get(name, 0), len(data),
                                    len(contents), 0, 0, 1, 0))
         data.extend(contents)
     offset = len(data)
     data.extend(b''.join(headers))
     data[:16] = b'\x7fELF\x02\x01\x01' + bytes(9)
-    struct.pack_into('<HHI', data, 16, 1, 183, 1)
+    struct.pack_into('<HHI', data, 16, 3 if linked_kernel else 1, 183, 1)
     struct.pack_into('<Q', data, 40, offset)
     struct.pack_into('<HHHHHH', data, 52, 64, 0, 0, 64, len(headers), 1)
     return bytes(data)
@@ -186,8 +195,13 @@ class FeatureArtifactTests(unittest.TestCase):
         shutil.copytree(features.INPUTS, source_inputs, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
         shutil.copytree(source_inputs, artifact / 'inputs/features')
         shutil.copyfile(Path(features.__file__), artifact / 'inputs/features.py')
+        shutil.copyfile(features.HERE / 'verify_modules.py', artifact / 'inputs/verify_modules.py')
         (artifact / 'gki/Image').write_bytes(b'fixture kernel')
-        (artifact / 'gki/vmlinux').write_bytes(addon_elf())
+        (artifact / 'gki/vmlinux').write_bytes(addon_elf(linked_kernel=True))
+        (artifact / 'platform').mkdir()
+        from test_core_import_admission import vendor
+        from verify_modules import verify_vendor_core_imports
+        vendor(artifact / 'platform/vendor.ko', [('ordinary', 0x12345678)])
         notes = features.kernel_notes_hash(artifact / 'gki/vmlinux')
         (artifact / 'platform-addon/kernel.notes.sha256').write_text(notes + '\n')
         (artifact / 'gki/kernel_aarch64_Module.symvers').write_text('0x12345678 ordinary vmlinux EXPORT_SYMBOL\n')
@@ -220,6 +234,8 @@ class FeatureArtifactTests(unittest.TestCase):
         (artifact / 'platform-addon/source.json').write_text(json.dumps(source))
         report = {'variant': variant, 'kernel_release': RELEASE,
                   'kernelsu_next': {'revision': 'a' * 40},
+                  'core_import_admission_validation': verify_vendor_core_imports(
+                      [artifact / 'platform/vendor.ko'], artifact / 'gki/vmlinux'),
                   'platform_addon_verification': [features.verify_addon(module, artifact / 'gki', RELEASE)]}
         return artifact, report, source_inputs
 
@@ -270,6 +286,24 @@ class FeatureArtifactTests(unittest.TestCase):
                     path.write_text(path.read_text().replace('0000000000000003 T __ksu_is_allow_uid_for_current\n', ''))
                 else:
                     (artifact / 'platform-addon/kernel.notes.sha256').write_text('0' * 64 + '\n')
+                with patch.object(features, 'INPUTS', inputs), self.assertRaises(ValueError):
+                    features.verify_artifact(artifact, report)
+
+    def test_recorded_success_cannot_admit_newly_protected_actual_core_exports(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact, report, inputs = self.fixture(Path(temporary))
+            (artifact / 'gki/vmlinux').write_bytes(addon_elf(linked_kernel=True, core_protected=True))
+            with patch.object(features, 'INPUTS', inputs), self.assertRaisesRegex(ValueError, 'protected core export'):
+                features.verify_artifact(artifact, report)
+
+    def test_changed_core_verifier_or_forged_admission_receipt_rejects(self):
+        for changed in ('verifier', 'receipt'):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                artifact, report, inputs = self.fixture(Path(temporary))
+                if changed == 'verifier':
+                    (artifact / 'inputs/verify_modules.py').write_text('# altered verifier\n')
+                else:
+                    report['core_import_admission_validation']['core_imports_checked'] = 0
                 with patch.object(features, 'INPUTS', inputs), self.assertRaises(ValueError):
                     features.verify_artifact(artifact, report)
 

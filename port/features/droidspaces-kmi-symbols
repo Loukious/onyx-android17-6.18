@@ -1,3 +1,7 @@
 [abi_symbol_list]
+  from_kuid
+  from_kuid_munged
   init_ipc_ns
+  make_kgid
+  make_kuid
   put_ipc_ns

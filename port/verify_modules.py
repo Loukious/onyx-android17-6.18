@@ -75,6 +75,97 @@ def versioned_imports(module):
     return imports
 
 
+def core_export_table(vmlinux):
+    """Read the linked ARM64 export flags that Module.symvers cannot encode."""
+    vmlinux = Path(vmlinux)
+    data = vmlinux.read_bytes()
+    if (len(data) < 64 or data[:6] != b"\x7fELF\x02\x01"
+            or struct.unpack_from("<H", data, 16)[0] not in (2, 3)
+            or struct.unpack_from("<H", data, 18)[0] != 183):
+        raise ValueError("expected linked ELF64 ARM64 kernel")
+    offset = struct.unpack_from("<Q", data, 40)[0]
+    size, count, strings_index = struct.unpack_from("<HHH", data, 58)
+    if size < 64 or not count or strings_index >= count or offset + size * count > len(data):
+        raise ValueError("invalid kernel ELF section table")
+    headers = [struct.unpack_from("<IIQQQQIIQQ", data, offset + index * size)
+               for index in range(count)]
+
+    def contents(header):
+        start, length = header[4:6]
+        if start + length > len(data):
+            raise ValueError("kernel export section exceeds file bounds")
+        return data[start:start + length]
+
+    def string(payload, start):
+        if not 0 <= start < len(payload):
+            raise ValueError("kernel export string offset is out of bounds")
+        end = payload.find(b"\0", start)
+        if end < 0:
+            raise ValueError("unterminated kernel export string")
+        return payload[start:end].decode("ascii")
+
+    section_names = contents(headers[strings_index])
+    sections = {}
+    for header in headers:
+        name = string(section_names, header[0])
+        if name in sections:
+            raise ValueError("duplicate kernel export section name")
+        if name in ("__ksymtab", "__kflagstab", "__kcrctab", "__ksymtab_strings"):
+            if header[1] != 1:
+                raise ValueError("kernel export section is not PROGBITS")
+            sections[name] = (header[3], contents(header))
+    if set(sections) != {"__ksymtab", "__kflagstab", "__kcrctab", "__ksymtab_strings"}:
+        raise ValueError("kernel export flag/CRC sections are missing")
+    table_base, table = sections["__ksymtab"]
+    _, flags = sections["__kflagstab"]
+    _, crcs = sections["__kcrctab"]
+    names_base, names = sections["__ksymtab_strings"]
+    if not flags or len(table) != len(flags) * 12 or len(crcs) != len(flags) * 4:
+        raise ValueError("unsupported linked kernel PREL32 export layout")
+    exports = {}
+    order = []
+    for index, flag in enumerate(flags):
+        if flag & ~3:
+            raise ValueError("unknown kernel export flags")
+        place = table_base + index * 12 + 4
+        target = place + struct.unpack_from("<i", table, index * 12 + 4)[0]
+        name = string(names, target - names_base)
+        if not name or name in exports:
+            raise ValueError("empty or duplicate kernel export")
+        exports[name] = {"flags": flag, "crc": struct.unpack_from("<I", crcs, index * 4)[0]}
+        order.append(name)
+    if order != sorted(order):
+        raise ValueError("linked kernel export table is not sorted")
+    return exports
+
+
+def verify_vendor_core_imports(modules, vmlinux):
+    """Unsigned vendor modules cannot consume GKI-protected core exports."""
+    exports = core_export_table(vmlinux)
+    violations, hashes, checked = [], {}, 0
+    for module in modules:
+        module = Path(module)
+        if module.name in hashes:
+            raise ValueError("duplicate vendor module in core import admission")
+        hashes[module.name] = hashlib.sha256(module.read_bytes()).hexdigest()
+        for name, crc in versioned_imports(module).items():
+            record = exports.get(name)
+            if record is None:
+                continue  # Non-core providers pass the separate native/vendor gates.
+            if record["flags"] & 2:
+                violations.append(f"{module.name}: {name}: protected core export")
+            elif record["crc"] != crc:
+                violations.append(f"{module.name}: {name}: actual core export CRC mismatch")
+            else:
+                checked += 1
+    if violations:
+        raise ValueError("Vendor core import admission failed:\n" + "\n".join(violations))
+    return {"status": "PASS", "vendor_modules_checked": len(hashes),
+            "core_imports_checked": checked,
+            "vmlinux_sha256": hashlib.sha256(Path(vmlinux).read_bytes()).hexdigest(),
+            "vendor_module_sha256": hashes}
+
+
 def verify(modules, symvers, release):
     exports = {}
     providers = {}

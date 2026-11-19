@@ -44,6 +44,14 @@ in this particular 6.18 GKI. No additional scheduler-layout options are added.
 The runtime can use the existing legacy iptables NAT support; enabling nftables
 is outside this fragment because it adds members to this tree's `struct net`.
 
+User namespaces turn the previously inline UID/GID helpers into real core
+exports. `from_kuid`, `from_kuid_munged`, `make_kuid` and `make_kgid` are included
+in the feature KMI list so the existing GPU-statistics, touch, camera and network
+modules can import them through the ordinary vendor loader. Their namespace
+mapping behavior remains unchanged. A matching CRC alone does not admit a
+GKI-protected export: the build and downloaded-artifact gates inspect the actual
+linked `vmlinux` export flags and reject protected vendor imports.
+
 ## Verification
 
 Build with the repository's feature selection and retain the matching kernel

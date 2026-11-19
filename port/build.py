@@ -16,7 +16,7 @@ import tarfile
 
 from catalog import check_generated, load_catalog, native_configs, native_modules, vendor_modules
 from verify_native_abi import verify_native_exports, verify_native_imports
-from verify_modules import verify
+from verify_modules import verify, verify_vendor_core_imports
 
 HERE = Path(__file__).resolve().parent
 
@@ -240,6 +240,7 @@ def main():
         raise ValueError("unexpected platform module set")
     symvers = [p for p in outputs if p.name.endswith("_Module.symvers")]
     verification = verify(modules, symvers, release)
+    core_import_admission = verify_vendor_core_imports(modules, kernel_dir / 'vmlinux')
     selections = dict(line.split("=", 1) for line in config.splitlines() if line.startswith("CONFIG_"))
     for option, value in native_configs().items():
         if selections.get("CONFIG_" + option, "n") != value:
@@ -331,6 +332,7 @@ def main():
             "hardware_validated": False,
         },
         "module_verification": verification,
+        "core_import_admission_validation": core_import_admission,
         "native_module_verification": native_verification,
         "native_abi_validation": native_abi_validation,
         "native_import_admission_validation": native_import_admission,

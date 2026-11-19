@@ -2,6 +2,7 @@
 """Replay locked kernel additions and verify the two release profiles."""
 from contextlib import contextmanager
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -287,6 +288,16 @@ def verify_artifact(artifact, report):
                 raise ValueError('Archived kernel feature input differs: ' + path.name)
     if (artifact / 'inputs/features.py').read_bytes() != Path(__file__).read_bytes():
         raise ValueError('Kernel feature verifier differs from committed source')
+    verifier = HERE / 'verify_modules.py'
+    if (artifact / 'inputs/verify_modules.py').read_bytes() != verifier.read_bytes():
+        raise ValueError('Core import verifier differs from committed source')
+    spec = importlib.util.spec_from_file_location('_onyx_core_import_verifier', verifier)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    admission = module.verify_vendor_core_imports(
+        sorted((artifact / 'platform').glob('*.ko')), artifact / 'gki/vmlinux')
+    if report.get('core_import_admission_validation') != admission:
+        raise ValueError('Core import admission receipt differs from the actual kernel exports')
     rows = report['platform_addon_verification']
     if len(rows) != 1 or rows[0]['module'] != 'susfs_guard_lkm.ko' or rows[0].get('imports_checked', 0) < 1:
         raise ValueError('SUSFS matched module verification is absent')

@@ -25,6 +25,7 @@ REJECTED = (
     "ieee80211_emulate_add_chanctx", "ieee80211_emulate_change_chanctx",
     "ieee80211_emulate_remove_chanctx", "wiphy_to_ieee80211_hw",
 )
+ARTIFACT = None
 
 
 def section_offset(module, wanted):
@@ -45,6 +46,8 @@ def section_offset(module, wanted):
 class NativeAdmissionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if ARTIFACT is None:
+            raise unittest.SkipTest('Pass --artifact-dir to test the retained pre-fix production ELFs')
         cls.artifact = ARTIFACT
         cls.wonder = ARTIFACT / "wonder.ko"
         cls.mac = ARTIFACT / "mac80211.ko"
