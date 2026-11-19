@@ -50,9 +50,12 @@ type kernelPackage struct {
 	Firmware        []string                `json:"firmware"`
 	Compression     string                  `json:"erofs_compression"`
 	Legacy          *legacyProfile          `json:"legacy_onyx,omitempty"`
+	SUSFS           *builtinSUSFS           `json:"susfs,omitempty"`
+	RetiredModules  map[string][]string     `json:"retired_modules,omitempty"`
 	Hashes          map[string]string       `json:"sha256"`
 	Root            string                  `json:"-"`
 	Retired         map[string][]string     `json:"-"`
+	RetiredFeatures map[string][]string     `json:"-"`
 	VendorRecovery  bool                    `json:"-"`
 	RecoveryModules string                  `json:"-"`
 }
@@ -150,6 +153,9 @@ func loadPackage(root string) (*kernelPackage, error) {
 	if err := p.validateLegacyProfile(); err != nil {
 		return nil, err
 	}
+	if err := p.validateRetiredModules(); err != nil {
+		return nil, err
+	}
 	return &p, nil
 }
 
@@ -208,6 +214,9 @@ type moduleDirectory struct {
 }
 
 func (p *kernelPackage) moduleFiles(role string, old moduleDirectory, work string) (map[string]string, error) {
+	if err := p.validateRetiredModules(); err != nil {
+		return nil, err
+	}
 	if len(old.Names) == 0 {
 		return nil, fmt.Errorf("%s has no supported module directory", role)
 	}
@@ -225,6 +234,17 @@ func (p *kernelPackage) moduleFiles(role string, old moduleDirectory, work strin
 		}
 		oldNames[name] = true
 		if _, ok := p.Modules[name]; !ok && !builtins[name] {
+			feature, err := p.verifyRetiredModule(role, old, file)
+			if err != nil {
+				return nil, fmt.Errorf("%s cannot retire %s: %w", role, file, err)
+			}
+			if feature {
+				if p.RetiredFeatures == nil {
+					p.RetiredFeatures = make(map[string][]string)
+				}
+				p.RetiredFeatures[role] = append(p.RetiredFeatures[role], name)
+				continue
+			}
 			if err := p.verifyLegacyModule(old, file); err != nil {
 				return nil, fmt.Errorf("%s requires module %s absent from this kernel; ROM is not compatible: %w", role, file, err)
 			}

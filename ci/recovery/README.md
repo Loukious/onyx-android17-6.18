@@ -61,6 +61,13 @@ profiles when retiring those drivers; unrelated or unknown modules cause an
 abort. Small `system_dlkm` partitions retain their compatible module selection;
 the full catalog remains available in `vendor_dlkm`.
 
+Built-in SUSFS packages can retire the exact reviewed SUSFS LKM shipped in the
+earlier Balanced 6.18 ROM. Retirement requires the recorded binary hash, ARM64
+ELF identity and 6.18 vermagic, and is limited to `vendor_dlkm`. An ordinary load
+list, alias or dependency referring to that module causes an abort. This rule
+does not change the ROM's driver load profile or permit removal of other unknown
+modules. The original image remains available for the same immediate rollback.
+
 After a completed OTA, inactive metadata may still contain a discarded
 copy-on-write allocation whose blocks the active layout has reused. Such an
 entry is accepted only in the inactive metadata's unflagged `cow` group, with

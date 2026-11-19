@@ -60,6 +60,9 @@ class CompleteRecoveryAssets(unittest.TestCase):
             _, artifact, _, identity = self.fixture(Path(temporary))
             report = json.loads((artifact / 'report.json').read_text())
             report['platform_addon_verification'] = []
+            report['susfs'] = {'implementation': 'wildkernels-builtin', 'built_in': True,
+                'source_revision': 'a' * 40, 'source_sha256': 'b' * 64,
+                'version': 'v2.4.0', 'runtime_verified': False}
             test_release.write_json(artifact / 'report.json', report)
             identity['features'] = ['susfs-next-builtin']
             products = recovery_assets.build(artifact, identity)
@@ -68,6 +71,10 @@ class CompleteRecoveryAssets(unittest.TestCase):
                 self.assertIn('payload/modules/one.ko', archive.namelist())
                 self.assertIn('payload/modules/native.ko', archive.namelist())
                 self.assertFalse(any('susfs_guard_lkm' in name for name in archive.namelist()))
+                metadata = json.loads(archive.read('kernel.json'))
+                self.assertEqual(metadata['susfs'], report['susfs'])
+                self.assertEqual(metadata['retired_modules'], {'susfs_guard_lkm': [
+                    '737ea429fe37078682c2574a1e6a03b055269b459f8cc4a6a646415010a538e0']})
 
     def test_builtin_susfs_recovery_rejects_a_stale_private_module(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -192,6 +192,10 @@ def payload_files(artifact, identity):
                 'erofs_compression': compression,
                 'legacy_onyx': {'module_names': legacy['legacy_module_names'], 'default_loads': legacy['default_loads']},
                 'sha256': {name: digest(value[0]) for name, value in sorted(files.items()) if name.startswith('payload/')}}
+    if variant_assets.susfs_builtin(identity):
+        metadata['susfs'] = report['susfs']
+        metadata['retired_modules'] = {'susfs_guard_lkm': [
+            '737ea429fe37078682c2574a1e6a03b055269b459f8cc4a6a646415010a538e0']}
     policy_path = artifact / 'inputs/module-loading.json'
     if policy_path.is_file():
         data = policy_path.read_bytes()

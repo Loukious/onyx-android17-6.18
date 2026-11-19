@@ -25,7 +25,7 @@
     "AnyKernel3-LICENSE.txt": "7644d1de215bd7d543e9cec7cd43da88931551a6507399590d06c1e75ea31edf",
     "GPL-2.0.txt": "bbfc9843646d483c334664f651c208b9839626891d8f17604db2146962f43548",
     "Go-LICENSE.txt": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
-    "README.md": "f181c26ea58dd1cd2d4d6a3278f8116475f6fb8d1f6a53afb8379ff5e066cc25",
+    "README.md": "192901b23e36c3ed9fbf247cc77e8104c851657256d74fbaabda22ef7af6d0c4",
     "build_guard.sh": "a92cc1416e6ab01cd06ebf3e58fdcf5087ddc25cb2955565116a9cc7e6574557",
     "busybox-notices/GPL-2.0.txt": "bbfc9843646d483c334664f651c208b9839626891d8f17604db2146962f43548",
     "busybox-notices/NOTICE.txt": "18070d5bbd3695cbdbe3c648210d1e3133b8894cd9df03954e7809b4c441205b",
@@ -46,8 +46,8 @@
     "engine/legacy.go": "c5a279e919bc1a6bc6c6fc58a37c5e5023de4d010b56d3f93a7e5fb63ead7851",
     "engine/main.go": "cb840ccc2782186d670f4e519a6f5429fc496cb7ad604faa32cdd1a5bb7a4222",
     "engine/migration_test.go": "205afe089c39c46434b181e8f654acbc6122a59ee543f595f55ad53519014a0e",
-    "engine/modules.go": "b3fdc36416900ded0305747f202e0bc83a9f17f374addef3b90ebc84678900a7",
-    "engine/prepare.go": "2819d71331d02287ae4be0c741f90c3a20e5aa5982d6b8862319521c14e7a84a",
+    "engine/modules.go": "e50c4b5f2319804315a042e4866f057d7fbcc3b6c51d3fde696e2dae54901c79",
+    "engine/prepare.go": "51659942e52d1aeaa943a6e0107a40dd10a2bb2e89570c1a56380a0db44c4796",
     "engine/testdata/boot-v4.gz": "62dc4eec587744f6c7c54dfa04585464233d22cecfe032053912a31039e3c7f7",
     "engine/testdata/boot-v4.json": "d24d808d24c9d6586e79dbbd3bbf076d76d2f99bf805b1c1df8ff928e7ae0808",
     "engine/testdata/legacy-module.c": "f0b701d44ef34b47c6c6cdf2c2166949b14584bf3d9f84d3a234d2cc7c402266",
@@ -67,7 +67,7 @@
     "tools/erofs-meta": "62244c09c53adfdb64cf0fcc1b2339c1ab609cdbe929ecc06b5ab3fd226b95e0",
     "tools/fsck.erofs": "9a810bbc5d7e6a1d43f1fa40e805997ed194dc81e6901e3d096244da061223a8",
     "tools/mkfs.erofs": "91185358f371e9428c9d460d7c7f0a39ca0b292e489d37cad7d63d87ff940a7c",
-    "tools/onyx-recovery": "60215f6137160fbd959fd7a8c38aee0ecc9f0db638f02f6a1ba6a53339805855",
+    "tools/onyx-recovery": "e5ba9d58eccf9bffe359e64b93efe345db6498b71a1aacd6fd70c6dbed398acc",
     "tools/recovery-guard": "9e3bfb2218e2b09ec41909bb5337e0ed8c65ced9e3d311fef6d6519e6097373c",
     "tools/recovery-guard-build.json": "d6fbe6cbb7bbd14cfdf92dc7b483d0f22371e75e0577032d01ab619277579530",
     "update-binary.sh": "33d0b5e488cbe85abdaab27f59efa0a66e9f8fc450a5c9848fb4d26c3825d979",
@@ -76,7 +76,11 @@
     "vendor/musl-1.2.5.tar.gz": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
     "vendor/sources.json": "aa16f0790a7886009f1d511eefe0ed7148a73c94b315216a301fcc6dba3f65dc",
     "vendor/zlib.tar.gz": "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
-    "vendor/zstd.tar.gz": "9255722e5ad28adecf0f8009f1c07b88a3f19ca0c7df50e772f29f91242f22ca"
+    "vendor/zstd.tar.gz": "9255722e5ad28adecf0f8009f1c07b88a3f19ca0c7df50e772f29f91242f22ca",
+    "engine/retirement.go": "852ea951a5a0ca4047aae57deeeec7992ebc7cff1640f12d812bad8291180fd0",
+    "engine/retirement_test.go": "c7fb48afbcce9e4875453e48487b0841e66e093b44a42c2192fc1e5433435084",
+    "engine/testdata/susfs-lkm-6.18.63.gz": "0fd335e622a379dc34c3c20fdc2ce20173c420a90e43233f888c0b29a604bece",
+    "engine/testdata/susfs-lkm-6.18.63.json": "35b884558cdf4826565754b29ea3f311c8e90b0839662d8d56971ce6274640d7"
   },
   "recovery_guard_local_correction": {
     "reason": "Use ARM64 open flag ABI for O_DIRECTORY and O_NOFOLLOW",
@@ -131,5 +135,12 @@
       "maps_unchanged": true,
       "stable_layout_output": true
     }
+  },
+  "susfs_builtin_retirement": {
+    "reason": "Retire only the exact reviewed unused Balanced6.18 SUSFS LKM when verified built-in SUSFS replaces it; preserve ordinary driver loading and all other retirement gates.",
+    "retired_module_sha256": "737ea429fe37078682c2574a1e6a03b055269b459f8cc4a6a646415010a538e0",
+    "binary_sha256": "e5ba9d58eccf9bffe359e64b93efe345db6498b71a1aacd6fd70c6dbed398acc",
+    "validation": "150 pinned Go1.25.4 engine tests passed, including real LKM identity/hash, fail-closed references, package JSON decoding, historical LKM compatibility, EROFS reconstruction with data/xattr/timestamp preservation and independent Google AVB checks. Only the external captured-layout test was skipped. No phone operation.",
+    "host_emulator_package_sha256": "a00c7fdf34c913b799f8d1cc556d3fdd9f9fd695167a17baf86123a9cfaefb22"
   }
 }

@@ -1,0 +1,10 @@
+{
+  "sha256": "737ea429fe37078682c2574a1e6a03b055269b459f8cc4a6a646415010a538e0",
+  "license": "GPL-2.0-only",
+  "source_repository": "https://github.com/KernelSU-Next/KernelSU-Next",
+  "source_revision": "aa235b99574b5b349cdb4980bcb98fd58e6abb28",
+  "source_path": "kernel/susfs",
+  "susfs_source_sha256": "a9d73c71ce673dd35d71dfc995c2004c3b17a9a36b50fd7af3d2702ea4f6777e",
+  "kernel_release": "6.18.63-android17-6-maybe-dirty-4k-onyx-balanced",
+  "origin": "Verified Balanced ROM matching addon built November 19, 2026"
+}

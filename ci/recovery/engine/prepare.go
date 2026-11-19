@@ -228,7 +228,8 @@ func prepareImages(packageRoot, input, output, work string) error {
 		fmt.Fprintf(&plan, "%s\t%d\t%s\t%s\n", part, after.Size(), afterSHA, beforeSHA)
 	}
 	data, err := json.MarshalIndent(map[string]any{"format": 1, "kernel_release": p.Release, "source_revision": p.Source,
-		"partitions": receipt, "retired_legacy_modules": p.Retired, "recovery_modules_partition": p.RecoveryModules}, "", "  ")
+		"partitions": receipt, "retired_legacy_modules": p.Retired, "retired_feature_modules": p.RetiredFeatures,
+		"recovery_modules_partition": p.RecoveryModules}, "", "  ")
 	if err != nil {
 		return err
 	}
