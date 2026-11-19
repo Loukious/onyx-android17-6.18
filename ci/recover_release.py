@@ -38,7 +38,7 @@ def select(repository, run_id, attempt):
         raise ValueError('Recovery requires a completed successful full build job')
     # A failed release job makes the overall run fail; only the full build
     # job and its immutable attempt-specific upload are required here.
-    names = {artifact_name(run_id, attempt, version) for version in (1, ASSET_FORMAT)}
+    names = {artifact_name(run_id, attempt, version) for version in (1, 2, 3)}
     matches = [artifact for artifact in release.listed(prefix + f'/actions/runs/{run_id}/artifacts', 'artifacts')
                if artifact.get('name') in names]
     if len(matches) != 1:
@@ -58,7 +58,7 @@ def select(repository, run_id, attempt):
             'artifact_id': str(artifact['id']), 'artifact_name': name, 'ci_revision': run['head_sha']}
 
 
-def inputs(bundle, run_id, attempt):
+def inputs(bundle, run_id, attempt, ci_revision=None):
     numbers(run_id, attempt)
     path = bundle / 'release.json'
     if path.is_symlink() or not path.is_file():
@@ -68,6 +68,10 @@ def inputs(bundle, run_id, attempt):
                 'artifact_name': artifact_name(run_id, attempt, asset_format(identity))}
     if any(identity.get(key) != value for key, value in expected.items()):
         raise ValueError('Recovery bundle belongs to a different run or attempt')
+    if asset_format(identity) == 3 and (not isinstance(ci_revision, str)
+            or not re.fullmatch('[0-9a-f]{40}', ci_revision)
+            or identity.get('automation_revision') != ci_revision):
+        raise ValueError('Recovery CI revision differs from the selected authenticated build')
     result = {output: identity.get(key, '') for output, key in (
         ('source_revision', 'source_revision'), ('kernel_revision', 'common_revision'),
         ('kernelsu_revision', 'kernelsu_revision'))}
@@ -88,9 +92,10 @@ def main():
     inputs_parser.add_argument('bundle', type=Path)
     inputs_parser.add_argument('run_id')
     inputs_parser.add_argument('attempt')
+    inputs_parser.add_argument('--ci-revision')
     args = parser.parse_args()
     result = (select(os.environ['GITHUB_REPOSITORY'], args.run_id, args.attempt)
-              if args.command == 'select' else inputs(args.bundle, args.run_id, args.attempt))
+              if args.command == 'select' else inputs(args.bundle, args.run_id, args.attempt, args.ci_revision))
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
             for key, value in result.items():

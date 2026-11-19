@@ -15,6 +15,7 @@ import installer_assets
 import recovery_assets
 import google_changelog
 from release_naming import archive_name, artifact_name, asset_format, checksum_paths, release_title
+import variant_assets
 
 TRACK = json.loads((Path(__file__).resolve().parent / 'upstream.json').read_text())
 FILES = {
@@ -25,6 +26,30 @@ FILES = {
 
 def bundle_files(identity):
     version = asset_format(identity)
+    if version == 3:
+        files = set()
+        for row in variant_assets.rows(identity):
+            extra, complete = row.get('installers', []), row.get('full_recovery', [])
+            if extra and (len(extra) != len(set(extra)) or set(extra) !=
+                    set(installer_assets.names(row['kernel_release'], 3, row['id'])) |
+                    {variant_assets.installer_metadata_name(row['id'])}):
+                raise ValueError('Invalid variant installer asset inventory')
+            if complete and (len(complete) != len(set(complete)) or set(complete) !=
+                    set(recovery_assets.names(row['kernel_release'], 3, row['id']))):
+                raise ValueError('Invalid variant recovery asset inventory')
+            current = variant_assets.core_files(row) | set(extra) | set(complete)
+            if files & current or set(row.get('sha256', {})) != current:
+                raise ValueError('Incomplete or colliding variant assets')
+            if row.get('downloads') != variant_assets.download_map(row):
+                raise ValueError('Variant downloads differ from its verified assets')
+            files.update(current)
+        if any(bool(row.get(field)) != bool(identity['variants'][0].get(field))
+               for row in identity['variants'] for field in ('installers', 'full_recovery')):
+            raise ValueError('Variant packaging is incomplete')
+        if identity.get('sha256') != {name: value for row in identity['variants']
+                                      for name, value in row['sha256'].items()}:
+            raise ValueError('Variant checksums differ from release checksums')
+        return files
     extra = identity.get('installers', [])
     if extra and set(extra) != set(installer_assets.names(identity['kernel_release'], version)) | {'installers.json'}:
         raise ValueError('Invalid installer asset inventory')
@@ -88,9 +113,11 @@ def release_inputs(release, tag, source, kernel, kernelsu):
         raise ValueError('Existing release tag identifies different inputs')
 
 
-def validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attempt):
+def validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attempt, *, automation_revision=None):
     identity = json.loads((bundle / 'release.json').read_text())
     version = asset_format(identity)
+    if version == 3 and automation_revision is not None and identity.get('automation_revision') != automation_revision:
+        raise ValueError('Release CI revision differs from the authenticated build attempt')
     expected = {'source_revision': source, 'common_revision': kernel, 'kernelsu_revision': kernelsu,
                 'run_id': str(run_id), 'run_attempt': str(attempt),
                 'artifact_name': artifact_name(run_id, attempt, version)}
@@ -116,6 +143,13 @@ def validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attem
             raise ValueError('Release asset changed: ' + name)
     if any(hashes[name] != checksum for name, checksum in identity['sha256'].items()):
         raise ValueError('Release identity and checksums differ')
+    if version == 3:
+        manifest = json.loads((source_root / 'port/features/manifest.json').read_text())
+        if identity.get('install_options') != manifest.get('install_options', {}):
+            raise ValueError('Release install options differ from the selected source')
+        for row in variant_assets.rows(identity):
+            validate_variant_archive(bundle, source_root, row, hashes)
+        return identity
     root_name = str(relative(identity['artifact_root']))
     if '/' in root_name:
         raise ValueError('Invalid archive root')
@@ -158,7 +192,98 @@ def validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attem
     return identity
 
 
+def validate_variant_archive(bundle, source_root, row, hashes):
+    root_name = str(relative(row['artifact_root']))
+    if '/' in root_name:
+        raise ValueError('Invalid variant archive root')
+    with tempfile.TemporaryDirectory(prefix='onyx-variant-verify-') as temporary:
+        root = Path(temporary)
+        with tarfile.open(bundle / archive_name(3, row['id']), 'r:gz') as archive:
+            seen = set()
+            for member in archive.getmembers():
+                name = str(relative(member.name.rstrip('/')))
+                if name in seen or name.split('/')[0] != root_name or not (member.isfile() or member.isdir()):
+                    raise ValueError('Unsafe or duplicated variant archive member')
+                seen.add(name)
+            archive.extractall(root, filter='data')
+        artifact = root / root_name
+        report, pins, count = verify(artifact, source_root)
+        if report.get('qdss_diagnostic') is not False:
+            raise ValueError('Diagnostic builds cannot become automatic releases')
+        if (pins['common']['revision'], report['kernelsu_next']['revision'], report['kernel_release'], count) != (
+                row['common_revision'], row['kernelsu_revision'], row['kernel_release'], row['modules']):
+            raise ValueError('Archived variant identity differs from release metadata')
+        if report.get('variant') != {key: row[key] for key in ('id', 'label', 'features', 'profile')}:
+            raise ValueError('Variant feature/profile metadata differs from its build')
+        if row.get('automation_revision') != report.get('automation_revision'):
+            raise ValueError('Variant CI automation revision differs from its build')
+        counts = inventory_summary(report)
+        if counts:
+            catalog = json.loads((source_root / 'port/components.json').read_text())
+            counts['native_component_modules'] = sum(item['kind'] == 'native_common' for item in catalog['components'])
+            if any(row.get(key) != value for key, value in counts.items()):
+                raise ValueError('Variant module counts differ from its build')
+        evidence = variant_assets.evidence_names(row['id'])
+        for exported, archived in [(evidence['report'], 'report.json'), (evidence['build_log'], 'build.log'),
+                (evidence['module_abi'], 'gki/kernel_aarch64_Module.symvers'),
+                (evidence['kernel_release'], 'gki/kernel.release'),
+                (evidence['kernel_config'], 'gki/kernel_aarch64_dot_config')]:
+            if digest(artifact / archived) != hashes[exported]:
+                raise ValueError('Exported variant evidence differs from its archive')
+        if row.get('installers'):
+            installer_assets.verify(artifact, bundle, row)
+        if row.get('full_recovery'):
+            recovery_assets.verify(artifact, bundle, row)
+
+
+def variant_release_notes(repository, identity):
+    rows = variant_assets.rows(identity)
+    version = identity['kernel_release'].split('-')[0]
+    tag = f'gki-{version}-s{identity["source_revision"][:12]}-k{identity["kernelsu_revision"][:12]}'
+    def download(name):
+        return f'[{name}](https://github.com/{repository}/releases/download/{tag}/{quote(name, safe="")})'
+    notes = ('Onyx Android 17 / GKI 6.18 with **Balanced** and **Performance** kernels. '
+             'Each download includes modules built for that exact kernel.\n\n'
+             '| Variant | TCP default | Full recovery installer | SUSFS addon |\n'
+             '| --- | --- | --- | --- |\n')
+    for row in rows:
+        downloads = row['downloads']
+        tcp = row['profile'].get('configs', {}).get('CONFIG_DEFAULT_TCP_CONG', row['id']).strip('"')
+        full = download(downloads['full_recovery']) if downloads.get('full_recovery') else 'unavailable'
+        susfs = download(downloads['susfs_module']) if downloads.get('susfs_module') else 'unavailable'
+        notes += f'| {row["label"]} | {tcp} | {full} | {susfs} |\n'
+    notes += '\nThe complete ' + download('release.json') + ' lists both variants, features and checksums.\n'
+    for row in rows:
+        notes += f'\n<details>\n<summary>{row["label"]}: features and tuning</summary>\n\n'
+        notes += f'Kernel: `{row["kernel_release"]}`. ROM archive: ' + download(row['downloads']['rom_integration']) + '.\n\n'
+        notes += ', '.join(row['features']) + '.\n\n'
+        notes += '```json\n' + json.dumps(row['profile'], indent=2, sort_keys=True) + '\n```\n\n</details>\n'
+    notes += ('\nUse one variant’s matched kernel and modules together. The full recovery ZIP supports '
+              'the existing compatible Onyx ROM layouts and reviewed 6.6 migration, retaining ROM ramdisks '
+              'and applying the existing backup/readback/rollback checks. Kernel-only AnyKernel3 ZIPs '
+              'require modules already matching the target variant.\n\n'
+              'Both profiles passed source replay, complete module inventory, import CRC, configuration, '
+              'feature build gates, hashes and device-tree verification. Feature build gates do not '
+              'establish on-device performance, container, root-hiding or USB behavior. '
+              '`release.json` contains the variants array, exact shared build revisions, download names '
+              'and per-variant checksums; `SHA256SUMS` covers every public download.\n\n'
+              f'- Source commit: `{identity["source_revision"]}`\n'
+              f'- Google GKI revision: `{identity["common_revision"]}`\n'
+              f'- KernelSU Next revision: `{identity["kernelsu_revision"]}`\n'
+              f'- Verified build: https://github.com/{repository}/actions/runs/{identity["run_id"]} '
+              f'(attempt {identity["run_attempt"]})\n')
+    notes += ('\nThe matched SUSFS KernelSU addon in each variant’s downloads loads its kernel module '
+              'through KernelSU’s special loader. SUSFS activation requires installing that addon; '
+              '[SUSFS userspace settings](https://github.com/sidex15/susfs4ksu-module) remain optional. '
+              'Choose a compatible [NoMount](https://github.com/maxsteeel/nomount) or '
+              '[Mountify](https://github.com/backslashxx/mountify) metamodule separately when needed. '
+              'Kernel backend support does not install or activate either metamodule.\n')
+    return notes
+
+
 def release_notes(repository, identity):
+    if asset_format(identity) == 3:
+        return variant_release_notes(repository, identity)
     source, kernel, kernelsu = (identity[k] for k in ('source_revision', 'common_revision', 'kernelsu_revision'))
     run_id, attempt = identity['run_id'], identity['run_attempt']
     url = f'https://github.com/{repository}/actions/runs/{run_id}'
@@ -233,10 +358,19 @@ def publish(repository, bundle, source_root, source, kernel, kernelsu, run_id, a
     build_run = api(prefix + '/actions/runs/' + str(run_id) + '/attempts/' + str(attempt))
     if build_run['head_branch'] != TRACK['ci_branch'] or build_run['path'] != '.github/workflows/build.yml':
         raise ValueError('Release must come from the CI build workflow')
+    supplied = json.loads((bundle / 'release.json').read_text())
+    if asset_format(supplied) == 3 and (not isinstance(build_run.get('head_sha'), str)
+            or not re.fullmatch('[0-9a-f]{40}', build_run['head_sha'])
+            or supplied.get('automation_revision') != build_run['head_sha']):
+        raise ValueError('Release CI revision differs from the authenticated build attempt')
     jobs = api(prefix + '/actions/runs/' + str(run_id) + '/attempts/' + str(attempt) + '/jobs')['jobs']
     if not any(job['name'] == 'build' and job['conclusion'] == 'success' for job in jobs):
         raise ValueError('Full build and artifact upload have not succeeded')
-    identity = validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attempt)
+    identity = validate_bundle(bundle, source_root, source, kernel, kernelsu, run_id, attempt,
+                               automation_revision=build_run.get('head_sha') if asset_format(supplied) == 3 else None)
+    if asset_format(identity) == 3 and any(not row.get('installers') or not row.get('full_recovery')
+                                           for row in variant_assets.rows(identity)):
+        raise ValueError('Both variants require all matched installers before publication')
     accepted = api(prefix + '/git/ref/heads/' + TRACK['source_branch'])['object']['sha']
     if accepted != source:
         # Accepted source can advance while the full build is running.

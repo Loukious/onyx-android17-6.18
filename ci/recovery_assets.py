@@ -14,14 +14,18 @@ import tempfile
 
 import installer_assets
 import release_naming
+import variant_assets
 
 HERE = Path(__file__).resolve().parent / 'recovery'
 ROOT = HERE.parents[1]
 SOFT_OMISSIONS = {'subsys_pil_tz', 'qcom_arm_smmu_mod', 'phy_msm_snps_hs'}
 
 
-def names(release, asset_format=1):
-    installer_assets.names(release, asset_format)
+def names(release, asset_format=1, variant=None):
+    installer_assets.names(release, asset_format, variant)
+    if asset_format == 3:
+        prefix = release_naming.variant_prefix(variant)
+        return [prefix + 'GKI-6.18-Full-Recovery-Installer.zip', prefix + 'full-recovery.json']
     if asset_format == 2:
         return ['Onyx-GKI-6.18-Full-Recovery-Installer.zip', 'full-recovery.json']
     return [f'Onyx-Complete-{release}.zip', 'full-recovery.json']
@@ -75,6 +79,15 @@ def payload_files(artifact, identity):
         data = path.read_bytes()
         if name in modules or name in builtin or digest(data) != report['sha256']['platform/' + path.name]:
             raise ValueError('Invalid platform module: ' + name)
+        modules[name], kinds[name] = (path.name, data), 'platform'
+    # Official SUSFS uses KernelSU's special loader, so ship its matched ELF
+    # without adding it to an ordinary modules.load list. The separately
+    # packaged manager addon invokes the reviewed official loader.
+    for path in sorted((artifact / 'platform-addon').glob('*.ko')):
+        name = norm(path.name)
+        data = path.read_bytes()
+        if name in modules or name in builtin or digest(data) != report['sha256'].get('platform-addon/' + path.name):
+            raise ValueError('Invalid feature addon module: ' + name)
         modules[name], kinds[name] = (path.name, data), 'platform'
     used = set()
     with tarfile.open(artifact / 'gki/modules_staging_dir.tar.gz') as archive:
@@ -253,19 +266,21 @@ def build(artifact, identity):
                   'META-INF/com/google/android/update-binary': ((HERE / 'update-binary.sh').read_bytes(), True),
                   'META-INF/com/google/android/updater-script': (b'# Onyx complete kernel installer\n', False),
                   'README.md': ((HERE / 'README.md').read_bytes(), False)})
-    if release_naming.asset_format(identity) == 2:
+    if release_naming.asset_format(identity) >= 2:
         readme = files['README.md'][0].replace(
-            b'Onyx-Complete-<kernel-release>.zip', b'Onyx-GKI-6.18-Full-Recovery-Installer.zip')
+            b'Onyx-Complete-<kernel-release>.zip', names(identity['kernel_release'], release_naming.asset_format(identity), identity.get('id'))[0].encode())
         files['README.md'] = (readme.replace(b'adb sideload ', b'adb.exe sideload '), False)
     files['SHA256SUMS'] = (installer_assets.payload(files, files), False)
     archive = installer_assets.zip_bytes(files)
-    zip_name, meta_name = names(identity['kernel_release'], release_naming.asset_format(identity))
+    zip_name, meta_name = names(identity['kernel_release'], release_naming.asset_format(identity), identity.get('id'))
     metadata = {'format': 1, 'source_revision': identity['source_revision'], 'common_revision': identity['common_revision'],
                 'kernelsu_revision': identity['kernelsu_revision'], 'kernel_release': identity['kernel_release'],
                 'sha256': {zip_name: digest(archive)}, 'modules': len(json.loads(files['kernel.json'][0])['modules']),
                 'tools': provenance, 'reviewed_stale_soft_dependencies': omissions,
                 'partitions': ['boot', 'vendor_boot', 'recovery', 'dtbo', 'system_dlkm', 'vendor_dlkm'],
                 'device_tested': False}
+    if release_naming.asset_format(identity) == 3:
+        metadata['variant'] = {key: identity[key] for key in ('id', 'label', 'features', 'profile')}
     return {zip_name: archive, meta_name: (json.dumps(metadata, indent=2) + '\n').encode()}
 
 
@@ -280,6 +295,8 @@ def add_to_bundle(bundle, source):
     identity = read(bundle / 'release.json')
     publish_release.validate_bundle(bundle, source, identity['source_revision'], identity['common_revision'],
                                     identity['kernelsu_revision'], identity['run_id'], identity['run_attempt'])
+    if release_naming.asset_format(identity) == 3:
+        return add_variant_installers(bundle, identity)
     if identity.get('full_recovery'):
         return identity
     with tempfile.TemporaryDirectory(prefix='onyx-complete-installer-') as temp:
@@ -290,6 +307,26 @@ def add_to_bundle(bundle, source):
         (bundle / name).write_bytes(data)
     identity['full_recovery'] = sorted(products)
     identity['sha256'].update({name: digest(data) for name, data in products.items()})
+    (bundle / 'release.json').write_text(json.dumps(identity, indent=2) + '\n')
+    release_naming.write_checksums(bundle)
+    return identity
+
+
+def add_variant_installers(bundle, identity):
+    rows = variant_assets.rows(identity)
+    if all(row.get('full_recovery') for row in rows):
+        return identity
+    if any(row.get('full_recovery') for row in rows):
+        raise ValueError('Only one variant has a complete recovery installer')
+    staged = {}
+    for row in rows:
+        with tempfile.TemporaryDirectory(prefix='onyx-variant-recovery-') as temporary:
+            with tarfile.open(bundle / release_naming.archive_name(3, row['id'])) as archive:
+                archive.extractall(temporary, filter='data')
+            staged[row['id']] = build(Path(temporary) / row['artifact_root'], row)
+    products = variant_assets.merge_products(identity, staged, 'full_recovery')
+    for name, data in products.items():
+        (bundle / name).write_bytes(data)
     (bundle / 'release.json').write_text(json.dumps(identity, indent=2) + '\n')
     release_naming.write_checksums(bundle)
     return identity

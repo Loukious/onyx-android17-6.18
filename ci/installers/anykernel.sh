@@ -25,6 +25,7 @@ case "$old_release" in
   6.18.*-android17-@KMI@-*) ;;
   *) abort "This kernel requires an existing Android 17 / 6.18 KMI @KMI@ installation. Install the matched ROM/module set first." ;;
 esac
+@VARIANT_RELEASE_PREFLIGHT@
 
 # Check the Android target's modules, including early vendor-ramdisk modules.
 # Recovery's own /lib/modules belongs to its kernel and must not be used here.
@@ -57,6 +58,7 @@ for archive in vendor_ramdisk/*.cpio vendor_ramdisk*.cpio ramdisk.cpio; do
       index=$((index + 1))
       dest="$preflight/modules/$index.ko"
       magiskboot cpio "$archive" "extract $entry $dest" || abort "Cannot extract an early module"
+      @VARIANT_EARLY_NAME@
       echo "$dest" >> "$module_list"
     esac
   done < entries
@@ -66,5 +68,6 @@ cd "$AKHOME"
 while IFS= read -r module; do
   "$AKHOME/tools/module-abi" "$AKHOME/kernel-abi.tsv" "$module" || abort "Installed modules need a matched update before this kernel can be flashed."
 done < "$module_list"
+@VARIANT_MODULE_PREFLIGHT@
 ui_print "Module ABI verified; updating the active boot partition"
 flash_boot

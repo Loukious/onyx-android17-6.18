@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Validate the complete build inventory before exporting or releasing it."""
 import hashlib
+import importlib.util
 import json
 from pathlib import PurePosixPath
 import re
+import sys
 import tarfile
 
 
@@ -28,8 +30,62 @@ def inventory_summary(report):
     native = report.get('native_module_verification')
     if native is None:
         return {}
-    return {'total_modules': len({module_identity(row['module']) for row in external + native}),
-            'native_modules': len(native)}
+    addons = report.get('platform_addon_verification', [])
+    result = {'total_modules': len({module_identity(row['module']) for row in external + native + addons}),
+              'native_modules': len(native)}
+    if addons:
+        result['feature_addon_modules'] = len(addons)
+    return result
+
+
+def verify_features(artifact, source_root, report):
+    committed = source_root / 'port/features'
+    if not (committed / 'manifest.json').is_file():
+        if 'variant' in report or report.get('platform_addon_verification'):
+            raise ValueError('Variant feature builds require a committed feature manifest')
+        return
+    variant = report.get('variant')
+    if (not isinstance(variant, dict) or set(variant) != {'id', 'label', 'features', 'profile'}
+            or variant.get('id') not in ('balanced', 'performance')
+            or not isinstance(variant.get('label'), str) or not variant['label']
+            or not isinstance(variant.get('features'), list)
+            or any(not isinstance(value, str) or not value for value in variant['features'])
+            or len(set(variant['features'])) != len(variant['features'])
+            or not isinstance(variant.get('profile'), dict)
+            or not report['kernel_release'].endswith('-onyx-' + variant['id'])):
+        raise ValueError('Built variant identity or kernel release is missing')
+    expected = {path.relative_to(committed).as_posix(): path for path in committed.rglob('*')
+                if path.is_file() and '__pycache__' not in path.parts and not path.name.endswith('.pyc')}
+    archived = artifact / 'inputs/features'
+    actual = {path.relative_to(archived).as_posix(): path for path in archived.rglob('*') if path.is_file()}
+    if set(expected) != set(actual) or any(digest(path) != digest(actual[name]) for name, path in expected.items()):
+        raise ValueError('Archived feature locks, patches or sources differ from the selected source')
+    helper = source_root / 'port/features.py'
+    if digest(helper) != digest(artifact / 'inputs/features.py'):
+        raise ValueError('Archived feature verifier differs from the selected source')
+    # Re-run the source-owned verifier instead of treating a recorded module
+    # load or smoke test as proof that each requested feature was built.
+    name = '_onyx_feature_artifact_verifier'
+    spec = importlib.util.spec_from_file_location(name, helper)
+    module = importlib.util.module_from_spec(spec)
+    old_path = list(sys.path)
+    try:
+        sys.path.insert(0, str(source_root / 'port'))
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        module.verify_artifact(artifact, report)
+    finally:
+        sys.path[:] = old_path
+        sys.modules.pop(name, None)
+    records = report.get('platform_addon_verification')
+    if not isinstance(records, list) or [row.get('module') for row in records] != ['susfs_guard_lkm.ko']:
+        raise ValueError('Verified SUSFS addon inventory is missing')
+    for row in records:
+        path = 'platform-addon/' + row['module']
+        if (report['sha256'].get(path) != row.get('sha256')
+                or not row.get('vermagic', '').startswith(report['kernel_release'] + ' ')
+                or type(row.get('imports_checked')) is not int or row['imports_checked'] <= 0):
+            raise ValueError('SUSFS addon hash, vermagic or import verification differs')
 
 
 def verify_native_abi(artifact, source_root, catalog, entries, prefix, report):
@@ -223,4 +279,5 @@ def verify(artifact, source_root):
         if not (artifact / 'devicetrees/checked' / relative(name)).is_file():
             raise ValueError('Checked device tree is missing: ' + name)
     verify_native(artifact, source_root, report, expected)
+    verify_features(artifact, source_root, report)
     return report, pins, len(wanted)

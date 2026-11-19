@@ -172,3 +172,30 @@ all change/release flags false and skipped update/build dispatch.
 This validates release automation, not device flashing. Regular release assets
 remain build archives; recovery installation needs a separately verified matched
 image set for the supplied ROM baseline.
+
+## Matched feature variants
+
+Feature-enabled CI builds balanced and performance profiles sequentially in one
+locked workspace. Export requires exactly one of each, identical source/GKI/KSU
+revisions, distinct kernel release suffixes, complete module inventories and
+independently verified configuration/feature inputs. Every public asset has a
+variant-specific filename. The format 3 `release.json` carries a `variants`
+array with exact profiles, downloads, checksums and shared build revisions.
+
+Publication reopens both archives, rechecks their complete hashes and ABI/module
+identities, reruns the source-owned feature verifier, and recreates each
+installer. It cannot publish a draft until both complete installer sets exist.
+The source-head concurrency and upload-resume checks apply to the complete
+release. Legacy format 1/2 immutable artifact recovery remains supported.
+Format 3 metadata must identify the authenticated original workflow commit;
+publication and recovered input selection reject a consistently spoofed CI
+revision. Kernel-only format 3 installers additionally require the same existing
+profile and exact matching module payload hashes, including early modules from
+every vendor-boot fragment. A reviewed platform replacement is the sole accepted
+provider when its name also exists in GKI. Matching CRCs with different module
+feature code cannot pass the payload check.
+
+The SUSFS addon ships the matched ELF and reviewed special KernelSU loader;
+ordinary module-load lists do not activate it. NoMount and Mountify are optional
+upstream userspace choices. These are build/package checks; runtime behavior
+still requires separate device validation.

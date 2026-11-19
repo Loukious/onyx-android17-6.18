@@ -84,7 +84,7 @@ class BuildCache(unittest.TestCase):
         offsets = [workflow.index(label) for label in labels]
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn('python3 ci/build_cache.py confirm "$CACHE_KEY"', workflow)
-        self.assertLess(workflow.index('python3 ci/build_cache.py restore'), workflow.index('name: Build matching GKI'))
+        self.assertLess(workflow.index('python3 ci/build_cache.py restore'), workflow.index('name: Build both matched kernel'))
         self.assertEqual(workflow.count('${{ runner.temp }}/kleaf-cache-links.json'), 2)
 
     def test_missing_manifest_is_only_allowed_for_a_cold_cache_miss(self):

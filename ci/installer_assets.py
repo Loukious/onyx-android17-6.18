@@ -13,7 +13,8 @@ import tarfile
 import tempfile
 import zipfile
 
-from release_naming import archive_name, asset_format, write_checksums
+from release_naming import archive_name, asset_format, write_checksums, variant_prefix
+import variant_assets
 
 HERE = Path(__file__).resolve().parent / 'installers'
 WLAN = 'qca_cld3_wcn7750.ko'
@@ -25,11 +26,15 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def names(release, asset_format=1):
+def names(release, asset_format=1, variant=None):
     if not re.fullmatch(r'6\.18\.\d+-android17-\d+-[A-Za-z0-9.-]+', release):
         raise ValueError('Unsupported installer kernel release')
     if asset_format == 1:
         return (f'Konoha-AnyKernel3-{release}.zip', f'nethunter-wlan-injection-{release}.zip')
+    if asset_format == 3:
+        prefix = variant_prefix(variant)
+        return (prefix + 'GKI-6.18-AnyKernel3.zip', prefix + 'NetHunter-Internal-WiFi-KSU-Module.zip',
+                prefix + 'NetHunter-External-WiFi-KSU-Module.zip', prefix + 'SUSFS-KSU-Module.zip')
     if asset_format != 2:
         raise ValueError('Unsupported installer asset format')
     return ('Onyx-GKI-6.18-AnyKernel3.zip', 'Onyx-NetHunter-Internal-WiFi-KSU-Module.zip',
@@ -168,6 +173,41 @@ def abi_table(artifact):
     return ''.join(f'{crc:08x} {name}\n' for name, crc in sorted(result.items())).encode()
 
 
+def matched_module_hashes(artifact, report):
+    """Hash the authoritative provider of every installable module filename."""
+    result = {}
+    owners = {}
+    for group in ('platform', 'platform-addon'):
+        for path in sorted((artifact / group).glob('*.ko')):
+            if path.name in result or not re.fullmatch(r'[A-Za-z0-9_.-]+\.ko', path.name):
+                raise ValueError('Ambiguous installed module filename: ' + path.name)
+            result[path.name] = sha(verified_file(artifact, report, group + '/' + path.name))
+            owners[path.name] = group
+    recipe = json.loads(verified_file(artifact, report, 'inputs/modules.json'))
+    overrides = {row['output']: row['replaces_gki'] for row in recipe if 'replaces_gki' in row}
+    seen, replaced = set(), set()
+    release = report['kernel_release']
+    with tarfile.open(fileobj=io.BytesIO(verified_file(artifact, report, 'gki/modules_staging_dir.tar.gz')), mode='r:gz') as archive:
+        for member in archive:
+            if not member.name.endswith('.ko'):
+                continue
+            name = Path(member.name).name
+            if (not member.isfile() or member.name.startswith('/') or '..' in Path(member.name).parts
+                    or name in seen or not re.fullmatch(r'[A-Za-z0-9_.-]+\.ko', name)):
+                raise ValueError('Ambiguous native module filename: ' + name)
+            seen.add(name)
+            if name in result:
+                expected = 'lib/modules/' + release + '/' + overrides.get(name, '')
+                if owners[name] != 'platform' or name not in overrides or member.name.removeprefix('./') != expected:
+                    raise ValueError('Unreviewed installed platform/native module overlap: ' + name)
+                replaced.add(name)
+                continue
+            result[name] = sha(archive.extractfile(member).read())
+    if replaced != set(overrides):
+        raise ValueError('Reviewed installed module replacements are missing')
+    return result
+
+
 def zip_bytes(files):
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
@@ -203,7 +243,7 @@ def build(artifact, identity):
     report = json.loads((artifact / 'report.json').read_text())
     release = identity['kernel_release']
     version = asset_format(identity)
-    filenames = names(release, version)
+    filenames = names(release, version, identity.get('id'))
     ak_name, wlan_name = filenames[:2]
     if report['kernel_release'] != release:
         raise ValueError('Installer release differs from build')
@@ -220,6 +260,7 @@ def build(artifact, identity):
     if not deps or any(not re.fullmatch('[A-Za-z0-9_-]+', dep) for dep in deps):
         raise ValueError('Invalid WLAN dependencies')
     abi = abi_table(artifact)
+    installed_hashes = matched_module_hashes(artifact, report) if version == 3 else None
     provenance = json.loads((HERE / 'provenance.json').read_text())
     source = (HERE / 'module-abi.c').read_bytes()
     guard = (HERE / 'tools/module-abi').read_bytes()
@@ -231,12 +272,21 @@ def build(artifact, identity):
         sha(arm64_tools) != provenance['anykernel_arm64_archive_sha256']):
         raise ValueError('Installer tools changed without provenance update')
     substitutions = {'@RELEASE@': release, '@KMI@': release.split('-')[2],
-                     '@DEPS@': ' '.join(dep.replace('-', '_') for dep in deps)}
+                     '@DEPS@': ' '.join(dep.replace('-', '_') for dep in deps),
+                     '@VARIANT@': identity.get('id', ''),
+                     '@VARIANT_RELEASE_PREFLIGHT@': '', '@VARIANT_EARLY_NAME@': ':',
+                     '@VARIANT_MODULE_PREFLIGHT@': ''}
+    if version == 3:
+        substitutions.update({
+            '@VARIANT_RELEASE_PREFLIGHT@': 'case "$old_release" in\n  *-onyx-' + identity['id'] + ') ;;\n  *) abort "Use the target variant Full Recovery installer to install or switch profiles." ;;\nesac',
+            '@VARIANT_EARLY_NAME@': 'echo "${entry##*/}" > "$dest.original-name" || abort "Cannot preserve early module identity"',
+            '@VARIANT_MODULE_PREFLIGHT@': '"$AKHOME/tools/variant-module-guard.sh" "$old_release" "$module_list" "$AKHOME/matched-module-payload.sha256" || abort "Install the target variant full matching module set with Full Recovery first."',
+        })
     def template(name):
         value = (HERE / name).read_text()
         for key, replacement in substitutions.items():
             value = value.replace(key, replacement)
-        if version == 2:
+        if version >= 2:
             value = value.replace('Konoha', 'Onyx')
             if name == 'anykernel.sh':
                 value = value.replace('kernel.string=Onyx ' + release,
@@ -248,10 +298,13 @@ def build(artifact, identity):
         'abi_sha256': sha(abi), 'anykernel_revision': provenance['anykernel_revision'],
         'anykernel_arm64_revision': provenance['anykernel_arm64_revision'],
         'module_abi_sha256': sha(guard), 'requires': 'Onyx with matching 6.18 modules; kernel-only ZIP is not a 6.6 migration'}
-    if version == 2:
+    if version >= 2:
         extra, extra_metadata = external_payload(artifact, report, release)
         metadata.update(extra_metadata)
         metadata['format'] = 2
+    if version == 3:
+        metadata['installed_module_sha256'] = installed_hashes
+        metadata['variant'] = {key: identity[key] for key in ('id', 'label', 'features', 'profile')}
     meta = (json.dumps(metadata, indent=2)+'\n').encode()
     version_code = int(datetime.strptime(identity['artifact_root'][:15], '%Y%m%dT%H%M%S').replace(tzinfo=timezone.utc).timestamp())
     ak = {}
@@ -280,7 +333,13 @@ def build(artifact, identity):
         'tools/module-abi': (guard, True), 'kernel-abi.tsv': (abi, False),
         'installer.json': (meta, False), 'installer-source/module-abi.c': (source, False),
         'installer-source/provenance.json': ((HERE/'provenance.json').read_bytes(), False)})
-    ak['payload.sha256'] = (payload(ak, ['Image', 'kernel-abi.tsv', 'tools/module-abi']), False)
+    ak_members = ['Image', 'kernel-abi.tsv', 'tools/module-abi']
+    if version == 3:
+        ak['tools/variant-module-guard.sh'] = (template('variant-module-guard.sh'), True)
+        ak['matched-module-payload.sha256'] = (''.join(checksum + '  ' + name + '\n'
+                                                      for name, checksum in sorted(installed_hashes.items())).encode(), False)
+        ak_members += ['anykernel.sh', 'tools/variant-module-guard.sh', 'matched-module-payload.sha256']
+    ak['payload.sha256'] = (payload(ak, ak_members), False)
     module = {'wlan/'+WLAN: (wlan, False), 'service.sh': (template('wlan-service.sh'), True),
         'customize.sh': (template('wlan-customize.sh'), False), 'skip_mount': (b'', False),
         'module-abi': (guard, True), 'kernel-abi.tsv': (abi, False), 'installer.json': (meta, False),
@@ -291,10 +350,10 @@ def build(artifact, identity):
             'author=Loukious\ndescription=Matched WCN7750 monitor mode and frame injection. Reboot to activate.\n').encode(), False),
         'META-INF/com/google/android/update-binary': ((HERE/'wlan-update-binary.sh').read_bytes(), True),
         'META-INF/com/google/android/updater-script': (b'#MAGISK\n', False)}
-    module['payload.sha256'] = (installed_payload(module) if version == 2 else
+    module['payload.sha256'] = (installed_payload(module) if version >= 2 else
                                payload(module, ['wlan/'+WLAN, 'module-abi', 'kernel-abi.tsv']), False)
     products = {ak_name: zip_bytes(ak), wlan_name: zip_bytes(module)}
-    if version == 2:
+    if version >= 2:
         extra.update({'service.sh': (template('extra-service.sh'), True),
             'firmware-overlay.sh': (template('extra-firmware.sh'), True),
             'customize.sh': (template('extra-customize.sh'), False),
@@ -312,7 +371,27 @@ def build(artifact, identity):
         extra['payload.sha256'] = (installed_payload(extra), False)
         products[filenames[2]] = zip_bytes(extra)
     metadata['sha256'] = {name: sha(data) for name, data in products.items()}
-    products['installers.json'] = (json.dumps(metadata, indent=2)+'\n').encode()
+    if version == 3:
+        metadata['variant'] = {key: identity[key] for key in ('id', 'label', 'features', 'profile')}
+        addons = {}
+        addon_root = artifact / 'platform-addon'
+        for path in sorted(addon_root.rglob('*')):
+            if path.is_symlink():
+                raise ValueError('Unexpected SUSFS addon payload symlink')
+            if path.is_file():
+                name = path.relative_to(addon_root).as_posix()
+                addons[name] = (verified_file(artifact, report, 'platform-addon/' + name),
+                                name.endswith('.sh'))
+        if (not {'post-fs-data.sh', 'module.prop', 'susfs_guard_lkm.ko'} <= set(addons)
+                or not report.get('platform_addon_verification')):
+            raise ValueError('Complete verified SUSFS loader addon is missing')
+        addons.update({'installer.json': ((json.dumps(metadata, indent=2) + '\n').encode(), False),
+                       'META-INF/com/google/android/update-binary': ((HERE/'wlan-update-binary.sh').read_bytes(), True),
+                       'META-INF/com/google/android/updater-script': (b'#MAGISK\n', False)})
+        addons['payload.sha256'] = (installed_payload(addons), False)
+        products[filenames[3]] = zip_bytes(addons)
+        metadata['sha256'][filenames[3]] = sha(products[filenames[3]])
+    products[variant_assets.installer_metadata_name(identity['id']) if version == 3 else 'installers.json'] = (json.dumps(metadata, indent=2)+'\n').encode()
     return products
 
 
@@ -328,6 +407,8 @@ def add_to_bundle(bundle, source):
     identity = json.loads((bundle / 'release.json').read_text())
     publish_release.validate_bundle(bundle, source, identity['source_revision'], identity['common_revision'],
         identity['kernelsu_revision'], identity['run_id'], identity['run_attempt'])
+    if asset_format(identity) == 3:
+        return add_variant_installers(bundle, identity)
     if identity.get('installers'):
         return identity
     with tempfile.TemporaryDirectory(prefix='onyx-installer-') as tmp:
@@ -339,6 +420,26 @@ def add_to_bundle(bundle, source):
     identity['installers'] = sorted(products)
     identity['sha256'].update({name: sha(data) for name, data in products.items()})
     (bundle / 'release.json').write_text(json.dumps(identity, indent=2)+'\n')
+    write_checksums(bundle)
+    return identity
+
+
+def add_variant_installers(bundle, identity):
+    rows = variant_assets.rows(identity)
+    if all(row.get('installers') for row in rows):
+        return identity
+    if any(row.get('installers') for row in rows):
+        raise ValueError('Only one variant has manager/kernel installers')
+    staged = {}
+    for row in rows:
+        with tempfile.TemporaryDirectory(prefix='onyx-variant-installer-') as temporary:
+            with tarfile.open(bundle / archive_name(3, row['id'])) as archive:
+                archive.extractall(temporary, filter='data')
+            staged[row['id']] = build(Path(temporary) / row['artifact_root'], row)
+    products = variant_assets.merge_products(identity, staged, 'installers')
+    for name, data in products.items():
+        (bundle / name).write_bytes(data)
+    (bundle / 'release.json').write_text(json.dumps(identity, indent=2) + '\n')
     write_checksums(bundle)
     return identity
 

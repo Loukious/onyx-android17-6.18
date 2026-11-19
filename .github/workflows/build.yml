@@ -39,7 +39,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 330
+    timeout-minutes: 360
     outputs:
       kernel_revision: ${{ steps.export.outputs.kernel_revision }}
       kernelsu_revision: ${{ steps.export.outputs.kernelsu_revision }}
@@ -106,14 +106,14 @@ jobs:
             ${{ runner.temp }}/kleaf-cache
             ${{ runner.temp }}/konoha-workspace/out/bazel/output_user_root/*/action_cache
             ${{ runner.temp }}/konoha-workspace/out/bazel/output_user_root/*/execroot/_main/bazel-out
-          key: kleaf-v3-${{ runner.os }}-${{ hashFiles('source/port/dependency-lock.xml', 'source/common/arch/arm64/configs/gki_defconfig', 'source/port/platform_defconfig') }}-${{ inputs.diagnostic || false }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: kleaf-v4-${{ runner.os }}-${{ hashFiles('source/port/dependency-lock.xml', 'source/common/arch/arm64/configs/gki_defconfig', 'source/port/platform_defconfig', 'source/port/features/manifest.json') }}-${{ inputs.diagnostic || false }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            kleaf-v3-${{ runner.os }}-${{ hashFiles('source/port/dependency-lock.xml', 'source/common/arch/arm64/configs/gki_defconfig', 'source/port/platform_defconfig') }}-${{ inputs.diagnostic || false }}-
+            kleaf-v4-${{ runner.os }}-${{ hashFiles('source/port/dependency-lock.xml', 'source/common/arch/arm64/configs/gki_defconfig', 'source/port/platform_defconfig', 'source/port/features/manifest.json') }}-${{ inputs.diagnostic || false }}-
       - name: Restore independent compiler cache files and timestamps
         env:
           CACHE_MATCHED_KEY: ${{ steps.kleaf-cache.outputs.cache-matched-key }}
         run: python3 ci/build_cache.py restore
-      - name: Build matching GKI and every ported module with the committed KernelSU source
+      - name: Build both matched kernel and module variants with the same committed sources
         id: compile
         env:
           DIAGNOSTIC: ${{ inputs.diagnostic || false }}
@@ -125,9 +125,16 @@ jobs:
             flags+=(--cache-dir "$RUNNER_TEMP/kleaf-cache")
             echo "cache_enabled=true" >> "$GITHUB_OUTPUT"
           fi
-          python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" \
-            --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
-      - name: Verify and export modules, kernel and ABI
+          if [[ -f source/port/features/manifest.json ]]; then
+            for variant in balanced performance; do
+              python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" --variant "$variant" --bazel-batch \
+                --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
+            done
+          else
+            python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" \
+              --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
+          fi
+      - name: Verify both variants and export their complete matched bundles
         id: export
         run: python3 ci/export_artifacts.py "$RUNNER_TEMP/konoha-workspace" artifacts
       - name: Package verified AnyKernel and WLAN installers

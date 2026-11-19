@@ -56,7 +56,9 @@ jobs:
           path: artifacts
       - name: Read the original exact build inputs
         id: inputs
-        run: python3 ci/recover_release.py inputs artifacts "$BUILD_RUN_ID" "$BUILD_RUN_ATTEMPT"
+        env:
+          CI_REVISION: ${{ steps.build.outputs.ci_revision }}
+        run: python3 ci/recover_release.py inputs artifacts "$BUILD_RUN_ID" "$BUILD_RUN_ATTEMPT" --ci-revision "$CI_REVISION"
       - name: Checkout the exact built source
         uses: actions/checkout@v4
         with:

@@ -7,11 +7,13 @@ import re
 
 
 ASSET_FORMAT = 2
+VARIANT_ASSET_FORMAT = 3
+VARIANTS = ('balanced', 'performance')
 
 
 def asset_format(identity):
     version = identity.get('asset_format', 1)
-    if type(version) is not int or version not in (1, ASSET_FORMAT):
+    if type(version) is not int or version not in (1, ASSET_FORMAT, VARIANT_ASSET_FORMAT):
         raise ValueError('Unsupported release asset format')
     return version
 
@@ -20,12 +22,21 @@ def artifact_name(run_id, attempt, version=ASSET_FORMAT):
     if any(not re.fullmatch(r'[1-9][0-9]*', str(value)) for value in (run_id, attempt)):
         raise ValueError('Artifact requires a positive build run ID and attempt')
     asset_format({'asset_format': version})
-    prefix = 'Konoha-Android17-6.18' if version == 1 else 'Onyx-GKI'
+    prefix = ('Konoha-Android17-6.18' if version == 1 else
+              'Onyx-GKI-Variants' if version == VARIANT_ASSET_FORMAT else 'Onyx-GKI')
     return f'{prefix}-{run_id}-{attempt}'
 
 
-def archive_name(version=ASSET_FORMAT):
+def variant_prefix(variant):
+    if variant not in VARIANTS:
+        raise ValueError('Unsupported release variant')
+    return 'Onyx-' + variant.title() + '-'
+
+
+def archive_name(version=ASSET_FORMAT, variant=None):
     asset_format({'asset_format': version})
+    if version == VARIANT_ASSET_FORMAT:
+        return variant_prefix(variant) + 'GKI-6.18-ROM-Integration.tar.gz'
     return ('konoha-gki-and-modules.tar.gz' if version == 1 else
             'Onyx-GKI-6.18-ROM-Integration.tar.gz')
 
@@ -35,7 +46,7 @@ def checksum_paths(names, version):
     asset_format({'asset_format': version})
     result = {}
     for name in names:
-        label = Path(name).name if version == ASSET_FORMAT else name
+        label = Path(name).name if version >= ASSET_FORMAT else name
         if label in result:
             raise ValueError('Release assets have colliding download filenames: ' + label)
         result[label] = name
@@ -60,4 +71,5 @@ def release_title(identity):
         date = datetime.strptime(identity['artifact_root'][:15], '%Y%m%dT%H%M%S').strftime('%Y-%m-%d')
     except (KeyError, ValueError, TypeError):
         date = f'build {identity["run_id"]}.{identity["run_attempt"]}'
-    return 'Onyx GKI 6.18 / KernelSU Next — ' + date
+    suffix = ' / Balanced + Performance' if asset_format(identity) == VARIANT_ASSET_FORMAT else ''
+    return 'Onyx GKI 6.18 / KernelSU Next' + suffix + ' — ' + date

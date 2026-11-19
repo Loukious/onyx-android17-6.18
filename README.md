@@ -4,6 +4,27 @@ This repository contains the complete POCO F7 (Onyx/SM8735) module port and a
 reproducible GKI build recipe. It tracks Google's `android17-6.18-lts` branch
 and fetches the official **KernelSU Next `dev` branch on every build**.
 
+Feature-enabled source builds produce **Balanced** and **Performance** variants
+from the same committed GKI, KernelSU and feature inputs. Each variant has a
+distinct kernel release and its own matching modules, recovery installer,
+AnyKernel3 ZIP, Wi-Fi modules and SUSFS KernelSU addon. Public download filenames
+start with `Onyx-Balanced-` or `Onyx-Performance-`; select one variant and use its
+matched outputs together. The complete recovery installer handles profile
+switches; the kernel-only ZIP requires modules already matching its target.
+Format 3 kernel-only installers require the same existing profile and compare
+every discovered DLKM and early vendor-ramdisk module against the target build's
+SHA-256 inventory. Matching import CRCs alone do not pass this check.
+
+Release asset format 3 records both choices in `release.json`'s `variants` array,
+including feature/profile metadata, download names and per-variant checksums.
+Publication waits for both complete builds and installer sets to pass verification.
+Earlier format 1 and 2 releases remain supported by the recovery workflow.
+The matched SUSFS addon uses KernelSU's special loader and must be installed to
+activate SUSFS. Choose [NoMount](https://github.com/maxsteeel/nomount) or
+[Mountify](https://github.com/backslashxx/mountify) separately if needed; CI does
+not install a mount metamodule. Build verification does not establish device
+boot, performance, container, root-hiding or USB behavior.
+
 The current Onyx recipe uses Linux **6.18.38** with **400 platform modules**,
 **37 additional native GKI modules** for CAN, USB adapters and network facilities,
 and **16 wireless firmware files** with their redistribution notices and matching

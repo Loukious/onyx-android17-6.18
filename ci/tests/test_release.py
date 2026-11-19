@@ -197,7 +197,7 @@ class ArtifactTests(unittest.TestCase):
                 publish_release.validate_bundle(bundle, source, SOURCE, KERNEL, KSU, '123', '1')
 
     def test_unknown_or_coerced_asset_format_is_rejected(self):
-        for version in (0, 3, True, '2', None):
+        for version in (0, 4, True, '2', None):
             with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'asset format'):
                 release_naming.asset_format({'asset_format': version})
 

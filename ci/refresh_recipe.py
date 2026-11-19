@@ -7,6 +7,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import sys
 import tempfile
 
 import blk_plug_ordering
@@ -198,10 +199,28 @@ def refresh(common):
                         (json.dumps(receipt, indent=2) + '\n').encode()))
         if len({target for target, _ in outputs}) != len(outputs):
             raise ValueError('Recipe output paths overlap')
-        # Commit refreshed inputs only after every patch has replayed cleanly.
-        for target, data in outputs:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+        # The feature replay reads the refreshed required-patch recipe. Restore
+        # every legacy output if that second full replay rejects the candidate.
+        previous = [(target, target.read_bytes() if target.exists() else None) for target, _ in outputs]
+        try:
+            for target, data in outputs:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            if (PORT / 'features/manifest.json').is_file():
+                old_path = list(sys.path)
+                try:
+                    sys.path.insert(0, str(PORT))
+                    import features
+                    features.refresh_common(common)
+                finally:
+                    sys.path[:] = old_path
+        except BaseException:
+            for target, data in previous:
+                if data is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.write_bytes(data)
+            raise
     result = {'active_common_patches': len(active), 'already_integrated_upstream': integrated}
     if checks:
         result['upstream_checks'] = check_results

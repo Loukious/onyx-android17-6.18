@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Materialize or verify the complete GKI source, including required patches."""
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -39,16 +40,20 @@ def snapshot(workspace, write=False):
     from common_fixes import applied
     with tempfile.TemporaryDirectory(prefix='konoha-gki-snapshot-') as temporary:
         root = Path(temporary)
-        archive = root / 'source.tar'
-        with archive.open('wb') as stream:
-            subprocess.run(['git', '-C', str(common), 'archive', '--format=tar', revision],
-                           stdout=stream, check=True)
         tree = root / 'common'
         tree.mkdir()
-        with tarfile.open(archive) as tar:
-            tar.extractall(tree, filter='data')
-        archive.unlink()
-        with applied(tree, root / 'patch-receipt'):
+        command = ['git', '-C', str(common), 'archive', '--format=tar', revision]
+        with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
+            with tarfile.open(fileobj=process.stdout, mode='r|') as archive:
+                archive.extractall(tree, filter='data')
+            process.stdout.close()
+            if process.wait():
+                raise subprocess.CalledProcessError(process.returncode, command)
+        with ExitStack() as stack:
+            stack.enter_context(applied(tree, root / 'patch-receipt'))
+            if (port / 'features/manifest.json').is_file():
+                import features
+                stack.enter_context(features.applied(tree, root / 'feature-receipt'))
             source = hashes(tree)
             destination = ROOT / 'common'
             manifest = port / 'common-source-hashes.json'
