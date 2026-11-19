@@ -7,6 +7,22 @@ SHARED = ('source_revision', 'common_revision', 'kernelsu_revision', 'run_id', '
           'automation_revision')
 
 
+def susfs_builtin(row):
+    return 'susfs-next-builtin' in row.get('features', [])
+
+
+def verify_builtin_susfs_payload(artifact, report, row):
+    """A built-in implementation must not ship a stale loadable addon."""
+    if not susfs_builtin(row):
+        return False
+    if (report.get('platform_addon_verification') != []
+            or any(path.is_file() or path.is_symlink()
+                   for path in (artifact / 'platform-addon').rglob('*'))
+            or any(name.startswith('platform-addon/') for name in report.get('sha256', {}))):
+        raise ValueError('Built-in SUSFS cannot include a loadable addon payload')
+    return True
+
+
 def evidence_names(variant):
     prefix = variant_prefix(variant)
     return {'report': prefix + 'report.json', 'build_log': prefix + 'build.log',
@@ -64,7 +80,9 @@ def download_map(row):
     if row.get('installers'):
         ak, internal, external, susfs = installer_assets.names(row['kernel_release'], VARIANT_ASSET_FORMAT, row['id'])
         value.update(anykernel=ak, internal_wifi=internal, external_wifi=external,
-                     susfs_module=susfs, installer_metadata=installer_metadata_name(row['id']))
+                     installer_metadata=installer_metadata_name(row['id']))
+        if not susfs_builtin(row):
+            value['susfs_module'] = susfs
     if row.get('full_recovery'):
         full, metadata = recovery_assets.names(row['kernel_release'], VARIANT_ASSET_FORMAT, row['id'])
         value.update(full_recovery=full, recovery_metadata=metadata)

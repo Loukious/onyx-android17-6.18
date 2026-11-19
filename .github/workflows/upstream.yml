@@ -54,12 +54,14 @@ jobs:
         if: steps.detect.outputs.kernelsu_update_needed == 'true'
         env:
           REVISION: ${{ steps.detect.outputs.latest_kernelsu }}
+          KERNELSU_REPOSITORY: ${{ steps.detect.outputs.latest_kernelsu_repository }}
+          UPSTREAM_REVISION: ${{ steps.detect.outputs.latest_kernelsu_upstream_revision }}
         run: |
           git init "$RUNNER_TEMP/upstream-kernelsu"
-          git -C "$RUNNER_TEMP/upstream-kernelsu" remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C "$RUNNER_TEMP/upstream-kernelsu" remote add origin "$KERNELSU_REPOSITORY"
           git -C "$RUNNER_TEMP/upstream-kernelsu" fetch origin "$REVISION" --tags
           git -C "$RUNNER_TEMP/upstream-kernelsu" checkout --detach FETCH_HEAD
-          python3 ci/kernelsu_lock.py --update "$RUNNER_TEMP/upstream-kernelsu" --revision "$REVISION"
+          python3 ci/kernelsu_lock.py --update "$RUNNER_TEMP/upstream-kernelsu" --revision "$REVISION" --upstream-revision "$UPSTREAM_REVISION"
       - name: Replay the port and materialize the complete updated source
         if: steps.detect.outputs.candidate_needed == 'true'
         run: |

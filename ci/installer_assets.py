@@ -243,6 +243,8 @@ def build(artifact, identity):
     report = json.loads((artifact / 'report.json').read_text())
     release = identity['kernel_release']
     version = asset_format(identity)
+    if version == 3:
+        variant_assets.verify_builtin_susfs_payload(artifact, report, identity)
     filenames = names(release, version, identity.get('id'))
     ak_name, wlan_name = filenames[:2]
     if report['kernel_release'] != release:
@@ -371,7 +373,7 @@ def build(artifact, identity):
         extra['payload.sha256'] = (installed_payload(extra), False)
         products[filenames[2]] = zip_bytes(extra)
     metadata['sha256'] = {name: sha(data) for name, data in products.items()}
-    if version == 3:
+    if version == 3 and not variant_assets.susfs_builtin(identity):
         metadata['variant'] = {key: identity[key] for key in ('id', 'label', 'features', 'profile')}
         addons = {}
         addon_root = artifact / 'platform-addon'

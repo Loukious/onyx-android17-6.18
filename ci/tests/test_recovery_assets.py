@@ -53,6 +53,35 @@ class CompleteRecoveryAssets(unittest.TestCase):
                 'depends': ['two' if path.stem == 'one' else ''],
                 'softdep': ['pre: compiled_in'], 'alias': ['fixture:' + path.stem]}
 
+    def test_builtin_susfs_recovery_preserves_driver_payload_without_an_addon(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(recovery_assets, 'read', side_effect=self.metadata), \
+                patch.object(recovery_assets, 'modinfo', side_effect=self.module_info):
+            _, artifact, _, identity = self.fixture(Path(temporary))
+            report = json.loads((artifact / 'report.json').read_text())
+            report['platform_addon_verification'] = []
+            test_release.write_json(artifact / 'report.json', report)
+            identity['features'] = ['susfs-next-builtin']
+            products = recovery_assets.build(artifact, identity)
+            zip_name = recovery_assets.names(identity['kernel_release'], release_naming.asset_format(identity))[0]
+            with zipfile.ZipFile(io.BytesIO(products[zip_name])) as archive:
+                self.assertIn('payload/modules/one.ko', archive.namelist())
+                self.assertIn('payload/modules/native.ko', archive.namelist())
+                self.assertFalse(any('susfs_guard_lkm' in name for name in archive.namelist()))
+
+    def test_builtin_susfs_recovery_rejects_a_stale_private_module(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, artifact, _, identity = self.fixture(Path(temporary))
+            report = json.loads((artifact / 'report.json').read_text())
+            report['platform_addon_verification'] = []
+            test_release.write_json(artifact / 'report.json', report)
+            addon = artifact / 'platform-addon'
+            addon.mkdir()
+            (addon / 'susfs_guard_lkm.ko').write_bytes(b'stale private module')
+            identity['features'] = ['susfs-next-builtin']
+            with self.assertRaisesRegex(ValueError, 'loadable addon payload'):
+                recovery_assets.payload_files(artifact, identity)
+
     def test_complete_archive_payload_and_inventory(self):
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(recovery_assets, 'read', side_effect=self.metadata), \

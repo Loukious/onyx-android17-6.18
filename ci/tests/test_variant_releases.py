@@ -186,6 +186,46 @@ class VariantReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'SUSFS addon'):
                 export_artifacts.export(workspace, root / 'bundle', source, test_release.SOURCE, '123', '1')
 
+    def test_builtin_susfs_exports_without_a_loader_download(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, workspace, builds = fixture(root)
+            for artifact, report in builds.values():
+                report['variant']['features'] = ['ntsync', 'susfs-next-builtin']
+                report['platform_addon_verification'] = []
+                report['susfs'] = {'implementation': 'wildkernels-builtin', 'built_in': True,
+                    'source_revision': 'a' * 40, 'source_sha256': 'b' * 64,
+                    'version': 'v2.4.0', 'runtime_verified': False}
+                shutil.rmtree(artifact / 'platform-addon')
+                rehash(artifact, report)
+            bundle = root / 'bundle'
+            identity = export_artifacts.export(workspace, bundle, source, test_release.SOURCE, '123', '1')
+            self.assertEqual(self.verify(bundle, source), identity)
+            for row in identity['variants']:
+                row['installers'] = ['fixture-installer']
+                downloads = variant_assets.download_map(row)
+                self.assertNotIn('susfs_module', downloads)
+                self.assertIn('internal_wifi', downloads)
+                self.assertIn('external_wifi', downloads)
+            notes = publish_release.release_notes('owner/repo', identity)
+            self.assertIn('SUSFS is built into both kernels', notes)
+            self.assertNotIn('SUSFS-KSU-Module.zip', notes)
+
+    def test_builtin_susfs_rejects_stale_addon_and_missing_provenance(self):
+        for stale in (True, False):
+            with self.subTest(stale=stale), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, workspace, builds = fixture(root)
+                for artifact, report in builds.values():
+                    report['variant']['features'] = ['ntsync', 'susfs-next-builtin']
+                    if not stale:
+                        report['platform_addon_verification'] = []
+                        shutil.rmtree(artifact / 'platform-addon')
+                    rehash(artifact, report)
+                with self.assertRaisesRegex(ValueError, 'loadable addon payload' if stale else 'provenance'):
+                    export_artifacts.export(workspace, root / 'bundle', source, test_release.SOURCE, '123', '1')
+                self.assertFalse((root / 'bundle').exists())
+
     def test_publication_requires_both_complete_installer_sets_before_draft_creation(self):
         with tempfile.TemporaryDirectory() as temporary:
             source, _, _, bundle, _ = self.export(Path(temporary))
@@ -229,6 +269,40 @@ class VariantReleaseTests(unittest.TestCase):
 
 
 class VariantInstallerTests(unittest.TestCase):
+    def test_builtin_susfs_omits_addon_zip_and_preserves_wifi_installers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary)
+            identity = test_extra_installers.ExtraPackageTests().fixture(artifact)
+            identity.update(asset_format=3, id='balanced', label='Balanced',
+                            features=['susfs-next-builtin'], profile={})
+            report = json.loads((artifact / 'report.json').read_text())
+            report['platform_addon_verification'] = []
+            (artifact / 'inputs/modules.json').write_text('[]')
+            rehash(artifact, report)
+            products = installer_assets.build(artifact, identity)
+            ak, internal, external, susfs = installer_assets.names(identity['kernel_release'], 3, 'balanced')
+            self.assertEqual(set(products), {ak, internal, external, 'Onyx-Balanced-installers.json'})
+            with zipfile.ZipFile(io.BytesIO(products[internal])) as archive:
+                self.assertIn('wlan/' + installer_assets.WLAN, archive.namelist())
+            with zipfile.ZipFile(io.BytesIO(products[external])) as archive:
+                self.assertTrue(any(name.endswith('rtl8xxxu.ko') for name in archive.namelist()))
+            self.assertNotIn(susfs, products)
+
+    def test_builtin_susfs_rejects_stale_addon_file_even_without_an_inventory_record(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary)
+            identity = test_extra_installers.ExtraPackageTests().fixture(artifact)
+            identity.update(asset_format=3, id='balanced', label='Balanced',
+                            features=['susfs-next-builtin'], profile={})
+            report = json.loads((artifact / 'report.json').read_text())
+            report['platform_addon_verification'] = []
+            addon = artifact / 'platform-addon'
+            addon.mkdir()
+            (addon / 'susfs_guard_lkm.ko').write_bytes(b'stale addon')
+            rehash(artifact, report)
+            with self.assertRaisesRegex(ValueError, 'loadable addon payload'):
+                installer_assets.build(artifact, identity)
+
     def test_susfs_zip_keeps_reviewed_special_loader_and_matched_module(self):
         with tempfile.TemporaryDirectory() as temporary:
             artifact = Path(temporary)

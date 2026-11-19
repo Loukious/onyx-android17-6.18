@@ -244,13 +244,15 @@ def variant_release_notes(repository, identity):
         return f'[{name}](https://github.com/{repository}/releases/download/{tag}/{quote(name, safe="")})'
     notes = ('Onyx Android 17 / GKI 6.18 with **Balanced** and **Performance** kernels. '
              'Each download includes modules built for that exact kernel.\n\n'
-             '| Variant | TCP default | Full recovery installer | SUSFS addon |\n'
+             '| Variant | TCP default | Full recovery installer | SUSFS |\n'
              '| --- | --- | --- | --- |\n')
     for row in rows:
         downloads = row['downloads']
         tcp = row['profile'].get('configs', {}).get('CONFIG_DEFAULT_TCP_CONG', row['id']).strip('"')
         full = download(downloads['full_recovery']) if downloads.get('full_recovery') else 'unavailable'
-        susfs = download(downloads['susfs_module']) if downloads.get('susfs_module') else 'unavailable'
+        susfs = ('Built into kernel' if variant_assets.susfs_builtin(row)
+                 else download(downloads['susfs_module']) if downloads.get('susfs_module')
+                 else 'unavailable')
         notes += f'| {row["label"]} | {tcp} | {full} | {susfs} |\n'
     notes += '\nThe complete ' + download('release.json') + ' lists both variants, features and checksums.\n'
     for row in rows:
@@ -272,10 +274,16 @@ def variant_release_notes(repository, identity):
               f'- KernelSU Next revision: `{identity["kernelsu_revision"]}`\n'
               f'- Verified build: https://github.com/{repository}/actions/runs/{identity["run_id"]} '
               f'(attempt {identity["run_attempt"]})\n')
-    notes += ('\nThe matched SUSFS KernelSU addon in each variant’s downloads loads its kernel module '
-              'through KernelSU’s special loader. SUSFS activation requires installing that addon; '
-              '[SUSFS userspace settings](https://github.com/sidex15/susfs4ksu-module) remain optional. '
-              'Choose a compatible [NoMount](https://github.com/maxsteeel/nomount) or '
+    if all(variant_assets.susfs_builtin(row) for row in rows):
+        notes += ('\nSUSFS is built into both kernels; no matching SUSFS loader addon is required. '
+                  '[SUSFS userspace settings](https://github.com/sidex15/susfs4ksu-module) '
+                  'can configure the built-in features. ')
+    else:
+        notes += ('\nVariants with a SUSFS addon load its kernel module through KernelSU’s '
+                  'special loader. Install that variant’s matched addon to activate it; '
+                  '[SUSFS userspace settings](https://github.com/sidex15/susfs4ksu-module) '
+                  'remain optional. ')
+    notes += ('Choose a compatible [NoMount](https://github.com/maxsteeel/nomount) or '
               '[Mountify](https://github.com/backslashxx/mountify) metamodule separately when needed. '
               'Kernel backend support does not install or activate either metamodule.\n')
     return notes

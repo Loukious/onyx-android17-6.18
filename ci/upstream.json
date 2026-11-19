@@ -4,5 +4,7 @@
   "ci_branch": "ci",
   "source_branch": "android17-6.18-lts",
   "kernelsu_repository": "https://github.com/KernelSU-Next/KernelSU-Next.git",
-  "kernelsu_branch": "dev"
+  "kernelsu_branch": "dev",
+  "kernelsu_susfs_repository": "https://github.com/pershoot/KernelSU-Next.git",
+  "kernelsu_susfs_branch": "dev-susfs"
 }

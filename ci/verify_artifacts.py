@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 import re
 import sys
 import tarfile
+import variant_assets
 
 
 def digest(path):
@@ -77,6 +78,16 @@ def verify_features(artifact, source_root, report):
     finally:
         sys.path[:] = old_path
         sys.modules.pop(name, None)
+    if variant_assets.verify_builtin_susfs_payload(artifact, report, variant):
+        susfs = report.get('susfs')
+        if (not isinstance(susfs, dict) or susfs.get('built_in') is not True
+                or susfs.get('implementation') != 'wildkernels-builtin'
+                or not re.fullmatch('[0-9a-f]{40}', str(susfs.get('source_revision', '')))
+                or not re.fullmatch('[0-9a-f]{64}', str(susfs.get('source_sha256', '')))
+                or not isinstance(susfs.get('version'), str) or not susfs['version']
+                or type(susfs.get('runtime_verified')) is not bool):
+            raise ValueError('Verified built-in SUSFS provenance is missing')
+        return
     records = report.get('platform_addon_verification')
     if not isinstance(records, list) or [row.get('module') for row in records] != ['susfs_guard_lkm.ko']:
         raise ValueError('Verified SUSFS addon inventory is missing')

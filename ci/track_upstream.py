@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 
 import kernel_toolchains
@@ -33,22 +34,56 @@ def remote_head(repository, branch):
     return revision
 
 
+def contains_official_revision(repository, revision, upstream_repository, upstream_revision):
+    """Prove ancestry using the resolved immutable commits, without changing source pins."""
+    with tempfile.TemporaryDirectory(prefix='onyx-kernelsu-ancestry-') as temporary:
+        subprocess.run(['git', 'init', '-q', temporary], check=True)
+        for remote, commit in ((repository, revision), (upstream_repository, upstream_revision)):
+            subprocess.run(['git', '-C', temporary, 'fetch', '--quiet', '--no-tags', remote, commit],
+                           check=True)
+        result = subprocess.run(['git', '-C', temporary, 'merge-base', '--is-ancestor',
+                                 upstream_revision, revision], check=False)
+        if result.returncode not in (0, 1):
+            raise ValueError('Could not verify the SUSFS fork against official KernelSU dev')
+        return result.returncode == 0
+
+
 def detect():
     pins = json.loads((PORT / 'sources.json').read_text())
     current = pins['common']['revision']
     latest = remote_head(TRACK['repository'], TRACK['branch'])
-    latest_ksu = remote_head(TRACK['kernelsu_repository'], TRACK['kernelsu_branch'])
+    latest_official_ksu = remote_head(TRACK['kernelsu_repository'], TRACK['kernelsu_branch'])
     locked_ksu = kernelsu_lock.read(PORT)
     if (PORT / 'components.json').is_file() and locked_ksu is None:
         raise ValueError('Component sources require a committed KernelSU lock')
+    latest_ksu = latest_official_ksu
+    latest_repository, latest_branch = TRACK['kernelsu_repository'], TRACK['kernelsu_branch']
+    latest_upstream, waiting = '', False
+    if locked_ksu and locked_ksu['repository'] == kernelsu_lock.SUSFS_REPOSITORY:
+        latest_repository, latest_branch = TRACK['kernelsu_susfs_repository'], TRACK['kernelsu_susfs_branch']
+        fork_tip = remote_head(latest_repository, latest_branch)
+        unchanged = (fork_tip == locked_ksu['revision']
+                     and latest_official_ksu == locked_ksu['upstream_revision'])
+        compatible = unchanged or contains_official_revision(
+            latest_repository, fork_tip, TRACK['kernelsu_repository'], latest_official_ksu)
+        waiting = not compatible
+        latest_ksu = fork_tip if compatible else locked_ksu['revision']
+        latest_upstream = latest_official_ksu if compatible else locked_ksu['upstream_revision']
     ksu = locked_ksu['revision'] if locked_ksu else latest_ksu
+    update_needed = bool(locked_ksu and (latest_ksu != ksu
+                         or latest_upstream and latest_upstream != locked_ksu.get('upstream_revision')))
     source_revision = git(PORT.parent, 'rev-parse', 'HEAD')
     state_path = ROOT / 'ci/last-built.json'
     last = json.loads(state_path.read_text()) if state_path.exists() else {}
     result = {'current': current, 'latest': latest, 'kernelsu': ksu,
               'latest_kernelsu': latest_ksu,
-              'kernelsu_update_needed': bool(locked_ksu and latest_ksu != ksu),
-              'candidate_needed': latest != current or bool(locked_ksu and latest_ksu != ksu),
+              'latest_kernelsu_repository': latest_repository,
+              'latest_kernelsu_branch': latest_branch,
+              'latest_kernelsu_upstream_revision': latest_upstream,
+              'latest_official_kernelsu': latest_official_ksu,
+              'kernelsu_upstream_waiting': waiting,
+              'kernelsu_update_needed': update_needed,
+              'candidate_needed': latest != current or update_needed,
               'kernel_changed': latest != current,
               'source_revision': source_revision,
               'source_changed': source_revision != last.get('source_revision'),

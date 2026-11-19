@@ -61,6 +61,7 @@ def modinfo(path):
 def payload_files(artifact, identity):
     report = read(artifact / 'report.json')
     release = identity['kernel_release']
+    variant_assets.verify_builtin_susfs_payload(artifact, report, identity)
     if release != report['kernel_release'] or report.get('qdss_diagnostic') is not False:
         raise ValueError('Complete installer requires a verified ordinary kernel release')
     files = {}
