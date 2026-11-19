@@ -22,6 +22,22 @@ on:
         description: Exact source commit detected by the tracker (leave blank for manual builds)
         type: string
         default: ''
+      compiler_cache_mib:
+        description: Maximum compiler cache per variant in MiB
+        type: number
+        default: 3072
+      toolchain_cache_mib:
+        description: Maximum pinned toolchain Git objects in MiB
+        type: number
+        default: 2560
+      source_cache_mib:
+        description: Maximum pinned source Git objects in MiB
+        type: number
+        default: 1024
+      repository_cache_budget_mib:
+        description: Configured repository cache storage budget in MiB (does not change billing)
+        type: number
+        default: 10240
 
 permissions:
   contents: read
@@ -35,6 +51,10 @@ concurrency:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   KONOHA_SOURCE_ROOT: ${{ github.workspace }}/source
+  ONYX_COMPILER_CACHE_MIB: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.compiler_cache_mib) || '3072' }}
+  ONYX_TOOLCHAINS_CACHE_MIB: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.toolchain_cache_mib) || '2560' }}
+  ONYX_SOURCES_CACHE_MIB: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.source_cache_mib) || '1024' }}
+  ONYX_BUDGET_CACHE_MIB: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.repository_cache_budget_mib) || '10240' }}
 
 jobs:
   resolve:
@@ -65,6 +85,8 @@ jobs:
         run: python3 ci/post_status.py "$REVISION" pending
       - name: Validate automation
         run: python3 -m unittest discover -s ci/tests -v
+      - name: Validate declared cache bounds
+        run: python3 -c 'import sys; sys.path.insert(0, "ci"); from bounded_cache import budgets; print(budgets())'
 
   compile:
     needs: resolve
@@ -93,8 +115,60 @@ jobs:
         run: python3 ci/kernelsu_lock.py --expected "$EXPECTED_KERNELSU_REVISION"
       - name: Prepare standard hosted runner
         run: bash ci/bootstrap_runner.sh
+      - name: Install compiler cache engine
+        run: sudo apt-get install -y --no-install-recommends ccache
+      - name: Resolve pinned dependency cache identities
+        id: pins
+        run: python3 ci/pinned_cache.py keys
+      - name: Restore exact pinned source objects
+        id: source-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-pinned-sources
+          key: ${{ steps.pins.outputs.sources_key }}
+      - name: Restore exact pinned toolchain objects
+        id: toolchain-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-pinned-toolchains
+          key: ${{ steps.pins.outputs.toolchains_key }}
+      - name: Verify restored pins, object checksums and Git connectivity
+        env:
+          SOURCE_MATCH: ${{ steps.source-cache.outputs.cache-matched-key }}
+          TOOLCHAIN_MATCH: ${{ steps.toolchain-cache.outputs.cache-matched-key }}
+        run: |
+          python3 ci/pinned_cache.py restore --bucket sources --root "$RUNNER_TEMP/onyx-pinned-sources" \
+            --reference "$RUNNER_TEMP/onyx-reference" --matched-key "$SOURCE_MATCH"
+          python3 ci/pinned_cache.py restore --bucket toolchains --root "$RUNNER_TEMP/onyx-pinned-toolchains" \
+            --reference "$RUNNER_TEMP/onyx-reference" --matched-key "$TOOLCHAIN_MATCH"
       - name: Sync locked kernel and vendor sources
-        run: python3 source/port/prepare.py "$RUNNER_TEMP/konoha-workspace" --jobs 4
+        run: python3 source/port/prepare.py "$RUNNER_TEMP/konoha-workspace" --jobs 4 --reference "$RUNNER_TEMP/onyx-reference"
+      - name: Verify real shallow repo reference behavior
+        if: matrix.variant == 'balanced'
+        run: ONYX_TEST_REPO_SOURCE="$RUNNER_TEMP/konoha-workspace/.repo/repo" python3 -m unittest discover -s ci/tests -p test_pinned_repo.py -v
+      - name: Verify pinned C and C++ compiler cache routing
+        run: |
+          clang_pin=$(python3 -c 'import json; print(json.load(open("source/port/sources.json"))["common"]["clang"])')
+          ONYX_TEST_CLANG_DIR="$RUNNER_TEMP/konoha-workspace/prebuilts/clang/host/linux-x86/clang-$clang_pin" \
+            python3 -m unittest discover -s ci/tests -p test_bounded_compiler.py -v
+      - name: Prepare bounded pinned source objects
+        if: matrix.variant == 'balanced' && steps.source-cache.outputs.cache-hit != 'true'
+        run: python3 ci/pinned_cache.py save --bucket sources --root "$RUNNER_TEMP/onyx-pinned-sources" --workspace "$RUNNER_TEMP/konoha-workspace"
+      - name: Save bounded pinned source objects
+        if: matrix.variant == 'balanced' && steps.source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-pinned-sources
+          key: ${{ steps.pins.outputs.sources_key }}
+      - name: Prepare bounded pinned toolchain objects
+        if: matrix.variant == 'balanced' && steps.toolchain-cache.outputs.cache-hit != 'true'
+        run: python3 ci/pinned_cache.py save --bucket toolchains --root "$RUNNER_TEMP/onyx-pinned-toolchains" --workspace "$RUNNER_TEMP/konoha-workspace"
+      - name: Save bounded pinned toolchain objects
+        if: matrix.variant == 'balanced' && steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-pinned-toolchains
+          key: ${{ steps.pins.outputs.toolchains_key }}
       - name: Replay patches and verify complete committed kernel and module sources
         run: |
           python3 source/port/stage.py "$RUNNER_TEMP/konoha-workspace"
@@ -108,6 +182,22 @@ jobs:
             python3 source/port/verify_mi_thermal.py \
               "$RUNNER_TEMP/konoha-workspace/onyx/drivers/thermal/xiaomi/mi_thermal_interface.c"
           fi
+      - name: Resolve variant compiler cache compatibility
+        id: compiler-key
+        env:
+          VARIANT: ${{ matrix.variant }}
+          DIAGNOSTIC: ${{ inputs.diagnostic }}
+        run: |
+          flags=()
+          if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--diagnostic); fi
+          python3 ci/compiler_cache.py key --variant "$VARIANT" "${flags[@]}"
+      - name: Restore separate variant compiler results
+        id: compiler-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-ccache-${{ matrix.variant }}
+          key: ${{ steps.compiler-key.outputs.key }}
+          restore-keys: ${{ steps.compiler-key.outputs.prefix }}
       - name: Build the selected matched kernel and module variant
         env:
           VARIANT: ${{ matrix.variant }}
@@ -115,14 +205,15 @@ jobs:
           KONOHA_CI_REVISION: ${{ needs.resolve.outputs.automation_revision }}
         run: |
           flags=()
-          if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--qdss-diagnostic); fi
+          if [[ "$DIAGNOSTIC" == true ]]; then flags+=(--diagnostic); fi
           available=$(df --output=avail -B1 "$RUNNER_TEMP/konoha-workspace" | tail -1)
           if (( available < 30 * 1024 * 1024 * 1024 )); then
             echo 'At least 30 GiB free disk is required before a feature build.' >&2
             df -h "$RUNNER_TEMP/konoha-workspace"
             exit 1
           fi
-          python3 source/port/build.py "$RUNNER_TEMP/konoha-workspace" --variant "$VARIANT" --bazel-batch \
+          python3 ci/compiler_cache.py build --workspace "$RUNNER_TEMP/konoha-workspace" --variant "$VARIANT" \
+            --cache "$RUNNER_TEMP/onyx-ccache-$VARIANT" --control "$RUNNER_TEMP/onyx-compiler-control" \
             --jobs "$KONOHA_BUILD_JOBS" --memory-mb "$KONOHA_BUILD_MEMORY_MB" "${flags[@]}"
       - name: Verify and archive the compiler output
         id: transfer
@@ -143,6 +234,28 @@ jobs:
           retention-days: 7
           compression-level: 0
           if-no-files-found: error
+      - name: Save bounded verified variant compiler results
+        if: success() && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/onyx-ccache-${{ matrix.variant }}
+          key: ${{ steps.compiler-key.outputs.key }}
+      - name: Confirm actual repository cache retention
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPILER_KEY: ${{ steps.compiler-key.outputs.key }}
+          SOURCE_KEY: ${{ steps.pins.outputs.sources_key }}
+          TOOLCHAIN_KEY: ${{ steps.pins.outputs.toolchains_key }}
+        run: python3 ci/cache_retention.py "$COMPILER_KEY" "$SOURCE_KEY" "$TOOLCHAIN_KEY"
+      - name: Upload cache sizes and measured compiler reuse
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cache-report-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/onyx-compiler-control/compiler-cache-report.json
+          retention-days: 7
+          if-no-files-found: warn
       - name: Upload compiler failure evidence
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

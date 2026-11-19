@@ -128,6 +128,8 @@ class BuildCache(unittest.TestCase):
                         with Path({str(records)!r}).open('a') as output:
                             output.write(json.dumps(sys.argv[1:]) + '\\n')
                     '''))
+                (root / 'ci').mkdir()
+                (root / 'ci/compiler_cache.py').write_text((port / 'build.py').read_text())
                 environment = {'PATH': str(commands) + os.pathsep + os.defpath,
                                'FEATURE_TEST_AVAILABLE': str(available), 'VARIANT': variant,
                                'DIAGNOSTIC': str(diagnostic).lower(),
@@ -146,18 +148,22 @@ class BuildCache(unittest.TestCase):
                 call = calls[0]
                 self.assertEqual(call[call.index('--jobs') + 1], '3')
                 self.assertEqual(call[call.index('--memory-mb') + 1], '8192')
-                self.assertEqual('--qdss-diagnostic' in call, diagnostic)
+                self.assertEqual(('--diagnostic' if features else '--qdss-diagnostic') in call, diagnostic)
                 self.assertEqual('--cache-dir' in call, not features and supported)
                 recorded = outputs.read_text() if outputs.exists() else ''
                 if features:
                     self.assertEqual(call[call.index('--variant') + 1], variant)
-                    self.assertIn('--bazel-batch', call)
+                    self.assertEqual(call[call.index('--cache') + 1], str(root / 'temporary' / ('onyx-ccache-' + variant)))
+                    self.assertEqual(call[call.index('--workspace') + 1], str(root / 'temporary/konoha-workspace'))
+                    self.assertEqual(call[call.index('--control') + 1], str(root / 'temporary/onyx-compiler-control'))
                     self.assertEqual(recorded, '')
                 elif supported:
                     self.assertEqual(call[call.index('--cache-dir') + 1], str(root / 'temporary/kleaf-cache'))
                     self.assertEqual(recorded.strip(), 'cache_enabled=true')
         compiler = workflow.split('  compile:\n', 1)[1].split('  build:\n', 1)[0]
-        self.assertNotIn('actions/cache/', compiler)
+        self.assertIn('actions/cache/restore@', compiler)
+        self.assertIn('onyx-ccache-${{ matrix.variant }}', compiler)
+        self.assertNotIn('kleaf-cache-links.json', compiler)
         for label in ('Restore Kleaf incremental build cache',
                       'Restore independent compiler cache files and timestamps'):
             step = workflow.split('      - name: ' + label, 1)[1].split('      - name:', 1)[0]

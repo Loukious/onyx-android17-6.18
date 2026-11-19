@@ -319,11 +319,15 @@ tracker supplies them to identify exact detected inputs and suppress duplicates.
 
 ## Cached workflow
 
-The separate **Cached Android 17 6.18 variant builds** workflow on `ci` is a
-manual cache-validation build. It keeps Balanced and Performance on separate
-runners and exports the same complete verified installer bundles as the release
-workflow. It does not publish releases or update the tracker's source status.
-The release workflow and its running jobs remain independent.
+The automatic `build.yml` workflow uses bounded compiler and pinned dependency
+caches for both Balanced and Performance, on separate runners. The upstream
+tracker dispatches this workflow for new kernel or KernelSU inputs; publication
+still waits for both matched variant bundles and the full release checks.
+
+The separate **Cached Android 17 6.18 variant builds** workflow remains available
+for manual cache validation with the same compile steps. It exports verified
+installer bundles without publishing releases or changing tracker status. Its
+running jobs remain independent of the automatic release workflow.
 
 Compiler results use separate content-addressed ccache stores, with a default
 3 GiB ceiling for each variant and automatic LRU cleanup at 2.75 GiB. This

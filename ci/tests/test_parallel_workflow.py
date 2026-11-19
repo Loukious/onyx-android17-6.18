@@ -16,6 +16,20 @@ def job(name):
 
 
 class ParallelWorkflowTests(unittest.TestCase):
+    def test_upstream_dispatch_reaches_cached_variants_and_verified_release(self):
+        root = Path(__file__).resolve().parents[2]
+        for name in ('dispatch_build.py', 'publish_update.py'):
+            self.assertIn("'workflow', 'run', 'build.yml'", (root / 'ci' / name).read_text())
+        compiler = job('compile')
+        self.assertIn('compiler_cache.py build', compiler)
+        self.assertIn('--variant "$VARIANT"', compiler)
+        self.assertIn('--cache "$RUNNER_TEMP/onyx-ccache-$VARIANT"', compiler)
+        self.assertLess(compiler.index('Verify restored pins'), compiler.index('Sync locked kernel'))
+        self.assertLess(compiler.index('Upload the verified compiler output'), compiler.index('Save bounded verified variant compiler results'))
+        self.assertIn('Validate declared cache bounds', job('resolve'))
+        self.assertIn('Record complete source build result', job('status'))
+        self.assertIn('Publish all verified release assets', job('release'))
+
     def test_runners_share_resolved_commits_and_publication_waits_for_complete_build(self):
         compiler = job('compile')
         self.assertIn('needs: resolve', compiler)
