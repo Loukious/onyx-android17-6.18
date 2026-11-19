@@ -67,7 +67,11 @@ struct pci_pme_device {
 	struct pci_dev *dev;
 };
 
+#ifdef CONFIG_ONYX_PERFORMANCE
+#define PME_TIMEOUT 4000 /* How long between PME checks */
+#else
 #define PME_TIMEOUT 1000 /* How long between PME checks */
+#endif
 
 /*
  * Following exit from Conventional Reset, devices must be ready within 1 sec

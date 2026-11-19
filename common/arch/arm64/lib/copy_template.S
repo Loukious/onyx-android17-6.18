@@ -39,6 +39,9 @@ C_h	.req	x12
 D_l	.req	x13
 D_h	.req	x14
 
+#ifdef CONFIG_ONYX_PERFORMANCE
+	prfm	pldl1strm, [src, #(1*L1_CACHE_BYTES)]
+#endif
 	mov	dst, dstin
 
 #ifdef CONFIG_AS_HAS_MOPS
@@ -179,6 +182,9 @@ alternative_else_nop_endif
 	ldp1	C_l, C_h, src, #16
 	stp1	D_l, D_h, dst, #16
 	ldp1	D_l, D_h, src, #16
+#ifdef CONFIG_ONYX_PERFORMANCE
+	prfm	pldl1strm, [src, #(4*L1_CACHE_BYTES)]
+#endif
 	subs	count, count, #64
 	b.ge	1b
 	stp1	A_l, A_h, dst, #16

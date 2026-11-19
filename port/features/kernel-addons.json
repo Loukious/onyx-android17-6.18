@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "base_revision": "82dd5c4e1f46d0d7cb168cfed4cc2d08326c1901",
+  "patch_series": [
+    {
+      "path": "port/features/patches/bbrv3-6.18.patch",
+      "sha256": "781cbafefac9ec1886682a037ad67846dc05cd4fbc8d2beda615afbc0a5a0d89"
+    },
+    {
+      "path": "port/features/patches/baseband-guard-6.18.patch",
+      "sha256": "a6a0baeee167c2cf890ccf7e6d4f2582a4557e0d7820ddcc78bb8f7f59a6a915"
+    },
+    {
+      "path": "port/features/patches/unicode-basename-guard.patch",
+      "sha256": "34000eda819c91b78b997e4ed4d90dd1610fe87bab44a59e99e854dfd3a7888d"
+    },
+    {
+      "path": "port/features/patches/usb-dvd-emulation.patch",
+      "sha256": "d3cfe540bc660488945967fbbb2fbdbecd66d63a5c3075d78a0773e6b40291f5"
+    },
+    {
+      "path": "port/features/patches/performance-gated.patch",
+      "sha256": "7be2553e90e13e5125aefbe85c9d74e14bcf540cade3d0f8d139fa70c3170303"
+    }
+  ],
+  "addons": {
+    "bbrv3": {
+      "repository": "https://github.com/WildKernels/GKI_KernelSU_SUSFS",
+      "revision": "24f78ca1b24fd1be2ebaffd215464f0d292a4877",
+      "upstream_patch": ".github/patches/bbrv3/bbrv3_6.18.patch",
+      "license": "tcp_bbr3.c upstream Dual BSD/GPL; port selects GPL-2.0-only",
+      "configuration": [
+        "CONFIG_TCP_CONG_BBR3=y",
+        "CONFIG_NET_SCH_FQ=y"
+      ],
+      "adaptations": [
+        "Built-in bool for direct TCP hooks",
+        "Reno fallback on private allocation failure, preserving module ownership",
+        "Keep stock tcp_skb_cb layout and64-bit timestamps",
+        "Private socket-owned state and RCU-safe diagnostic hash",
+        "Identify BBR3 before reading shared congestion private bytes",
+        "Preserve other congestion algorithms ECN callbacks without reused flags/bits",
+        "Place TCP_BBR3_INFO in correct socket-option switch, lock socket and return telemetry length",
+        "Mark TLP recovery only on confirmed loss recovery",
+        "Read newest exact private transmit snapshot; safely skip missing per-packet bound"
+      ],
+      "limitations": [
+        "6.18 lacks old shallow-ECN route flag; incompatible shallow-ECN opt-in is disabled, loss-based model remains active",
+        "64-skb private snapshot ring may evict older packet samples; aggregate loss model remains active"
+      ]
+    },
+    "baseband_guard": {
+      "repository": "https://github.com/vc-teahouse/Baseband-guard",
+      "revision": "028ff7fd509e2104596da7cc1ef8e6ce2a0c9082",
+      "license": "GPL-2.0-only",
+      "configuration": [
+        "CONFIG_BBG=y",
+        "CONFIG_SECURITY_SELINUX=y",
+        "CONFIG_LSM must contain baseband_guard"
+      ],
+      "defaults": {
+        "BBG_BLOCK_BOOT": false,
+        "BBG_BLOCK_RECOVERY": false
+      },
+      "adaptations": [
+        "Reproducible Kbuild, fixed source identity and locally generated SELinux class IDs",
+        "Linux6.18 private block header and two-argument blkdev_get_no_open",
+        "Handle missing block device safely",
+        "Serialize allow-cache insertion and readers",
+        "Permit both exact A/B suffixes when corresponding boot/recovery protection is disabled",
+        "Retry late-installed root SELinux domains, never cache failure permanently",
+        "Detect current su/ksu/magisk domain at block-write enforcement, including direct elevation without exec",
+        "Retain sticky exec provenance; skip domain checks for ordinary non-block/read-only permissions"
+      ],
+      "generated_tool_source": {
+        "path": "common/security/selinux/genheaders.c",
+        "sha256": "6efe0d819e4ce85da20c705bbd1e292310dd56bb0f2457541f80edb5262cd87a"
+      }
+    },
+    "unicode_basename_guard": {
+      "repository": "https://github.com/WildKernels/kernel_patches",
+      "revision": "4d4dd02faacccb61dffaf1b0b3a1b87e2d71c52c",
+      "upstream_reference": "common/unicode_bypass_fix_6.1+.patch",
+      "license": "GPL-2.0-only",
+      "adaptation": "Reject creation of casefolded basenames normalizing to empty/dot/dotdot through Ext4/F2FS add-entry paths; preserve existing lookup/normalization/hash semantics",
+      "rejected_reference_reason": "Global patch emitted default-ignorable bytes while utf8nlen still counted them as zero, changing hashes and breaking normalization length contract"
+    },
+    "usb_dvd": {
+      "repository": "https://github.com/ravindu644/USB-Arsenal",
+      "revision": "533a7f47746f14e1fdece6c5fe3058921eaf787a",
+      "upstream_patch": "kernel-patches/6.12/0001-pikvm-msd-dvd-support.patch",
+      "license": "GPL-2.0-only",
+      "configuration": [
+        "CONFIG_USB_CONFIGFS=y",
+        "CONFIG_USB_CONFIGFS_MASS_STORAGE=y",
+        "CONFIG_USB_CONFIGFS_F_HID=y",
+        "CONFIG_USB_CONFIGFS_NCM=y"
+      ],
+      "already_in_6_18": [
+        "HID writable interval",
+        "HID allocation-time locking/list initialization",
+        "HID cdev lifetime fixes"
+      ]
+    },
+    "performance": {
+      "repository": "https://github.com/WildKernels/kernel_patches",
+      "revision": "4d4dd02faacccb61dffaf1b0b3a1b87e2d71c52c",
+      "license": "GPL-2.0-only",
+      "gate": "CONFIG_ONYX_PERFORMANCE",
+      "default": false,
+      "tunings": [
+        {
+          "source": "file_struct_8bytes_align.patch",
+          "change": "Minimum struct file alignment 8 instead of4",
+          "gate": "CONFIG_ONYX_PERFORMANCE",
+          "abi": "Real ARM64 Clang/GENDWARF probes retain existing shared CRCs"
+        },
+        {
+          "source": "reduce_cache_pressure.patch",
+          "change": "vfs_cache_pressure default100 to50",
+          "tradeoff": "Retain more directory/inode cache"
+        },
+        {
+          "source": "mem_opt_prefetch.patch",
+          "change": "Prefetch one initial and four loop-ahead ARM64 cache lines"
+        },
+        {
+          "source": "optimise_memcmp.patch",
+          "change": "Scalar32-byte comparison loop and short-input improvements",
+          "adaptation": "Remove bare FPSIMD path; generic kernel memcmp must preserve vector state"
+        },
+        {
+          "source": "minimise_wakeup_time.patch",
+          "change": "Alarmtimer hold to nearest deadline+1ms",
+          "adaptation": "Clamp1..2000ms, including already-overdue negative deadlines"
+        },
+        {
+          "source": "int_sqrt.patch",
+          "change": "Fixed-high-bit integer sqrt variant",
+          "adaptation": "Keep highest power-of-four for large inputs and preserve exported signature"
+        },
+        {
+          "source": "reduce_gc_thread_sleep_time.patch",
+          "change": "F2FS urgent GC sleep500ms to50ms"
+        },
+        {
+          "source": "reduce_freeze_timeout.patch",
+          "change": "Freezer default20seconds to1second",
+          "adaptation": "Honor valid runtime sysfs writes for recovery"
+        },
+        {
+          "source": "clear_page_16bytes_align.patch",
+          "change": "Align ARM64 clear_page entry to16bytes"
+        },
+        {
+          "source": "avoid_extra_s2idle_wake_attempts.patch",
+          "change": "Wake s2idle only on first abort increment"
+        },
+        {
+          "source": "disable_cache_hot_buddy.patch",
+          "change": "Disable CACHE_HOT_BUDDY scheduling preference"
+        },
+        {
+          "source": "f2fs_enlarge_min_fsync_blocks.patch",
+          "change": "F2FS minimum fsync blocks8 to20"
+        },
+        {
+          "source": "increase_ext4_default_commit_age.patch",
+          "change": "Ext4 journal default commit age5seconds to30seconds",
+          "tradeoff": "Larger window for unsynced metadata loss during sudden power loss"
+        },
+        {
+          "source": "increase_sk_mem_packets.patch",
+          "change": "Socket default memory packet scale256 to1024",
+          "tradeoff": "Larger socket buffers use more memory"
+        },
+        {
+          "source": "reduce_pci_pme_wakeups.patch",
+          "change": "PCI PME polling interval1second to4seconds",
+          "tradeoff": "Longer polling latency for devices needing this workaround"
+        },
+        {
+          "source": "silence_irq_cpu_logspam.patch",
+          "change": "IRQ affinity failure message becomes debug-ratelimited"
+        },
+        {
+          "source": "silence_system_logspam.patch",
+          "change": "Suppress devkmsg messages containing healthd/logd/dashd",
+          "tradeoff": "Less userspace diagnostic logging"
+        }
+      ],
+      "omitted": {
+        "optimized_mem_operations.patch": "ARM64 already uses native assembly mem functions",
+        "f2fs_reduce_congestion.patch": "DEFAULT_IO_TIMEOUT and the old congestion wait were removed from Linux 6.18",
+        "add_timeout_wakelocks_globally.patch": "No-timeout wake locks must remain held until caller releases them; forced expiry violates the API"
+      }
+    }
+  },
+  "vendor": {
+    "blobs_manifest": "port/features/vendor/upstream-blobs.json",
+    "sha256": "aebb127a4278b1ae2d85c5d9638e63c9542acd55fad185cef1da20f728b50f32",
+    "files": {
+      "port/features/vendor/upstream-blobs.json": "aebb127a4278b1ae2d85c5d9638e63c9542acd55fad185cef1da20f728b50f32",
+      "port/features/vendor/unicode.patch": "0dcf1f45bd1cf7ad973e995a265ed1eb9732012ddbbaea1d86b273e98e60d74a",
+      "port/features/vendor/usb-dvd.patch": "9ba97ac50589586b260088c4afb469ab9ab5eef11b2d48350e7861b3f95fc441",
+      "port/features/vendor/nomount.tar": "ba14f3a1c79b0a0be609502914242da343fac9d627408b3d86b4596e8b836c09",
+      "port/features/vendor/bbrv3/bbrv3_6.18.patch": "2d8e535db75a637b61bd0f1fd760a06a1ddb85513fd83488f9a239e4ea9f9a9e",
+      "port/features/vendor/baseband-guard/baseband_guard.h": "881d0f418d72669e0d0a1e14ee3cfc2b73ff402d0c46fae3f3b88e4bd71e1ac9",
+      "port/features/vendor/baseband-guard/Makefile": "ed284bca17554761cbd6126b70937e4e69eec6c4a3f524cdd9b38016acd1ff4b",
+      "port/features/vendor/baseband-guard/LICENSE": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
+      "port/features/vendor/baseband-guard/kernel_compat.h": "deb698515d2c2551a061c904beeb4874f0114d893715d67d8370da50041348c3",
+      "port/features/vendor/baseband-guard/Kconfig": "ed413c4d12e76fb6eec3b3d6b27f6fb0cd70838514c64c4038bc958fd6fdf77f",
+      "port/features/vendor/baseband-guard/baseband_guard.c": "07f45991d2233522d24a3e2297fef89e64f99a2aa1c0249284b2e15f5c5ff53e",
+      "port/features/vendor/baseband-guard/blkdev_helper.h": "113345042edd80055cf5ab4497af73815b1671b3c683500089e51c55514c93a1",
+      "port/features/vendor/baseband-guard/blkdev_helper.c": "3d0664de564ae14177b9e4155970c297e49e4ba3f85e647065c778a4f2f4802f",
+      "port/features/vendor/performance/clear_page_16bytes_align.patch": "a4058de7b35494e88d58e5b74142fecde8c15d81bd0bf5307544b01225ce9bcc",
+      "port/features/vendor/performance/avoid_extra_s2idle_wake_attempts.patch": "0216f48b2fed634d9b308ff599de655713290cabc6b94855779207b0f2d69c38",
+      "port/features/vendor/performance/minimise_wakeup_time.patch": "3058f76531add1cab3fe3387b6cb2c76db42062d3af038c9a31c2c5a8ed048ef",
+      "port/features/vendor/performance/disable_cache_hot_buddy.patch": "985472a58100fcbfa93ae99d9ed769f0488f529b64eb293273b24fc2b96e63d3",
+      "port/features/vendor/performance/reduce_cache_pressure.patch": "ebc40b3302717c5a9e46a219de22760f28b6cb2a46dc3685a901973d6149d011",
+      "port/features/vendor/performance/f2fs_enlarge_min_fsync_blocks.patch": "2049fbaa00ba6d707ceae46bd6d6162f2481ead77bbd1f887ee2522387a36cfb",
+      "port/features/vendor/performance/file_struct_8bytes_align.patch": "fb07e16d56de596cc1b99cb50e8802dedd50de7337dc4c94745e84c516d0b169",
+      "port/features/vendor/performance/mem_opt_prefetch.patch": "da6572571b56afe8d6d0aac34727a362770bfbd32359e2fd13b1c00be2063ee4",
+      "port/features/vendor/performance/f2fs_reduce_congestion.patch": "c5f211765607284e6d01f329b48f1166e0d0ff49cfadd9a9ddf5c132dbd33620",
+      "port/features/vendor/performance/reduce_pci_pme_wakeups.patch": "6eff52bb81d8ff5ae019a1a3504e2aed170f51694a37380beaa74b704751d73b",
+      "port/features/vendor/performance/increase_sk_mem_packets.patch": "fec65e7072a2675d1ddc3a36c3375831047077156781c6901b2b42c7a09e9438",
+      "port/features/vendor/performance/add_timeout_wakelocks_globally.patch": "4d31750a38718b7ea34267ce4862a0712762ae458344ad2f28e9b6ddfd0ba120",
+      "port/features/vendor/performance/reduce_gc_thread_sleep_time.patch": "c4c81b00cf0a44419dc22f828d489df598fb747700e7453077cd12f51c3a6a84",
+      "port/features/vendor/performance/silence_system_logspam.patch": "272c0add87fbc838d17d033d082f35de7eb05dd832b82248d9c91274dbd46c36",
+      "port/features/vendor/performance/reduce_freeze_timeout.patch": "ff794be82ce325fb2c9cef1e1c302d64a026fb9d13cb3677ff76d5d60f554be1",
+      "port/features/vendor/performance/int_sqrt.patch": "d40b3e750d556b6748345a704039d68a5801416368da2800be3d30f3d88cb15c",
+      "port/features/vendor/performance/increase_ext4_default_commit_age.patch": "da44f6c0ffe5dc1ca365071247a8fa0963ed553ae6f76ad7333b9d9a341c9998",
+      "port/features/vendor/performance/silence_irq_cpu_logspam.patch": "125a07662c660ff8ecf4c855d083381f7cf2ee61a67ac19bd4374bd09a4b0a36",
+      "port/features/vendor/performance/optimise_memcmp.patch": "514f39aa54cfd0c41624c9ebd172edea7bc73f60b828d4106a0d707da63ddb66",
+      "port/features/vendor/performance/optimized_mem_operations.patch": "c0b611aad93e9d68c0616cc1e44d63c7b3678c2694d95d55b0ee0d893895d5d4",
+      "port/features/vendor/baseband-guard/tracing/Makefile": "9da4290e300c49fd8900d7e515e1eb753aaaba6218e3ec0920c22503d9854ff4",
+      "port/features/vendor/baseband-guard/tracing/tracing.h": "171c535b3a20fa8fd73c57c5d939c583239f558fe36fea95238e772d55af1373",
+      "port/features/vendor/baseband-guard/tracing/kernel_compat.h": "0d1d2d32c2b2d3ed989c4bfb2bbb5b2179b749dec5d870698fe4ade4d3a99b12",
+      "port/features/vendor/baseband-guard/tracing/tracing.c": "6e41db600ed80e207b34455678be6fc9c47d47be9319ae9fcc5ce53a2f660da2"
+    }
+  },
+  "validation": {
+    "replay_matched_files": 45,
+    "host_C_regression_tests": 6,
+    "arm64_memcmp_emulated_cases": 3825,
+    "scoped_ARM64_object_checks": 48,
+    "scope": "Source compatibility and bounded host/emulator tests; device boot and full KMI checks remain part of the aggregate build validation"
+  }
+}

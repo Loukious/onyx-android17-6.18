@@ -1254,7 +1254,11 @@ struct file {
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
 } __randomize_layout
+#ifdef CONFIG_ONYX_PERFORMANCE
+  __attribute__((aligned(8)));
+#else
   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
+#endif
 
 struct file_handle {
 	__u32 handle_bytes;
@@ -3761,9 +3765,36 @@ static inline bool generic_ci_validate_strict_name(struct inode *dir,
 
 	return !utf8_validate(dir->i_sb->s_encoding, name);
 }
+
+/* Creation-only check: preserve normalization and lookup of existing names,
+ * but do not introduce basenames casefolding to empty, "." or "..". */
+static inline bool generic_ci_validate_new_name(struct inode *dir,
+					       const struct qstr *name)
+{
+	unsigned char folded[3];
+	int len;
+
+	if (!IS_CASEFOLDED(dir) || !dir->i_sb->s_encoding)
+		return true;
+
+	/* Three bytes suffice for two dots and the terminator. Longer names
+	 * return -EINVAL here; the full strict validation below handles them. */
+	len = utf8_casefold(dir->i_sb->s_encoding, name, folded, sizeof(folded));
+	if (!len || (len == 1 && folded[0] == '.') ||
+	    (len == 2 && folded[0] == '.' && folded[1] == '.'))
+		return false;
+
+	return generic_ci_validate_strict_name(dir, name);
+}
 #else
 static inline bool generic_ci_validate_strict_name(struct inode *dir,
 						   const struct qstr *name)
+{
+	return true;
+}
+
+static inline bool generic_ci_validate_new_name(struct inode *dir,
+					       const struct qstr *name)
 {
 	return true;
 }

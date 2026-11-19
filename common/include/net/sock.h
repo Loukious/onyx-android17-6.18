@@ -3014,7 +3014,11 @@ void sk_get_meminfo(const struct sock *sk, u32 *meminfo);
  * platforms.  This makes socket queueing behavior and performance
  * not depend upon such differences.
  */
+#ifdef CONFIG_ONYX_PERFORMANCE
+#define _SK_MEM_PACKETS		1024
+#else
 #define _SK_MEM_PACKETS		256
+#endif
 #define _SK_MEM_OVERHEAD	SKB_TRUESIZE(256)
 #define SK_WMEM_DEFAULT		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
 #define SK_RMEM_DEFAULT		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)

@@ -1,0 +1,252 @@
+{
+  "format": 1,
+  "shared_features": [
+    "kernelsu-next-dev",
+    "susfs-next-lkm",
+    "nomount",
+    "mountify-overlayfs",
+    "baseband-guard",
+    "wireguard",
+    "tcp-bbr1",
+    "tcp-bbr3",
+    "tcp-cubic-bic-westwood-htcp",
+    "ipset",
+    "ipv6-nat",
+    "ttl-hop-limit-targets",
+    "connmark",
+    "fq-fq-codel-cake",
+    "cifs-xattrs",
+    "tmpfs-xattrs-posix-acl",
+    "bpf-btf-tracing-fuse-bpf",
+    "ntsync",
+    "usb-arsenal-dvd",
+    "unicode-basename-guard",
+    "droidspaces"
+  ],
+  "configs": {
+    "CONFIG_ONYX_FEATURES": "y",
+    "CONFIG_NOMOUNT": "y",
+    "CONFIG_KEYS": "y",
+    "CONFIG_OVERLAY_FS": "y",
+    "CONFIG_TMPFS_XATTR": "y",
+    "CONFIG_TMPFS_POSIX_ACL": "y",
+    "CONFIG_WIREGUARD": "y",
+    "CONFIG_TCP_CONG_ADVANCED": "y",
+    "CONFIG_TCP_CONG_BBR": "y",
+    "CONFIG_TCP_CONG_BBR3": "y",
+    "CONFIG_TCP_CONG_CUBIC": "y",
+    "CONFIG_TCP_CONG_BIC": "y",
+    "CONFIG_TCP_CONG_WESTWOOD": "y",
+    "CONFIG_TCP_CONG_HTCP": "y",
+    "CONFIG_NET_SCH_FQ": "y",
+    "CONFIG_NET_SCH_FQ_CODEL": "y",
+    "CONFIG_NET_SCH_CAKE": "y",
+    "CONFIG_NET_ACT_CONNMARK": "y",
+    "CONFIG_IP_SET": "y",
+    "CONFIG_IP_SET_MAX": "65534",
+    "CONFIG_NETFILTER_XT_SET": "y",
+    "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE": "y",
+    "CONFIG_NETFILTER_XT_MATCH_RECENT": "y",
+    "CONFIG_IP_NF_TARGET_TTL": "y",
+    "CONFIG_IP6_NF_TARGET_HL": "y",
+    "CONFIG_IP6_NF_MATCH_HL": "y",
+    "CONFIG_IP6_NF_NAT": "y",
+    "CONFIG_IP6_NF_TARGET_MASQUERADE": "y",
+    "CONFIG_CIFS": "m",
+    "CONFIG_CIFS_XATTR": "y",
+    "CONFIG_NTSYNC": "y",
+    "CONFIG_DEBUG_INFO_BTF": "y",
+    "CONFIG_BPF_SYSCALL": "y",
+    "CONFIG_BPF_EVENTS": "y",
+    "CONFIG_KPROBE_EVENTS": "y",
+    "CONFIG_UPROBE_EVENTS": "y",
+    "CONFIG_FUSE_BPF": "y",
+    "CONFIG_KALLSYMS_ALL": "y",
+    "CONFIG_BBG": "y",
+    "CONFIG_BBG_BLOCK_BOOT": "n",
+    "CONFIG_BBG_BLOCK_RECOVERY": "n",
+    "CONFIG_IP_SET_BITMAP_IP": "y",
+    "CONFIG_IP_SET_BITMAP_IPMAC": "y",
+    "CONFIG_IP_SET_BITMAP_PORT": "y",
+    "CONFIG_IP_SET_HASH_IP": "y",
+    "CONFIG_IP_SET_HASH_IPMARK": "y",
+    "CONFIG_IP_SET_HASH_IPPORT": "y",
+    "CONFIG_IP_SET_HASH_IPPORTIP": "y",
+    "CONFIG_IP_SET_HASH_IPPORTNET": "y",
+    "CONFIG_IP_SET_HASH_IPMAC": "y",
+    "CONFIG_IP_SET_HASH_MAC": "y",
+    "CONFIG_IP_SET_HASH_NETPORTNET": "y",
+    "CONFIG_IP_SET_HASH_NET": "y",
+    "CONFIG_IP_SET_HASH_NETNET": "y",
+    "CONFIG_IP_SET_HASH_NETPORT": "y",
+    "CONFIG_IP_SET_HASH_NETIFACE": "y",
+    "CONFIG_IP_SET_LIST_SET": "y",
+    "CONFIG_LSM": "\"landlock,lockdown,yama,loadpin,safesetid,selinux,bpf,baseband_guard\"",
+    "CONFIG_ANDROID_KABI_RESERVE": "y",
+    "CONFIG_GENDWARFKSYMS": "y",
+    "CONFIG_CIFS_POSIX": "y"
+  },
+  "profiles": [
+    {
+      "id": "balanced",
+      "label": "Balanced",
+      "features": [],
+      "profile": {
+        "configs": {
+          "CONFIG_ONYX_PERFORMANCE": "n",
+          "CONFIG_LOCALVERSION": "\"-4k-onyx-balanced\"",
+          "CONFIG_DEFAULT_TCP_CONG": "\"cubic\"",
+          "CONFIG_DEFAULT_CUBIC": "y",
+          "CONFIG_DEFAULT_BBR3": "n"
+        },
+        "tuning": []
+      }
+    },
+    {
+      "id": "performance",
+      "label": "Performance",
+      "features": [
+        "performance-tuning"
+      ],
+      "profile": {
+        "configs": {
+          "CONFIG_ONYX_PERFORMANCE": "y",
+          "CONFIG_LOCALVERSION": "\"-4k-onyx-performance\"",
+          "CONFIG_DEFAULT_TCP_CONG": "\"bbr3\"",
+          "CONFIG_DEFAULT_CUBIC": "n",
+          "CONFIG_DEFAULT_BBR3": "y"
+        },
+        "tuning": [
+          {
+            "source": "file_struct_8bytes_align.patch",
+            "change": "Minimum struct file alignment changes from 4 to 8 bytes",
+            "gate": "CONFIG_ONYX_PERFORMANCE",
+            "abi": "Real ARM64 Clang/GENDWARF probes retain existing shared CRCs"
+          },
+          {
+            "source": "reduce_cache_pressure.patch",
+            "change": "vfs_cache_pressure default changes from 100 to 50",
+            "tradeoff": "Retain more directory/inode cache"
+          },
+          {
+            "source": "mem_opt_prefetch.patch",
+            "change": "Prefetch one initial and four loop-ahead ARM64 cache lines"
+          },
+          {
+            "source": "optimise_memcmp.patch",
+            "change": "Scalar 32-byte comparison loop and improvements for short inputs",
+            "adaptation": "Remove bare FPSIMD path; generic kernel memcmp must preserve vector state"
+          },
+          {
+            "source": "minimise_wakeup_time.patch",
+            "change": "Alarmtimer hold uses the nearest deadline plus 1 ms",
+            "adaptation": "Clamp to 1–2000 ms, including negative deadlines that are already overdue"
+          },
+          {
+            "source": "int_sqrt.patch",
+            "change": "Fixed-high-bit integer sqrt variant",
+            "adaptation": "Keep highest power-of-four for large inputs and preserve exported signature"
+          },
+          {
+            "source": "reduce_gc_thread_sleep_time.patch",
+            "change": "F2FS urgent GC sleep changes from 500 to 50 ms"
+          },
+          {
+            "source": "reduce_freeze_timeout.patch",
+            "change": "Freezer timeout default changes from 20 seconds to 1 second",
+            "adaptation": "Honor valid runtime sysfs writes for recovery"
+          },
+          {
+            "source": "clear_page_16bytes_align.patch",
+            "change": "Align ARM64 clear_page entry to 16 bytes"
+          },
+          {
+            "source": "avoid_extra_s2idle_wake_attempts.patch",
+            "change": "Wake s2idle only on first abort increment"
+          },
+          {
+            "source": "disable_cache_hot_buddy.patch",
+            "change": "Disable CACHE_HOT_BUDDY scheduling preference"
+          },
+          {
+            "source": "f2fs_enlarge_min_fsync_blocks.patch",
+            "change": "F2FS minimum fsync blocks changes from 8 to 20"
+          },
+          {
+            "source": "increase_ext4_default_commit_age.patch",
+            "change": "Ext4 journal commit age default changes from 5 to 30 seconds",
+            "tradeoff": "Larger window for unsynced metadata loss during sudden power loss"
+          },
+          {
+            "source": "increase_sk_mem_packets.patch",
+            "change": "Socket memory packet scale default changes from 256 to 1024",
+            "tradeoff": "Larger socket buffers use more memory"
+          },
+          {
+            "source": "reduce_pci_pme_wakeups.patch",
+            "change": "PCI PME polling interval changes from 1 to 4 seconds",
+            "tradeoff": "Longer polling latency for devices needing this workaround"
+          },
+          {
+            "source": "silence_irq_cpu_logspam.patch",
+            "change": "IRQ affinity failure message becomes debug-ratelimited"
+          },
+          {
+            "source": "silence_system_logspam.patch",
+            "change": "Suppress devkmsg messages containing healthd/logd/dashd",
+            "tradeoff": "Less userspace diagnostic logging"
+          }
+        ]
+      }
+    }
+  ],
+  "patch_series": [
+    {
+      "path": "patches/core.patch",
+      "sha256": "21c1697f13d3696b666b3f9b62c1eb41d58a07834017f1b4dbf89e4281b6231f"
+    },
+    {
+      "path": "patches/droidspaces-618.patch",
+      "sha256": "e5630631ac7cf1dd6fd52095ecd003c6373ee52a5f7b60c8867a645d4edc9cd4"
+    },
+    {
+      "path": "patches/bbrv3-6.18.patch",
+      "sha256": "781cbafefac9ec1886682a037ad67846dc05cd4fbc8d2beda615afbc0a5a0d89"
+    },
+    {
+      "path": "patches/baseband-guard-6.18.patch",
+      "sha256": "a6a0baeee167c2cf890ccf7e6d4f2582a4557e0d7820ddcc78bb8f7f59a6a915"
+    },
+    {
+      "path": "patches/unicode-basename-guard.patch",
+      "sha256": "34000eda819c91b78b997e4ed4d90dd1610fe87bab44a59e99e854dfd3a7888d"
+    },
+    {
+      "path": "patches/usb-dvd-emulation.patch",
+      "sha256": "d3cfe540bc660488945967fbbb2fbdbecd66d63a5c3075d78a0773e6b40291f5"
+    },
+    {
+      "path": "patches/performance-gated.patch",
+      "sha256": "7be2553e90e13e5125aefbe85c9d74e14bcf540cade3d0f8d139fa70c3170303"
+    }
+  ],
+  "install_options": {
+    "mounting": {
+      "choose_one": true,
+      "nomount": {
+        "url": "https://github.com/maxsteeel/nomount/releases",
+        "driver_api": 23
+      },
+      "mountify": {
+        "url": "https://github.com/backslashxx/mountify/releases",
+        "mount_device_name": "KSU"
+      },
+      "switch_requires_reboot": true
+    },
+    "susfs": {
+      "implementation": "official-next-dev-lkm",
+      "activation": "install matched SUSFS KernelSU addon",
+      "configuration_module_url": "https://github.com/sidex15/susfs4ksu-module/releases"
+    }
+  }
+}

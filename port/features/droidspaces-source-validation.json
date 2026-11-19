@@ -1,0 +1,236 @@
+{
+  "recorded_utc": "2026-11-19T02:54:16.871873+00:00",
+  "common_kernel": "6.18.63",
+  "baseline_source_revision": "82dd5c4e1f46d0d7cb168cfed4cc2d08326c1901",
+  "droidspaces_upstream": "cdadb9eb5d0f86aacffff60776333e6f6b73a30a",
+  "source_sha256": {
+    "include/linux/sched.h": "46ee40f88688d27498c3a917ae78e84627fe5faefefeda97c776832e77da911d",
+    "include/linux/sched/task.h": "20b7a6cdd63ace6105f0bbf33bd643f7ec106d9cf9a219716482cae093b2f290",
+    "include/linux/shm.h": "1f11266e6211606c82e20bdc139227f284ff7939a20a2d85c54bc51c609afe37",
+    "init/init_task.c": "6f04503f44f5689ca6cca256bd92789ab9789dd9835fc39cf5ca3db3b901b6b8",
+    "ipc/sem.c": "1050890016d90663edc73aa75e92590745fb95af790adf99eceda0c9fc3d3343",
+    "ipc/shm.c": "d9be2613bc20252bd041a564bd655ffe50368c045c6defb2d2273950d0e2ddf7",
+    "ipc/msgutil.c": "6cb75381aabf80d9307f7469276629c1d91428733500405a1a05d8bac4860e46",
+    "ipc/namespace.c": "9fc05c7ea0d486bc9d4b4e5ed02c2ba82418b88ab72070952e6f44a061f8779b",
+    "kernel/fork.c": "994cbbc3e0b1a57f2d288efc6064c15ead9e51a2beef18253983897fd30a3812",
+    "kernel/kcmp.c": "1b2a183f3dc509e97b1527c4264df08ad4d80d807347c9084ac564eead27590c",
+    "include/linux/sysv_task.h": "f14a7359254732d82590a55a603d83e939b1bdc0507ec94d15c9b3d83d49198c"
+  },
+  "replay_patch_sha256": "e5630631ac7cf1dd6fd52095ecd003c6373ee52a5f7b60c8867a645d4edc9cd4",
+  "patch_replay": "All 11 owned files reproduce exactly.",
+  "compiler": "Android Clang r596125, target aarch64-linux-gnu",
+  "compiled_translation_units": [
+    "ipc/sem.c",
+    "ipc/shm.c",
+    "ipc/msg.c",
+    "ipc/msgutil.c",
+    "ipc/mqueue.c",
+    "ipc/namespace.c",
+    "kernel/kcmp.c",
+    "init/init_task.c",
+    "kernel/fork.c"
+  ],
+  "stable_export_comparisons": [
+    {
+      "file": "kernel/fork.c",
+      "symbols": [
+        "__SCK__tp_func_task_newtask",
+        "__SCK__tp_func_task_rename",
+        "__mmdrop",
+        "__put_task_struct",
+        "__put_task_struct_rcu_cb",
+        "__traceiter_task_newtask",
+        "__traceiter_task_rename",
+        "__tracepoint_task_newtask",
+        "__tracepoint_task_rename",
+        "free_task",
+        "get_task_exe_file",
+        "get_task_mm",
+        "mm_access",
+        "mm_alloc",
+        "mmput",
+        "mmput_async",
+        "object_is_on_stack",
+        "tasklist_lock"
+      ],
+      "export_count": 18,
+      "same": true
+    },
+    {
+      "file": "init/init_task.c",
+      "symbols": [
+        "init_task",
+        "vendor_data_pad"
+      ],
+      "export_count": 2,
+      "same": true
+    }
+  ],
+  "full_fragment_type_probes": {
+    "types": [
+      "task_struct",
+      "net",
+      "inode",
+      "shmem_inode_info",
+      "ipc_namespace",
+      "user_namespace"
+    ],
+    "stable_crcs_identical": true,
+    "symtypes_identical": true
+  },
+  "task_layout": {
+    "size_bytes": 4736,
+    "comm_offset_bytes": 2392,
+    "thread_offset_bytes": 3536,
+    "baseline_matches": true
+  },
+  "android_runtime_binary": "NDK 28.2.13676358, aarch64-linux-android35-clang, static; compiled with -Wall -Wextra -Werror",
+  "host_runtime": {
+    "exit_code": 77,
+    "result": "SKIP: unshare(CLONE_NEWIPC) not permitted in current host session"
+  },
+  "complete_kmi_checked": true,
+  "on_device_runtime_checked": false,
+  "kernel_allocation_fault_injection_checked": false,
+  "scratch": "/home/loukious/Android/onyx-feature-variants-tmp-20261119/reserve4-check",
+  "state_storage": "Literal __kabi_reserved4 u64 in task_struct; private pointer accessors; requires 64-bit Android kABI reserves.",
+  "compile_results": [
+    {
+      "file": "ipc/sem.c",
+      "exit_code": 0
+    },
+    {
+      "file": "ipc/shm.c",
+      "exit_code": 0
+    },
+    {
+      "file": "ipc/msg.c",
+      "exit_code": 0
+    },
+    {
+      "file": "ipc/msgutil.c",
+      "exit_code": 0
+    },
+    {
+      "file": "ipc/mqueue.c",
+      "exit_code": 0
+    },
+    {
+      "file": "ipc/namespace.c",
+      "exit_code": 0
+    },
+    {
+      "file": "kernel/kcmp.c",
+      "exit_code": 0
+    },
+    {
+      "file": "init/init_task.c",
+      "exit_code": 0
+    },
+    {
+      "file": "kernel/fork.c",
+      "exit_code": 0
+    }
+  ],
+  "rust_binding_task_preservation": {
+    "token_identical": true,
+    "baseline_tokens": 1486,
+    "reserve4_tokens": 1486
+  },
+  "rust_binding_evidence": {
+    "baseline": "Actual Nov17 generated Rust bindings from the 99b8a483 cache.",
+    "enabled": "Actual bindgen tool, full Balanced generated config, and current source headers.",
+    "command": "/home/loukious/Android/onyx-feature-variants-tmp-20261119/reserve4-check/bindgen-command.json",
+    "baseline_task_sha256": "2eed23b3400a5957afe4d742636cbd8858b2a98a191e20b33ea188290e77092f",
+    "enabled_task_tokens": "All 1,486 tokens match, including four literal reserved u64 members.",
+    "full_rust_symbol_rebuild_checked": true
+  },
+  "prior_union_rust_crc_diagnosis": {
+    "changed_exports": 10,
+    "changed_type_rows": 1,
+    "field_offset": 3488,
+    "cause": "Bindgen's anonymous wrapper member name survived stable kABI normalization; no layout drift.",
+    "evidence": "/home/loukious/Android/onyx-feature-variants-tmp-20261119/rust-kmi/rust-types.diff"
+  },
+  "complete_kmi_checked_profile": "balanced",
+  "full_kmi_comparisons": {
+    "balanced": {
+      "status": "PASS",
+      "baseline_export_count": 10956,
+      "current_export_count": 10965,
+      "unchanged_existing_exports": 10956,
+      "changed_or_missing_crcs": 0,
+      "changed_existing_export_metadata": 0,
+      "baseline_rust_exports": 57,
+      "unchanged_rust_exports": 57,
+      "added_export_count": 9,
+      "additions": {
+        "__put_user_ns": {
+          "crc": "0xc75d4ad6",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL",
+          "namespace": ""
+        },
+        "make_kuid": {
+          "crc": "0x73da5c8c",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL",
+          "namespace": ""
+        },
+        "from_kuid": {
+          "crc": "0x686f57bf",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL",
+          "namespace": ""
+        },
+        "from_kuid_munged": {
+          "crc": "0x686f57bf",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL",
+          "namespace": ""
+        },
+        "make_kgid": {
+          "crc": "0x4673c471",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL",
+          "namespace": ""
+        },
+        "from_kgid": {
+          "crc": "0xff2cdd05",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL",
+          "namespace": ""
+        },
+        "from_kgid_munged": {
+          "crc": "0xff2cdd05",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL",
+          "namespace": ""
+        },
+        "init_ipc_ns": {
+          "crc": "0x47cc5eeb",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL_GPL",
+          "namespace": ""
+        },
+        "put_ipc_ns": {
+          "crc": "0xb2c100ee",
+          "provider": "vmlinux",
+          "export_type": "EXPORT_SYMBOL_GPL",
+          "namespace": ""
+        }
+      },
+      "baseline_symvers_sha256": "0dac96a122974062c793ef5166f44754f15f81feb3dbf3293c8a7e1168d85d37",
+      "current_symvers_sha256": "ee6655f0137c2117be6e2edd62aff5d2affa9d9385ea52f9b452816ebd28ab76",
+      "kernel_release": "6.18.63-android17-6-maybe-dirty-4k-onyx-balanced",
+      "evidence": [
+        "balanced-droidspaces-full-kmi-literal-reserve.json",
+        "balanced-full-kmi-summary.json"
+      ]
+    },
+    "performance": {
+      "status": "pending",
+      "note": "Record final Performance validation in external build receipts and the final report; keep this source receipt unchanged after Balanced archiving."
+    }
+  }
+}

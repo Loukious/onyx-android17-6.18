@@ -6,10 +6,13 @@ from pathlib import Path
 import stat
 import tarfile
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 import zipfile
 import json
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import features
 
 import generate as g
 
@@ -52,13 +55,15 @@ class Tests(unittest.TestCase):
             generic = [f'generic{i}' for i in range(80)]
             new_platform = [f'wireless{i}' for i in range(9)]
             new_native = [f'newnative{i}' for i in range(37)]
+            feature_addons = ['susfs_guard_lkm']
             catalog = root / 'fake-catalog'
             catalog.mkdir()
             paths = {}
-            for name in platform + generic + new_platform + new_native:
+            for name in platform + generic + new_platform + new_native + feature_addons:
                 paths[name] = catalog / (name + '.ko')
                 paths[name].write_bytes(name.encode())
             kinds = {n: 'platform' if n in platform + new_platform else 'gki' for n in paths}
+            kinds.update({name: 'feature_addon' for name in feature_addons})
             (artifact / 'inputs/nethunter-native-modules.json').write_text(json.dumps({'modules': new_native, 'required_existing_modules': [generic[0]]}))
             policy = {'schema_version': 1, 'new_modules_default': 'manual', 'groups': [
                 {'name': 'native-additions', 'modules': [n + '.ko' for n in new_native],
@@ -67,7 +72,10 @@ class Tests(unittest.TestCase):
                 {'name': 'platform-additions', 'modules': [n + '.ko' for n in new_platform],
                  'ship': ['vendor_ramdisk', 'vendor_dlkm'],
                  'load': {'vendor_dlkm': ['modules.load']},
-                 'reason': 'Test explicit platform driver loading.'}]}
+                 'reason': 'Test explicit platform driver loading.'},
+                {'name': 'special-loader-addons', 'modules': ['susfs_guard_lkm.ko'],
+                 'ship': ['vendor_dlkm'], 'load': {},
+                 'reason': 'Ship the SUSFS ELF for its special KernelSU loader without ordinary autoload.'}]}
             (artifact / 'inputs/module-loading.json').write_text(json.dumps(policy))
             (artifact / 'report.json').write_text(json.dumps({'sha256': {
                 'inputs/nethunter-native-modules.json': g.sha(artifact / 'inputs/nethunter-native-modules.json'),
@@ -101,11 +109,39 @@ class Tests(unittest.TestCase):
                     {'module_layout': {'source': str(layout), 'sha256': g.sha(layout / 'SHA256SUMS')}})
             self.assertEqual(reports['system_dlkm']['modules'], 78)
             self.assertEqual(reports['vendor_ramdisk']['modules'], 404)
-            self.assertEqual(reports['vendor_dlkm']['modules'], 441)
+            self.assertEqual(reports['vendor_dlkm']['modules'], 442)
             autoload = set(reports['vendor_dlkm']['load_lists']['modules.load'])
             self.assertTrue(set(new_native + new_platform) <= autoload)
+            self.assertNotIn('susfs_guard_lkm', autoload)
+            self.assertTrue((trees['vendor_dlkm'] / 'susfs_guard_lkm.ko').is_file())
+            self.assertFalse((trees['vendor_ramdisk'] / 'susfs_guard_lkm.ko').exists())
             unique = {p.name for part in trees.values() for p in part.glob('*.ko')}
-            self.assertEqual(len(unique), 517)
+            self.assertEqual(len(unique), 518)
+
+    def test_feature_addon_catalog_uses_source_verification_and_its_own_shipping_kind(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / 'artifact'
+            for name in ('gki', 'platform', 'platform-addon', 'inputs'):
+                (artifact / name).mkdir(parents=True, exist_ok=True)
+            (artifact / 'gki/modules.builtin').write_text('')
+            (artifact / 'gki/kernel.release').write_text('6.18.63-android17-6-maybe-dirty-4k-onyx-balanced\n')
+            (artifact / 'inputs/modules.json').write_text('[]')
+            (artifact / 'platform-addon/susfs_guard_lkm.ko').write_bytes(b'matched addon')
+            with tarfile.open(artifact / 'gki/modules_staging_dir.tar.gz', 'w:gz'):
+                pass
+            report = {'sha256': {'platform-addon/susfs_guard_lkm.ko': g.sha(artifact / 'platform-addon/susfs_guard_lkm.ko')}}
+            (artifact / 'report.json').write_text(json.dumps(report))
+            with patch.object(features, 'verify_artifact', return_value={'status': 'PASS'}) as verify:
+                paths, kinds, builtin = g.artifact_catalog(artifact, root / 'catalog')
+            verify.assert_called_once_with(artifact, report)
+            self.assertEqual(paths['susfs_guard_lkm'].read_bytes(), b'matched addon')
+            self.assertEqual(kinds, {'susfs_guard_lkm': 'feature_addon'})
+            self.assertFalse(builtin)
+            (artifact / 'platform-addon/susfs_guard_lkm.ko').write_bytes(b'changed addon')
+            with patch.object(features, 'verify_artifact', return_value={'status': 'PASS'}), \
+                    self.assertRaisesRegex(ValueError, 'hash differs'):
+                g.artifact_catalog(artifact, root / 'invalid-catalog')
 
     def test_raw_metadata_preserved(self):
         with tempfile.TemporaryDirectory() as path:

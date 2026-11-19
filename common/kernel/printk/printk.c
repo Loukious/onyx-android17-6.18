@@ -796,6 +796,14 @@ static ssize_t devkmsg_write(struct kiocb *iocb, struct iov_iter *from)
 			endp++;
 			line = endp;
 		}
+#ifdef CONFIG_ONYX_PERFORMANCE
+	}
+
+	if ((strstr(line, "healthd")) || (strstr(line, "logd")) ||
+		 strstr(line, "dashd")) {
+		kfree(buf);
+		return len;
+#endif
 	}
 
 	devkmsg_emit(facility, level, "%s", line);

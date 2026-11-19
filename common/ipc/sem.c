@@ -84,6 +84,7 @@
 #include <linux/rwsem.h>
 #include <linux/nsproxy.h>
 #include <linux/ipc_namespace.h>
+#include <linux/sysv_task.h>
 #include <linux/sched/wake_q.h>
 #include <linux/nospec.h>
 #include <linux/rhashtable.h>
@@ -1851,7 +1852,7 @@ static inline int get_undo_list(struct sem_undo_list **undo_listp)
 {
 	struct sem_undo_list *undo_list;
 
-	undo_list = current->sysvsem.undo_list;
+	undo_list = sysv_task_state(current)->undo_list;
 	if (!undo_list) {
 		undo_list = kzalloc(sizeof(*undo_list), GFP_KERNEL_ACCOUNT);
 		if (undo_list == NULL)
@@ -1860,7 +1861,7 @@ static inline int get_undo_list(struct sem_undo_list **undo_listp)
 		refcount_set(&undo_list->refcnt, 1);
 		INIT_LIST_HEAD(&undo_list->list_proc);
 
-		current->sysvsem.undo_list = undo_list;
+		sysv_task_state(current)->undo_list = undo_list;
 	}
 	*undo_listp = undo_list;
 	return 0;
@@ -2313,9 +2314,9 @@ int copy_semundo(u64 clone_flags, struct task_struct *tsk)
 		if (error)
 			return error;
 		refcount_inc(&undo_list->refcnt);
-		tsk->sysvsem.undo_list = undo_list;
+		sysv_task_state(tsk)->undo_list = undo_list;
 	} else
-		tsk->sysvsem.undo_list = NULL;
+		sysv_task_state(tsk)->undo_list = NULL;
 
 	return 0;
 }
@@ -2336,10 +2337,10 @@ void exit_sem(struct task_struct *tsk)
 {
 	struct sem_undo_list *ulp;
 
-	ulp = tsk->sysvsem.undo_list;
+	ulp = sysv_task_state(tsk)->undo_list;
 	if (!ulp)
 		return;
-	tsk->sysvsem.undo_list = NULL;
+	sysv_task_state(tsk)->undo_list = NULL;
 
 	if (!refcount_dec_and_test(&ulp->refcnt))
 		return;

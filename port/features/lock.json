@@ -1,0 +1,51 @@
+{
+  "format": 1,
+  "nomount": {
+    "repository": "https://github.com/maxsteeel/nomount.git",
+    "revision": "9ff48a329f367c842af04158ff4f43cfa200fd66",
+    "archive": "vendor/nomount.tar",
+    "sha256": "ba14f3a1c79b0a0be609502914242da343fac9d627408b3d86b4596e8b836c09",
+    "files": {
+      "LICENSE": {
+        "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+        "mode": 436
+      },
+      "kernel/LICENSE": {
+        "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+        "mode": 436
+      },
+      "kernel/README.md": {
+        "sha256": "c42cad879c216d643444b448e8bd461a757cc2754e716520c9d36da6e799324f",
+        "mode": 436
+      },
+      "kernel/setup.sh": {
+        "sha256": "d87fa9eec2b5b886a1d77f3cc28b04d4e8b466dcbe5408764f14663387ab3838",
+        "mode": 436
+      },
+      "kernel/src/Kconfig": {
+        "sha256": "1df7ad3589a282128f797f7a46b28aee315d080550aae26b681a898f11c7abc7",
+        "mode": 436
+      },
+      "kernel/src/Makefile": {
+        "sha256": "1191fe9ef8e2f3549419fd90a118fbe3d11fc02a04b6353bae0e81be27e03e62",
+        "mode": 436
+      },
+      "kernel/src/nomount.c": {
+        "sha256": "8d1f8f316247f6e03cc430d622055f3932aa5a98919dd7c39030649b486db5fd",
+        "mode": 436
+      },
+      "kernel/src/nomount.h": {
+        "sha256": "a396b6469fc4912e9d93179ace982468dc466f8b2a83ce6e4b606857b015941c",
+        "mode": 436
+      }
+    }
+  },
+  "susfs": {
+    "repository": "https://github.com/KernelSU-Next/KernelSU-Next.git",
+    "source": "kernel/susfs",
+    "revision_source": "port/kernelsu-lock.json",
+    "module": "susfs_guard_lkm.ko",
+    "loader": "ksud insmod",
+    "classic_patches": false
+  }
+}

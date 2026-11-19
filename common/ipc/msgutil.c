@@ -6,6 +6,7 @@
 
 #include <linux/spinlock.h>
 #include <linux/init.h>
+#include <linux/export.h>
 #include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/ipc.h>
@@ -35,6 +36,8 @@ struct ipc_namespace init_ipc_ns = {
 #endif
 	.ns.ns_type = ns_common_type(&init_ipc_ns),
 };
+/* Rust Binder/binderfs may be built as a GPL module on GKI. */
+EXPORT_SYMBOL_GPL(init_ipc_ns);
 
 struct msg_msgseg {
 	struct msg_msgseg *next;

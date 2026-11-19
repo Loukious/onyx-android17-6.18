@@ -44,7 +44,11 @@ SCHED_FEAT(PICK_BUDDY, true)
  * Consider buddies to be cache hot, decreases the likeliness of a
  * cache buddy being migrated away, increases cache locality.
  */
+#ifdef CONFIG_ONYX_PERFORMANCE
+SCHED_FEAT(CACHE_HOT_BUDDY, false)
+#else
 SCHED_FEAT(CACHE_HOT_BUDDY, true)
+#endif
 
 /*
  * Delay dequeueing tasks until they get selected or woken.

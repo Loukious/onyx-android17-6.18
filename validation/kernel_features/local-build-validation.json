@@ -1,0 +1,184 @@
+{
+  "format": 1,
+  "status": "PASS",
+  "validation_kind": "local-compilation-and-artifact-audit",
+  "recorded_utc": "2026-11-19T06:05:28.279549+00:00",
+  "source_base_revision": "82dd5c4e1f46d0d7cb168cfed4cc2d08326c1901",
+  "common_revision": "c29a11a6da74fe6ffbc7bc4bbcb21f2e579e814d",
+  "kernelsu_next_revision": "aa235b99574b5b349cdb4980bcb98fd58e6abb28",
+  "automation_revision": null,
+  "hosted_build_run_id": null,
+  "on_device_runtime_verified": false,
+  "variant_pair_verification_sha256": "98d9286f450e48b89a486b2464e6889f6b5dcd61ba3d3180076cfd1b38aefa8c",
+  "input_sha256": {
+    "port/sources.json": "f527fc4b63cc0a67e7d107cead17d62638f0d00fcfe0408825b53cc71e705eb3",
+    "port/dependency-lock.xml": "33b3f638e06e9e40d8c71bbd873fd136065a8a46db2550bf3d9dfe3ba146e8fc",
+    "port/kernelsu-lock.json": "773c8274e045e697eb16069cff7d6c5f8afcf667d1709ad4e75421232c588a51",
+    "port/common-source-hashes.json": "8b821ec090c0841bafefb7445948eca4b466d8e3ac6c931e7abeac99796c9e7c",
+    "port/module-source-hashes.json": "1200d2fdd587692df596cc6114eb7bdd652fe792546c8cc9d067ef1f9ec46c81",
+    "port/features.py": "760a9d83d6b83916c05f5ee63bb957211847ec31556443049d72382de68915fa",
+    "port/features/manifest.json": "047ddf0e38b511265e1411d68df53649de6ee3c1bf3af47f73934350efa4266a",
+    "port/features/lock.json": "29a984f091f40a56e7208dc7d6437a4cd3847e44afe245ed670100175c4df6cf"
+  },
+  "shared_features": [
+    "kernelsu-next-dev",
+    "susfs-next-lkm",
+    "nomount",
+    "mountify-overlayfs",
+    "baseband-guard",
+    "wireguard",
+    "tcp-bbr1",
+    "tcp-bbr3",
+    "tcp-cubic-bic-westwood-htcp",
+    "ipset",
+    "ipv6-nat",
+    "ttl-hop-limit-targets",
+    "connmark",
+    "fq-fq-codel-cake",
+    "cifs-xattrs",
+    "tmpfs-xattrs-posix-acl",
+    "bpf-btf-tracing-fuse-bpf",
+    "ntsync",
+    "usb-arsenal-dvd",
+    "unicode-basename-guard",
+    "droidspaces"
+  ],
+  "performance_tuning_changes": 17,
+  "variants": [
+    {
+      "id": "balanced",
+      "kernel_release": "6.18.63-android17-6-maybe-dirty-4k-onyx-balanced",
+      "report_sha256": "4ed59ad8175c6b4c8d6a3bd0347f7b4d2b098105b5736506699f7780c9006fe2",
+      "feature_validation": {
+        "status": "PASS",
+        "variant": "balanced",
+        "configs_verified": 108,
+        "susfs_source_revision": "aa235b99574b5b349cdb4980bcb98fd58e6abb28",
+        "runtime_verified": false
+      },
+      "feature_input_files_exactly_verified": 68,
+      "artifact_hashes_verified": 2676,
+      "artifact_bytes_verified": 606369983,
+      "platform_modules": 390,
+      "native_gki_modules": 161,
+      "susfs_module": {
+        "module": "susfs_guard_lkm.ko",
+        "sha256": "6b118bbf6e0b10687bb833c78db42c287421807ef021df75be2b02437def7832",
+        "vermagic": "6.18.63-android17-6-maybe-dirty-4k-onyx-balanced SMP preempt mod_unload modversions aarch64",
+        "imports_checked": 131,
+        "versioned_imports_checked": 125,
+        "loader": "KernelSU Next ksud insmod"
+      },
+      "devicetrees": {
+        "source_files": 284,
+        "overlay_engines_agree": true,
+        "bootloader_ids_preserved": true,
+        "dtbo_table_verified": true
+      },
+      "abi": {
+        "baseline_symvers_sha256": "0dac96a122974062c793ef5166f44754f15f81feb3dbf3293c8a7e1168d85d37",
+        "current_symvers_sha256": "ee6655f0137c2117be6e2edd62aff5d2affa9d9385ea52f9b452816ebd28ab76",
+        "existing_exports_preserved": 10956,
+        "existing_crc_or_metadata_changes": {},
+        "added_exports": [
+          "__put_user_ns",
+          "from_kgid",
+          "from_kgid_munged",
+          "from_kuid",
+          "from_kuid_munged",
+          "init_ipc_ns",
+          "make_kgid",
+          "make_kuid",
+          "put_ipc_ns"
+        ],
+        "rust_exports_preserved": 57,
+        "binder_trace_wrappers_preserved": 3
+      }
+    },
+    {
+      "id": "performance",
+      "kernel_release": "6.18.63-android17-6-maybe-dirty-4k-onyx-performance",
+      "report_sha256": "bf8a446d9f19c710d5920ec26e68efdf58236c1bee00ba50e4fc375ffe4cce0c",
+      "feature_validation": {
+        "status": "PASS",
+        "variant": "performance",
+        "configs_verified": 108,
+        "susfs_source_revision": "aa235b99574b5b349cdb4980bcb98fd58e6abb28",
+        "runtime_verified": false
+      },
+      "feature_input_files_exactly_verified": 68,
+      "artifact_hashes_verified": 2676,
+      "artifact_bytes_verified": 606579047,
+      "platform_modules": 390,
+      "native_gki_modules": 161,
+      "susfs_module": {
+        "module": "susfs_guard_lkm.ko",
+        "sha256": "db7cb03a0aadc2304a8c66e3475a593ac303c1a2fc871248638906290e402747",
+        "vermagic": "6.18.63-android17-6-maybe-dirty-4k-onyx-performance SMP preempt mod_unload modversions aarch64",
+        "imports_checked": 131,
+        "versioned_imports_checked": 125,
+        "loader": "KernelSU Next ksud insmod"
+      },
+      "devicetrees": {
+        "source_files": 284,
+        "overlay_engines_agree": true,
+        "bootloader_ids_preserved": true,
+        "dtbo_table_verified": true
+      },
+      "abi": {
+        "baseline_symvers_sha256": "0dac96a122974062c793ef5166f44754f15f81feb3dbf3293c8a7e1168d85d37",
+        "current_symvers_sha256": "ee6655f0137c2117be6e2edd62aff5d2affa9d9385ea52f9b452816ebd28ab76",
+        "existing_exports_preserved": 10956,
+        "existing_crc_or_metadata_changes": {},
+        "added_exports": [
+          "__put_user_ns",
+          "from_kgid",
+          "from_kgid_munged",
+          "from_kuid",
+          "from_kuid_munged",
+          "init_ipc_ns",
+          "make_kgid",
+          "make_kuid",
+          "put_ipc_ns"
+        ],
+        "rust_exports_preserved": 57,
+        "binder_trace_wrappers_preserved": 3
+      }
+    }
+  ],
+  "variant_pair_validation": {
+    "status": "PASS",
+    "configuration_differences": {
+      "CONFIG_DEFAULT_BBR3": {
+        "balanced": "n",
+        "performance": "y"
+      },
+      "CONFIG_DEFAULT_CUBIC": {
+        "balanced": "y",
+        "performance": "n"
+      },
+      "CONFIG_DEFAULT_TCP_CONG": {
+        "balanced": "\"cubic\"",
+        "performance": "\"bbr3\""
+      },
+      "CONFIG_LOCALVERSION": {
+        "balanced": "\"-4k-onyx-balanced\"",
+        "performance": "\"-4k-onyx-performance\""
+      },
+      "CONFIG_ONYX_PERFORMANCE": {
+        "balanced": "n",
+        "performance": "y"
+      }
+    },
+    "identical_input_hashes": 884,
+    "checks": {
+      "expected_profile_configuration_differences_only": true,
+      "all_frozen_input_hashes_identical": true,
+      "complete_kernel_symbol_versions_identical": true,
+      "platform_module_sets_identical": true,
+      "native_module_sets_identical": true,
+      "official_next_revision_identical": true,
+      "both_local_automation_revisions_null": true
+    }
+  }
+}

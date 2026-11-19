@@ -17,7 +17,7 @@ struct sysv_shm {
 long do_shmat(int shmid, char __user *shmaddr, int shmflg, unsigned long *addr,
 	      unsigned long shmlba);
 void exit_shm(struct task_struct *task);
-#define shm_init_task(task) INIT_LIST_HEAD(&(task)->sysvshm.shm_clist)
+#define shm_init_task(task) INIT_LIST_HEAD(&sysv_task_state(task)->shm_clist)
 #else
 struct sysv_shm {
 	/* empty */

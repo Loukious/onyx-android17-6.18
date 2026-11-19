@@ -2,7 +2,11 @@
 
 This repository contains the complete POCO F7 (Onyx/SM8735) module port and a
 reproducible GKI build recipe. It tracks Google's `android17-6.18-lts` branch
-and fetches the official **KernelSU Next `dev` branch on every build**.
+and tracks the official **KernelSU Next `dev` branch through a verified source lock**.
+
+[Balanced and Performance profiles](port/features/README.md) share the same feature
+set and locked KernelSU Next/SUSFS source. Releases contain a `variants` array
+with separate matched kernel/module installers, SUSFS addons and tuning details.
 
 The [6.18.63 runtime regression](port/kernel-runtime-regression.md) documents
 the IPA/modem crashes, the IOMMU and FunctionFS corrections, and the Fixed4
@@ -100,8 +104,9 @@ rebuilds manual source-branch changes, checking out the exact detected commit.
 Active and successful builds for the same detected inputs are deduplicated.
 Failed or cancelled builds can retry up to three times; further automatic attempts
 require changed inputs. Manual workflow runs remain available for source repairs.
-KernelSU Next is fetched from dev at build time; the release records the revision
-actually built if dev advances between detection and compilation.
+The tracker selects an exact KernelSU Next dev commit for the candidate source lock.
+KernelSU Next and its SUSFS LKM build from that same snapshot; dev advancing during
+compilation cannot change either input. Both release profiles must pass before publication.
 
 Builds use standard `ubuntu-24.04` GitHub-hosted runners with build dependencies,
 swap, persistent compilation caches, artifact and ABI uploads. The 6.18 build uses pinned Android Kleaf/Clang/Rust instead of the
@@ -168,7 +173,7 @@ Kleaf path to `port/rom/build.py`; it compiles GKI, every platform/native module
 and the device trees from the verified source recipe. Android packages the boot
 images and DLKM partitions from that single build. Userspace headers are generated
 from the same synced GKI/module source. No release Image or module binaries are
-downloaded for this route. KernelSU Next dev is resolved on every build.
+downloaded for this route. KernelSU Next dev uses the exact committed source lock for each build.
 
 The device product also inherits `port/rom/firmware.mk`, which installs all 16
 USB Wi-Fi firmware files under `/vendor/firmware` with their original request

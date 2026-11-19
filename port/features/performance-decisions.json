@@ -1,0 +1,16 @@
+{
+  "omitted": {
+    "optimized_mem_operations.patch": "ARM64 already uses native assembly mem functions",
+    "f2fs_reduce_congestion.patch": "DEFAULT_IO_TIMEOUT and the old congestion wait were removed from Linux 6.18",
+    "add_timeout_wakelocks_globally.patch": "No-timeout wake locks must remain held until caller releases them; forced expiry violates the API"
+  },
+  "ported": {
+    "optimise_memcmp.patch": "scalar32-byte loop only; omit unguarded FPSIMD instructions",
+    "int_sqrt.patch": "correct highest-power-of-four handling; preserve exported signature",
+    "reduce_cache_pressure.patch": "static variable in 6.18",
+    "mem_opt_prefetch.patch": "current assembly anchors",
+    "clear_page_16bytes_align.patch": "current symbol name",
+    "reduce_freeze_timeout.patch": "1 second default retained in Performance, valid sysfs writes still work for runtime recovery"
+  },
+  "gate": "CONFIG_ONYX_PERFORMANCE"
+}

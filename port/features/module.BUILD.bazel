@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+load("//build/kernel/kleaf:kernel.bzl", "kernel_module")
+package(default_visibility = ["//visibility:public"])
+exports_files(["feature_defconfig", "droidspaces-kmi-symbols"])
+filegroup(
+    name = "kmi_symbol_lists",
+    srcs = ["//onyx:kmi_symbol_lists", "droidspaces-kmi-symbols"],
+)
+kernel_module(
+    name = "susfs",
+    kernel_build = "//common:kernel_aarch64",
+    srcs = glob(["susfs/**"]) + ["Makefile", "Kbuild"],
+    outs = ["susfs/susfs_guard_lkm.ko"],
+)

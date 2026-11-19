@@ -2999,4 +2999,38 @@ enum skb_drop_reason tcp_inbound_hash(struct sock *sk,
 		const void *saddr, const void *daddr,
 		int family, int dif, int sdif);
 
+
+#ifdef CONFIG_TCP_CONG_BBR3
+bool tcp_bbr3_wants_ce_events(const struct sock *sk);
+bool tcp_bbr3_fast_ack_mode(const struct sock *sk);
+void tcp_bbr3_skb_marked_lost(struct sock *sk, const struct sk_buff *skb);
+void tcp_bbr3_note_tlp_recovery(struct sock *sk);
+void tcp_bbr3_stamp_skb(struct sock *sk, struct sk_buff *skb);
+#else
+static inline bool tcp_bbr3_wants_ce_events(const struct sock *sk)
+{
+	return false;
+}
+static inline bool tcp_bbr3_fast_ack_mode(const struct sock *sk)
+{
+	return false;
+}
+static inline void tcp_bbr3_skb_marked_lost(struct sock *sk,
+					 const struct sk_buff *skb) { }
+static inline void tcp_bbr3_note_tlp_recovery(struct sock *sk) { }
+static inline void tcp_bbr3_stamp_skb(struct sock *sk, struct sk_buff *skb) { }
+#endif
+
+/* private telemetry channel for BBRv3 (macro only, no uapi change) */
+#define TCP_BBR3_INFO 0x7e
+#ifdef CONFIG_TCP_CONG_BBR3
+int tcp_bbr3_get_info(const struct sock *sk, sockptr_t optval,
+		      sockptr_t optlen);
+#else
+static inline int tcp_bbr3_get_info(const struct sock *sk, sockptr_t optval,
+				  sockptr_t optlen)
+{
+	return -ENOPROTOOPT;
+}
+#endif
 #endif	/* _TCP_H */

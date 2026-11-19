@@ -44,6 +44,7 @@
 #include <linux/nsproxy.h>
 #include <linux/mount.h>
 #include <linux/ipc_namespace.h>
+#include <linux/sysv_task.h>
 #include <linux/rhashtable.h>
 #include <linux/nstree.h>
 
@@ -452,12 +453,12 @@ void exit_shm(struct task_struct *task)
 
 		task_lock(task);
 
-		if (list_empty(&task->sysvshm.shm_clist)) {
+		if (list_empty(&sysv_task_state(task)->shm_clist)) {
 			task_unlock(task);
 			break;
 		}
 
-		shp = list_first_entry(&task->sysvshm.shm_clist, struct shmid_kernel,
+		shp = list_first_entry(&sysv_task_state(task)->shm_clist, struct shmid_kernel,
 				shm_clist);
 
 		/*
@@ -786,7 +787,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	shp->ns = ns;
 
 	task_lock(current);
-	list_add(&shp->shm_clist, &current->sysvshm.shm_clist);
+	list_add(&shp->shm_clist, &sysv_task_state(current)->shm_clist);
 	task_unlock(current);
 
 	/*

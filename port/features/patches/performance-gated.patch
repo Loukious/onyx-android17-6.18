@@ -1,0 +1,416 @@
+From: Onyx kernel integration
+Subject: [PATCH] onyx: gate compatible WildKernels performance tuning
+
+onyx: gate compatible WildKernels performance tuning.
+
+diff --git a/arch/arm64/lib/clear_page.S b/arch/arm64/lib/clear_page.S
+--- a/arch/arm64/lib/clear_page.S
++++ b/arch/arm64/lib/clear_page.S
+@@ -14,6 +14,9 @@
+  * Parameters:
+  *	x0 - dest
+  */
++#ifdef CONFIG_ONYX_PERFORMANCE
++	.p2align 4
++#endif
+ SYM_FUNC_START(__pi_clear_page)
+ #ifdef CONFIG_AS_HAS_MOPS
+ 	.arch_extension mops
+diff --git a/arch/arm64/lib/copy_template.S b/arch/arm64/lib/copy_template.S
+--- a/arch/arm64/lib/copy_template.S
++++ b/arch/arm64/lib/copy_template.S
+@@ -39,6 +39,9 @@
+ D_l	.req	x13
+ D_h	.req	x14
+ 
++#ifdef CONFIG_ONYX_PERFORMANCE
++	prfm	pldl1strm, [src, #(1*L1_CACHE_BYTES)]
++#endif
+ 	mov	dst, dstin
+ 
+ #ifdef CONFIG_AS_HAS_MOPS
+@@ -179,6 +182,9 @@
+ 	ldp1	C_l, C_h, src, #16
+ 	stp1	D_l, D_h, dst, #16
+ 	ldp1	D_l, D_h, src, #16
++#ifdef CONFIG_ONYX_PERFORMANCE
++	prfm	pldl1strm, [src, #(4*L1_CACHE_BYTES)]
++#endif
+ 	subs	count, count, #64
+ 	b.ge	1b
+ 	stp1	A_l, A_h, dst, #16
+diff --git a/arch/arm64/lib/memcmp.S b/arch/arm64/lib/memcmp.S
+--- a/arch/arm64/lib/memcmp.S
++++ b/arch/arm64/lib/memcmp.S
+@@ -14,6 +14,124 @@
+  * ARMv8-a, AArch64, unaligned accesses.
+  */
+ 
++/* Performance uses the scalar portion of ARM optimized-routines.
++ * Kernel generic memcmp must not touch FPSIMD registers. */
++#ifdef CONFIG_ONYX_PERFORMANCE
++#define L(label) .L ## label
++
++#define src1	x0
++#define src2	x1
++#define limit	x2
++#define result	w0
++
++#define data1	x3
++#define data1w	w3
++#define data2	x4
++#define data2w	w4
++#define data3	x5
++#define data3w	w5
++#define data4	x6
++#define data4w	w6
++#define tmp	x6
++#define src1end	x7
++#define src2end	x8
++
++SYM_FUNC_START(__pi_memcmp)
++
++	cmp	limit, 16
++	b.lo	L(less16)
++	ldp	data1, data3, [src1]
++	ldp	data2, data4, [src2]
++	ccmp	data1, data2, 0, ne
++	ccmp	data3, data4, 0, eq
++	b.ne	L(return2)
++
++	add	src1end, src1, limit
++	add	src2end, src2, limit
++	cmp	limit, 32
++	b.ls	L(last_bytes)
++	sub	limit, limit, 32
++
++	.p2align 4
++L(loop32):
++	ldp	data1, data3, [src1, 16]
++	ldp	data2, data4, [src2, 16]
++	cmp	data1, data2
++	ccmp	data3, data4, 0, eq
++	b.ne	L(return2)
++	cmp	limit, 16
++	b.ls	L(last_bytes)
++
++	ldp	data1, data3, [src1, 32]
++	ldp	data2, data4, [src2, 32]
++	cmp	data1, data2
++	ccmp	data3, data4, 0, eq
++	b.ne	L(return2)
++	add	src1, src1, 32
++	add	src2, src2, 32
++L(last64):
++	subs	limit, limit, 32
++	b.hi	L(loop32)
++
++	/* Compare last 1-16 bytes using unaligned access.  */
++L(last_bytes):
++	ldp	data1, data3, [src1end, -16]
++	ldp	data2, data4, [src2end, -16]
++L(return2):
++	cmp	data1, data2
++	csel	data1, data1, data3, ne
++	csel	data2, data2, data4, ne
++
++	/* Compare data bytes and set return value to 0, -1 or 1.  */
++L(return):
++#ifndef __AARCH64EB__
++	rev	data1, data1
++	rev	data2, data2
++#endif
++	cmp	data1, data2
++	cset	result, ne
++	cneg	result, result, lo
++	ret
++
++	.p2align 4
++L(less16):
++	add	src1end, src1, limit
++	add	src2end, src2, limit
++	tbz	limit, 3, L(less8)
++	ldr	data1, [src1]
++	ldr	data2, [src2]
++	ldr	data3, [src1end, -8]
++	ldr	data4, [src2end, -8]
++	b	L(return2)
++
++	.p2align 4
++L(less8):
++	tbz	limit, 2, L(less4)
++	ldr	data1w, [src1]
++	ldr	data2w, [src2]
++	ldr	data3w, [src1end, -4]
++	ldr	data4w, [src2end, -4]
++	b	L(return2)
++
++L(less4):
++	tbz	limit, 1, L(less2)
++	ldrh	data1w, [src1]
++	ldrh	data2w, [src2]
++	cmp	data1w, data2w
++	b.ne	L(return)
++L(less2):
++	mov	result, 0
++	tbz	limit, 0, L(return_zero)
++	ldrb	data1w, [src1end, -1]
++	ldrb	data2w, [src2end, -1]
++	sub	result, data1w, data2w
++L(return_zero):
++	ret
++
++SYM_FUNC_END(__pi_memcmp)
++SYM_FUNC_ALIAS_WEAK(memcmp, __pi_memcmp)
++EXPORT_SYMBOL_NOKASAN(memcmp)
++#else
+ #define L(label) .L ## label
+ 
+ /* Parameters and result.  */
+@@ -137,3 +255,4 @@
+ SYM_FUNC_END(__pi_memcmp)
+ SYM_FUNC_ALIAS_WEAK(memcmp, __pi_memcmp)
+ EXPORT_SYMBOL_NOKASAN(memcmp)
++#endif
+diff --git a/drivers/base/power/wakeup.c b/drivers/base/power/wakeup.c
+--- a/drivers/base/power/wakeup.c
++++ b/drivers/base/power/wakeup.c
+@@ -938,8 +938,13 @@
+ 
+ void pm_system_wakeup(void)
+ {
++#ifdef CONFIG_ONYX_PERFORMANCE
++	if (atomic_inc_return_relaxed(&pm_abort_suspend) == 1)
++		s2idle_wake();
++#else
+ 	atomic_inc(&pm_abort_suspend);
+ 	s2idle_wake();
++#endif
+ }
+ EXPORT_SYMBOL_GPL(pm_system_wakeup);
+ 
+diff --git a/drivers/pci/pci.c b/drivers/pci/pci.c
+--- a/drivers/pci/pci.c
++++ b/drivers/pci/pci.c
+@@ -67,7 +67,11 @@
+ 	struct pci_dev *dev;
+ };
+ 
++#ifdef CONFIG_ONYX_PERFORMANCE
++#define PME_TIMEOUT 4000 /* How long between PME checks */
++#else
+ #define PME_TIMEOUT 1000 /* How long between PME checks */
++#endif
+ 
+ /*
+  * Following exit from Conventional Reset, devices must be ready within 1 sec
+diff --git a/fs/dcache.c b/fs/dcache.c
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -73,7 +73,11 @@
+  * If no ancestor relationship:
+  * arbitrary, since it's serialized on rename_lock
+  */
++#ifdef CONFIG_ONYX_PERFORMANCE
++static int sysctl_vfs_cache_pressure __read_mostly = 50;
++#else
+ static int sysctl_vfs_cache_pressure __read_mostly = 100;
++#endif
+ static int sysctl_vfs_cache_pressure_denom __read_mostly = 100;
+ 
+ unsigned long vfs_pressure_ratio(unsigned long val)
+diff --git a/fs/f2fs/gc.h b/fs/f2fs/gc.h
+--- a/fs/f2fs/gc.h
++++ b/fs/f2fs/gc.h
+@@ -10,7 +10,11 @@
+ 						 * whether IO subsystem is idle
+ 						 * or not
+ 						 */
++#ifdef CONFIG_ONYX_PERFORMANCE
++#define DEF_GC_THREAD_URGENT_SLEEP_TIME	50	/* 50 ms */
++#else
+ #define DEF_GC_THREAD_URGENT_SLEEP_TIME	500	/* 500 ms */
++#endif
+ #define DEF_GC_THREAD_MIN_SLEEP_TIME	30000	/* milliseconds */
+ #define DEF_GC_THREAD_MAX_SLEEP_TIME	60000
+ #define DEF_GC_THREAD_NOGC_SLEEP_TIME	300000	/* wait 5 min */
+diff --git a/fs/f2fs/segment.h b/fs/f2fs/segment.h
+--- a/fs/f2fs/segment.h
++++ b/fs/f2fs/segment.h
+@@ -773,7 +773,11 @@
+  * F2FS_IPU_DISABLE - disable IPU. (=default option in LFS mode)
+  */
+ #define DEF_MIN_IPU_UTIL	70
++#ifdef CONFIG_ONYX_PERFORMANCE
++#define DEF_MIN_FSYNC_BLOCKS	20
++#else
+ #define DEF_MIN_FSYNC_BLOCKS	8
++#endif
+ #define DEF_MIN_HOT_BLOCKS	16
+ 
+ #define SMALL_VOLUME_SEGMENTS	(16 * 512)	/* 16GB */
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1254,7 +1254,11 @@
+ 	ANDROID_KABI_RESERVE(1);
+ 	ANDROID_KABI_RESERVE(2);
+ } __randomize_layout
++#ifdef CONFIG_ONYX_PERFORMANCE
++  __attribute__((aligned(8)));
++#else
+   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
++#endif
+ 
+ struct file_handle {
+ 	__u32 handle_bytes;
+diff --git a/include/linux/jbd2.h b/include/linux/jbd2.h
+--- a/include/linux/jbd2.h
++++ b/include/linux/jbd2.h
+@@ -45,7 +45,11 @@
+ /*
+  * The default maximum commit age, in seconds.
+  */
++#ifdef CONFIG_ONYX_PERFORMANCE
++#define JBD2_DEFAULT_MAX_COMMIT_AGE 30
++#else
+ #define JBD2_DEFAULT_MAX_COMMIT_AGE 5
++#endif
+ 
+ #ifdef CONFIG_JBD2_DEBUG
+ /*
+diff --git a/include/net/sock.h b/include/net/sock.h
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -3014,7 +3014,11 @@
+  * platforms.  This makes socket queueing behavior and performance
+  * not depend upon such differences.
+  */
++#ifdef CONFIG_ONYX_PERFORMANCE
++#define _SK_MEM_PACKETS		1024
++#else
+ #define _SK_MEM_PACKETS		256
++#endif
+ #define _SK_MEM_OVERHEAD	SKB_TRUESIZE(256)
+ #define SK_WMEM_DEFAULT		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
+ #define SK_RMEM_DEFAULT		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
+diff --git a/kernel/irq/cpuhotplug.c b/kernel/irq/cpuhotplug.c
+--- a/kernel/irq/cpuhotplug.c
++++ b/kernel/irq/cpuhotplug.c
+@@ -147,7 +147,11 @@
+ 	}
+ 
+ 	if (err) {
++#ifdef CONFIG_ONYX_PERFORMANCE
++		pr_debug_ratelimited("IRQ%u: set affinity failed(%d).\n",
++#else
+ 		pr_warn_ratelimited("IRQ%u: set affinity failed(%d).\n",
++#endif
+ 				    d->irq, err);
+ 		brokeaff = false;
+ 	}
+diff --git a/kernel/power/process.c b/kernel/power/process.c
+--- a/kernel/power/process.c
++++ b/kernel/power/process.c
+@@ -25,7 +25,11 @@
+ /*
+  * Timeout for stopping processes
+  */
++#ifdef CONFIG_ONYX_PERFORMANCE
++unsigned int __read_mostly freeze_timeout_msecs = MSEC_PER_SEC;
++#else
+ unsigned int __read_mostly freeze_timeout_msecs = 20 * MSEC_PER_SEC;
++#endif
+ 
+ static int try_to_freeze_tasks(bool user_only)
+ {
+diff --git a/kernel/printk/printk.c b/kernel/printk/printk.c
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -796,6 +796,14 @@
+ 			endp++;
+ 			line = endp;
+ 		}
++#ifdef CONFIG_ONYX_PERFORMANCE
++	}
++
++	if ((strstr(line, "healthd")) || (strstr(line, "logd")) ||
++		 strstr(line, "dashd")) {
++		kfree(buf);
++		return len;
++#endif
+ 	}
+ 
+ 	devkmsg_emit(facility, level, "%s", line);
+diff --git a/kernel/sched/features.h b/kernel/sched/features.h
+--- a/kernel/sched/features.h
++++ b/kernel/sched/features.h
+@@ -44,7 +44,11 @@
+  * Consider buddies to be cache hot, decreases the likeliness of a
+  * cache buddy being migrated away, increases cache locality.
+  */
++#ifdef CONFIG_ONYX_PERFORMANCE
++SCHED_FEAT(CACHE_HOT_BUDDY, false)
++#else
+ SCHED_FEAT(CACHE_HOT_BUDDY, true)
++#endif
+ 
+ /*
+  * Delay dequeueing tasks until they get selected or woken.
+diff --git a/kernel/time/alarmtimer.c b/kernel/time/alarmtimer.c
+--- a/kernel/time/alarmtimer.c
++++ b/kernel/time/alarmtimer.c
+@@ -255,7 +255,12 @@
+ 		return 0;
+ 
+ 	if (ktime_to_ns(min) < 2 * NSEC_PER_SEC) {
++#ifdef CONFIG_ONYX_PERFORMANCE
++		pm_wakeup_event(dev, clamp_t(s64, ktime_to_ms(min) + 1,
++					    1, 2 * MSEC_PER_SEC));
++#else
+ 		pm_wakeup_event(dev, 2 * MSEC_PER_SEC);
++#endif
+ 		return -EBUSY;
+ 	}
+ 
+diff --git a/lib/math/int_sqrt.c b/lib/math/int_sqrt.c
+--- a/lib/math/int_sqrt.c
++++ b/lib/math/int_sqrt.c
+@@ -17,6 +17,29 @@
+  *
+  * Computes: floor(sqrt(x))
+  */
++#ifdef CONFIG_ONYX_PERFORMANCE
++unsigned long int_sqrt(unsigned long x)
++{
++	unsigned long place = 1UL << (BITS_PER_LONG - 2);
++	unsigned long root = 0, tmp;
++
++	if (x <= 1)
++		return x;
++	/* Do not drop the top power of four for large inputs. */
++	while (place > x)
++		place >>= 2;
++	do {
++		tmp = root + place;
++		root >>= 1;
++		if (x >= tmp) {
++			x -= tmp;
++			root += place;
++		}
++		place >>= 2;
++	} while (place);
++	return root;
++}
++#else
+ unsigned long int_sqrt(unsigned long x)
+ {
+ 	unsigned long b, m, y = 0;
+@@ -38,6 +61,7 @@
+ 
+ 	return y;
+ }
++#endif
+ EXPORT_SYMBOL(int_sqrt);
+ 
+ #if BITS_PER_LONG < 64

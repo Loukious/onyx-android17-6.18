@@ -298,6 +298,23 @@ def artifact_catalog(artifact, directory):
         target = directory / source.name
         shutil.copyfile(source, target)
         paths[name], kinds[name] = target, 'platform'
+    addon_sources = sorted((artifact / 'platform-addon').glob('*.ko'))
+    if addon_sources:
+        from features import verify_artifact
+        report = read(artifact / 'report.json')
+        verify_artifact(artifact, report)
+        for source in addon_sources:
+            name = norm(source.name)
+            require(name not in paths and name not in builtin, 'Duplicate feature addon module/builtin')
+            require('platform-addon/' + source.name in report['sha256'] and
+                    sha(source) == report['sha256']['platform-addon/' + source.name],
+                    'Feature addon module hash differs')
+            target = directory / source.name
+            shutil.copyfile(source, target)
+            # This module uses KernelSU's special loader. Explicit policy ships
+            # it to vendor_dlkm; ordinary platform defaults and load lists do
+            # not load it or copy it into the vendor/recovery ramdisk.
+            paths[name], kinds[name] = target, 'feature_addon'
     used = set()
     release = (artifact / 'gki/kernel.release').read_text().strip()
     with tarfile.open(artifact / 'gki/modules_staging_dir.tar.gz', 'r:gz') as tar:

@@ -817,6 +817,9 @@ int f2fs_do_add_link(struct inode *dir, const struct qstr *name,
 	struct f2fs_dir_entry *de = NULL;
 	int err;
 
+	if (!generic_ci_validate_new_name(dir, name))
+		return -EINVAL;
+
 	err = f2fs_setup_filename(dir, name, 0, &fname);
 	if (err)
 		return err;

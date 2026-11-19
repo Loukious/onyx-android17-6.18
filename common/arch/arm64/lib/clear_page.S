@@ -14,6 +14,9 @@
  * Parameters:
  *	x0 - dest
  */
+#ifdef CONFIG_ONYX_PERFORMANCE
+	.p2align 4
+#endif
 SYM_FUNC_START(__pi_clear_page)
 #ifdef CONFIG_AS_HAS_MOPS
 	.arch_extension mops

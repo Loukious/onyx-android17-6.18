@@ -37,18 +37,18 @@ def snapshot(workspace, write=False):
         raise ValueError('GKI snapshot input does not match the pinned upstream revision')
     sys.path.insert(0, str(port))
     from common_fixes import applied
+    from features import applied as feature_fixes
     with tempfile.TemporaryDirectory(prefix='konoha-gki-snapshot-') as temporary:
         root = Path(temporary)
-        archive = root / 'source.tar'
-        with archive.open('wb') as stream:
-            subprocess.run(['git', '-C', str(common), 'archive', '--format=tar', revision],
-                           stdout=stream, check=True)
         tree = root / 'common'
         tree.mkdir()
-        with tarfile.open(archive) as tar:
-            tar.extractall(tree, filter='data')
-        archive.unlink()
-        with applied(tree, root / 'patch-receipt'):
+        with subprocess.Popen(['git', '-C', str(common), 'archive', '--format=tar', revision],
+                              stdout=subprocess.PIPE) as producer:
+            with tarfile.open(fileobj=producer.stdout, mode='r|') as tar:
+                tar.extractall(tree, filter='data')
+            if producer.wait():
+                raise RuntimeError('Pinned Common source archive failed')
+        with applied(tree, root / 'patch-receipt'), feature_fixes(tree, root / 'feature-receipt'):
             source = hashes(tree)
             destination = ROOT / 'common'
             manifest = port / 'common-source-hashes.json'
@@ -62,8 +62,15 @@ def snapshot(workspace, write=False):
                 manifest.write_text(json.dumps(source, indent=2) + '\n')
             else:
                 expected = json.loads(manifest.read_text())
-                if source != expected or hashes(destination) != expected:
-                    raise ValueError('GKI snapshot differs from exact upstream/required-patch replay')
+                actual = hashes(destination)
+                if source != expected or actual != expected:
+                    replay_changed = [n for n in source.keys() | expected.keys() if source.get(n) != expected.get(n)]
+                    snapshot_changed = [n for n in actual.keys() | expected.keys() if actual.get(n) != expected.get(n)]
+                    details = {n: {'replay': source.get(n), 'expected': expected.get(n)}
+                               for n in sorted(replay_changed)[:8]}
+                    raise ValueError('GKI snapshot differs from exact upstream/required-patch replay: '
+                                     + json.dumps({'replay_files': details,
+                                                   'snapshot_files': sorted(snapshot_changed)[:8]}))
     return {'gki_files_verified': len(source), 'upstream_revision': revision}
 
 

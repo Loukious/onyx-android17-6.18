@@ -45,7 +45,11 @@
 /*
  * The default maximum commit age, in seconds.
  */
+#ifdef CONFIG_ONYX_PERFORMANCE
+#define JBD2_DEFAULT_MAX_COMMIT_AGE 30
+#else
 #define JBD2_DEFAULT_MAX_COMMIT_AGE 5
+#endif
 
 #ifdef CONFIG_JBD2_DEBUG
 /*

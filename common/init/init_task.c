@@ -6,6 +6,7 @@
 #include <linux/sched/sysctl.h>
 #include <linux/sched/rt.h>
 #include <linux/sched/task.h>
+#include <linux/sysv_task.h>
 #include <linux/sched/ext.h>
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -59,6 +60,12 @@ static struct sighand_struct init_sighand = {
 #ifdef CONFIG_SHADOW_CALL_STACK
 unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] = {
 	[(SCS_SIZE / sizeof(long)) - 1] = SCS_END_MAGIC
+};
+#endif
+
+#ifdef CONFIG_SYSVIPC
+static struct sysv_task_state init_sysv_state = {
+	.shm_clist = LIST_HEAD_INIT(init_sysv_state.shm_clist),
 };
 #endif
 
@@ -125,6 +132,9 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	RCU_POINTER_INITIALIZER(real_cred, &init_cred),
 	RCU_POINTER_INITIALIZER(cred, &init_cred),
 	.comm		= INIT_TASK_COMM,
+#ifdef CONFIG_SYSVIPC
+	.__kabi_reserved4 = (unsigned long)&init_sysv_state,
+#endif
 	.thread		= INIT_THREAD,
 	.fs		= &init_fs,
 	.files		= &init_files,

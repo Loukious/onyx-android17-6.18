@@ -14,6 +14,7 @@
 #include <linux/kcmp.h>
 #include <linux/capability.h>
 #include <linux/list.h>
+#include <linux/sysv_task.h>
 #include <linux/eventpoll.h>
 #include <linux/file.h>
 
@@ -196,8 +197,8 @@ SYSCALL_DEFINE5(kcmp, pid_t, pid1, pid_t, pid2, int, type,
 		break;
 	case KCMP_SYSVSEM:
 #ifdef CONFIG_SYSVIPC
-		ret = kcmp_ptr(task1->sysvsem.undo_list,
-			       task2->sysvsem.undo_list,
+		ret = kcmp_ptr(sysv_task_state(task1)->undo_list,
+			       sysv_task_state(task2)->undo_list,
 			       KCMP_SYSVSEM);
 #else
 		ret = -EOPNOTSUPP;

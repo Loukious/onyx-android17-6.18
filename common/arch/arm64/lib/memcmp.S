@@ -14,6 +14,124 @@
  * ARMv8-a, AArch64, unaligned accesses.
  */
 
+/* Performance uses the scalar portion of ARM optimized-routines.
+ * Kernel generic memcmp must not touch FPSIMD registers. */
+#ifdef CONFIG_ONYX_PERFORMANCE
+#define L(label) .L ## label
+
+#define src1	x0
+#define src2	x1
+#define limit	x2
+#define result	w0
+
+#define data1	x3
+#define data1w	w3
+#define data2	x4
+#define data2w	w4
+#define data3	x5
+#define data3w	w5
+#define data4	x6
+#define data4w	w6
+#define tmp	x6
+#define src1end	x7
+#define src2end	x8
+
+SYM_FUNC_START(__pi_memcmp)
+
+	cmp	limit, 16
+	b.lo	L(less16)
+	ldp	data1, data3, [src1]
+	ldp	data2, data4, [src2]
+	ccmp	data1, data2, 0, ne
+	ccmp	data3, data4, 0, eq
+	b.ne	L(return2)
+
+	add	src1end, src1, limit
+	add	src2end, src2, limit
+	cmp	limit, 32
+	b.ls	L(last_bytes)
+	sub	limit, limit, 32
+
+	.p2align 4
+L(loop32):
+	ldp	data1, data3, [src1, 16]
+	ldp	data2, data4, [src2, 16]
+	cmp	data1, data2
+	ccmp	data3, data4, 0, eq
+	b.ne	L(return2)
+	cmp	limit, 16
+	b.ls	L(last_bytes)
+
+	ldp	data1, data3, [src1, 32]
+	ldp	data2, data4, [src2, 32]
+	cmp	data1, data2
+	ccmp	data3, data4, 0, eq
+	b.ne	L(return2)
+	add	src1, src1, 32
+	add	src2, src2, 32
+L(last64):
+	subs	limit, limit, 32
+	b.hi	L(loop32)
+
+	/* Compare last 1-16 bytes using unaligned access.  */
+L(last_bytes):
+	ldp	data1, data3, [src1end, -16]
+	ldp	data2, data4, [src2end, -16]
+L(return2):
+	cmp	data1, data2
+	csel	data1, data1, data3, ne
+	csel	data2, data2, data4, ne
+
+	/* Compare data bytes and set return value to 0, -1 or 1.  */
+L(return):
+#ifndef __AARCH64EB__
+	rev	data1, data1
+	rev	data2, data2
+#endif
+	cmp	data1, data2
+	cset	result, ne
+	cneg	result, result, lo
+	ret
+
+	.p2align 4
+L(less16):
+	add	src1end, src1, limit
+	add	src2end, src2, limit
+	tbz	limit, 3, L(less8)
+	ldr	data1, [src1]
+	ldr	data2, [src2]
+	ldr	data3, [src1end, -8]
+	ldr	data4, [src2end, -8]
+	b	L(return2)
+
+	.p2align 4
+L(less8):
+	tbz	limit, 2, L(less4)
+	ldr	data1w, [src1]
+	ldr	data2w, [src2]
+	ldr	data3w, [src1end, -4]
+	ldr	data4w, [src2end, -4]
+	b	L(return2)
+
+L(less4):
+	tbz	limit, 1, L(less2)
+	ldrh	data1w, [src1]
+	ldrh	data2w, [src2]
+	cmp	data1w, data2w
+	b.ne	L(return)
+L(less2):
+	mov	result, 0
+	tbz	limit, 0, L(return_zero)
+	ldrb	data1w, [src1end, -1]
+	ldrb	data2w, [src2end, -1]
+	sub	result, data1w, data2w
+L(return_zero):
+	ret
+
+SYM_FUNC_END(__pi_memcmp)
+SYM_FUNC_ALIAS_WEAK(memcmp, __pi_memcmp)
+EXPORT_SYMBOL_NOKASAN(memcmp)
+#else
 #define L(label) .L ## label
 
 /* Parameters and result.  */
@@ -137,3 +255,4 @@ L(byte_loop):
 SYM_FUNC_END(__pi_memcmp)
 SYM_FUNC_ALIAS_WEAK(memcmp, __pi_memcmp)
 EXPORT_SYMBOL_NOKASAN(memcmp)
+#endif

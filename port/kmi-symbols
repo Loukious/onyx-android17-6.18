@@ -27,3 +27,6 @@
   __auxiliary_driver_register
   auxiliary_device_init
   auxiliary_driver_unregister
+  snd_device_free
+  snd_soc_card_jack_new
+  snd_soc_jack_report

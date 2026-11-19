@@ -4797,6 +4797,14 @@ zerocopy_rcv_out:
 		return err;
 	}
 #endif
+	case TCP_BBR3_INFO: {
+		int err;
+
+		sockopt_lock_sock(sk);
+		err = tcp_bbr3_get_info(sk, optval, optlen);
+		sockopt_release_sock(sk);
+		return err;
+	}
 	case TCP_AO_REPAIR:
 		if (!tcp_can_repair_sock(sk))
 			return -EPERM;

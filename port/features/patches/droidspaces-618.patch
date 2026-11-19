@@ -1,0 +1,355 @@
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 4ee2a5d47..89be5c826 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1205,10 +1205,6 @@ struct task_struct {
+ 
+ 	struct nameidata		*nameidata;
+ 
+-#ifdef CONFIG_SYSVIPC
+-	struct sysv_sem			sysvsem;
+-	struct sysv_shm			sysvshm;
+-#endif
+ #ifdef CONFIG_DETECT_HUNG_TASK
+ 	unsigned long			last_switch_count;
+ 	unsigned long			last_switch_time;
+@@ -1698,7 +1694,7 @@ struct task_struct {
+ 	ANDROID_KABI_RESERVE(1);
+ 	ANDROID_KABI_RESERVE(2);
+ 	ANDROID_KABI_RESERVE(3);
+-	ANDROID_KABI_RESERVE(4);
++	ANDROID_KABI_RESERVE(4); /* Owned SysV state bits; keep the literal reserve. */
+ 
+ #ifdef CONFIG_RV
+ 	/*
+diff --git a/include/linux/sched/task.h b/include/linux/sched/task.h
+index 2bd42ed3f..fad824d5e 100644
+--- a/include/linux/sched/task.h
++++ b/include/linux/sched/task.h
+@@ -211,7 +211,7 @@ static inline struct vm_struct *task_stack_vm_area(const struct task_struct *t)
+  * Protects ->fs, ->files, ->mm, ->group_info, ->comm, keyring
+  * subscriptions and synchronises with wait4().  Also used in procfs.  Also
+  * pins the final release of task.io_context.  Also protects ->cpuset and
+- * ->cgroup.subsys[]. And ->vfork_done. And ->sysvshm.shm_clist.
++ * ->cgroup.subsys[]. And ->vfork_done. And the SysV IPC creator list.
+  *
+  * Nests inside of read_lock(&tasklist_lock). It must not be nested with
+  * write_lock_irq(&tasklist_lock), neither inside nor outside.
+diff --git a/include/linux/shm.h b/include/linux/shm.h
+index 1d3d3ae95..9be3f620a 100644
+--- a/include/linux/shm.h
++++ b/include/linux/shm.h
+@@ -17,7 +17,7 @@ struct sysv_shm {
+ long do_shmat(int shmid, char __user *shmaddr, int shmflg, unsigned long *addr,
+ 	      unsigned long shmlba);
+ void exit_shm(struct task_struct *task);
+-#define shm_init_task(task) INIT_LIST_HEAD(&(task)->sysvshm.shm_clist)
++#define shm_init_task(task) INIT_LIST_HEAD(&sysv_task_state(task)->shm_clist)
+ #else
+ struct sysv_shm {
+ 	/* empty */
+diff --git a/init/init_task.c b/init/init_task.c
+index 88981aaf9..5ec66cc08 100644
+--- a/init/init_task.c
++++ b/init/init_task.c
+@@ -6,6 +6,7 @@
+ #include <linux/sched/sysctl.h>
+ #include <linux/sched/rt.h>
+ #include <linux/sched/task.h>
++#include <linux/sysv_task.h>
+ #include <linux/sched/ext.h>
+ #include <linux/init.h>
+ #include <linux/fs.h>
+@@ -62,6 +63,12 @@ unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] = {
+ };
+ #endif
+ 
++#ifdef CONFIG_SYSVIPC
++static struct sysv_task_state init_sysv_state = {
++	.shm_clist = LIST_HEAD_INIT(init_sysv_state.shm_clist),
++};
++#endif
++
+ /*
+  * Set up the first task table, touch at your own risk!. Base=0,
+  * limit=0x1fffff (=2MB)
+@@ -125,6 +132,9 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
+ 	RCU_POINTER_INITIALIZER(real_cred, &init_cred),
+ 	RCU_POINTER_INITIALIZER(cred, &init_cred),
+ 	.comm		= INIT_TASK_COMM,
++#ifdef CONFIG_SYSVIPC
++	.__kabi_reserved4 = (unsigned long)&init_sysv_state,
++#endif
+ 	.thread		= INIT_THREAD,
+ 	.fs		= &init_fs,
+ 	.files		= &init_files,
+diff --git a/ipc/msgutil.c b/ipc/msgutil.c
+index 2b93abb80..8b79069e5 100644
+--- a/ipc/msgutil.c
++++ b/ipc/msgutil.c
+@@ -6,6 +6,7 @@
+ 
+ #include <linux/spinlock.h>
+ #include <linux/init.h>
++#include <linux/export.h>
+ #include <linux/security.h>
+ #include <linux/slab.h>
+ #include <linux/ipc.h>
+@@ -35,6 +36,8 @@ struct ipc_namespace init_ipc_ns = {
+ #endif
+ 	.ns.ns_type = ns_common_type(&init_ipc_ns),
+ };
++/* Rust Binder/binderfs may be built as a GPL module on GKI. */
++EXPORT_SYMBOL_GPL(init_ipc_ns);
+ 
+ struct msg_msgseg {
+ 	struct msg_msgseg *next;
+diff --git a/ipc/namespace.c b/ipc/namespace.c
+index 7aab1e6e0..63c7051c6 100644
+--- a/ipc/namespace.c
++++ b/ipc/namespace.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <linux/ipc.h>
++#include <linux/export.h>
+ #include <linux/msg.h>
+ #include <linux/ipc_namespace.h>
+ #include <linux/rcupdate.h>
+@@ -209,6 +210,7 @@ void put_ipc_ns(struct ipc_namespace *ns)
+ 			schedule_work(&free_ipc_work);
+ 	}
+ }
++EXPORT_SYMBOL_GPL(put_ipc_ns);
+ 
+ static struct ns_common *ipcns_get(struct task_struct *task)
+ {
+diff --git a/ipc/sem.c b/ipc/sem.c
+index 0f06e4bd4..957019d49 100644
+--- a/ipc/sem.c
++++ b/ipc/sem.c
+@@ -84,6 +84,7 @@
+ #include <linux/rwsem.h>
+ #include <linux/nsproxy.h>
+ #include <linux/ipc_namespace.h>
++#include <linux/sysv_task.h>
+ #include <linux/sched/wake_q.h>
+ #include <linux/nospec.h>
+ #include <linux/rhashtable.h>
+@@ -1851,7 +1852,7 @@ static inline int get_undo_list(struct sem_undo_list **undo_listp)
+ {
+ 	struct sem_undo_list *undo_list;
+ 
+-	undo_list = current->sysvsem.undo_list;
++	undo_list = sysv_task_state(current)->undo_list;
+ 	if (!undo_list) {
+ 		undo_list = kzalloc(sizeof(*undo_list), GFP_KERNEL_ACCOUNT);
+ 		if (undo_list == NULL)
+@@ -1860,7 +1861,7 @@ static inline int get_undo_list(struct sem_undo_list **undo_listp)
+ 		refcount_set(&undo_list->refcnt, 1);
+ 		INIT_LIST_HEAD(&undo_list->list_proc);
+ 
+-		current->sysvsem.undo_list = undo_list;
++		sysv_task_state(current)->undo_list = undo_list;
+ 	}
+ 	*undo_listp = undo_list;
+ 	return 0;
+@@ -2313,9 +2314,9 @@ int copy_semundo(u64 clone_flags, struct task_struct *tsk)
+ 		if (error)
+ 			return error;
+ 		refcount_inc(&undo_list->refcnt);
+-		tsk->sysvsem.undo_list = undo_list;
++		sysv_task_state(tsk)->undo_list = undo_list;
+ 	} else
+-		tsk->sysvsem.undo_list = NULL;
++		sysv_task_state(tsk)->undo_list = NULL;
+ 
+ 	return 0;
+ }
+@@ -2336,10 +2337,10 @@ void exit_sem(struct task_struct *tsk)
+ {
+ 	struct sem_undo_list *ulp;
+ 
+-	ulp = tsk->sysvsem.undo_list;
++	ulp = sysv_task_state(tsk)->undo_list;
+ 	if (!ulp)
+ 		return;
+-	tsk->sysvsem.undo_list = NULL;
++	sysv_task_state(tsk)->undo_list = NULL;
+ 
+ 	if (!refcount_dec_and_test(&ulp->refcnt))
+ 		return;
+diff --git a/ipc/shm.c b/ipc/shm.c
+index 2f5cee0c7..f6ff7d86b 100644
+--- a/ipc/shm.c
++++ b/ipc/shm.c
+@@ -44,6 +44,7 @@
+ #include <linux/nsproxy.h>
+ #include <linux/mount.h>
+ #include <linux/ipc_namespace.h>
++#include <linux/sysv_task.h>
+ #include <linux/rhashtable.h>
+ #include <linux/nstree.h>
+ 
+@@ -452,12 +453,12 @@ void exit_shm(struct task_struct *task)
+ 
+ 		task_lock(task);
+ 
+-		if (list_empty(&task->sysvshm.shm_clist)) {
++		if (list_empty(&sysv_task_state(task)->shm_clist)) {
+ 			task_unlock(task);
+ 			break;
+ 		}
+ 
+-		shp = list_first_entry(&task->sysvshm.shm_clist, struct shmid_kernel,
++		shp = list_first_entry(&sysv_task_state(task)->shm_clist, struct shmid_kernel,
+ 				shm_clist);
+ 
+ 		/*
+@@ -786,7 +787,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
+ 	shp->ns = ns;
+ 
+ 	task_lock(current);
+-	list_add(&shp->shm_clist, &current->sysvshm.shm_clist);
++	list_add(&shp->shm_clist, &sysv_task_state(current)->shm_clist);
+ 	task_unlock(current);
+ 
+ 	/*
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 98c0d65d4..4de1d14a2 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -20,6 +20,7 @@
+ #include <linux/sched/numa_balancing.h>
+ #include <linux/sched/stat.h>
+ #include <linux/sched/task.h>
++#include <linux/sysv_task.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/sched/cputime.h>
+ #include <linux/sched/ext.h>
+@@ -520,6 +521,15 @@ void free_task(struct task_struct *tsk)
+ 	rt_mutex_debug_task_free(tsk);
+ 	ftrace_graph_exit_task(tsk);
+ 	arch_release_task_struct(tsk);
++
++#ifdef CONFIG_SYSVIPC
++	/* exit_sem()/exit_shm() have detached all IPC resources by this point. */
++	struct sysv_task_state *sysv_state = sysv_task_state(tsk);
++
++	WARN_ON_ONCE(sysv_state->undo_list);
++	WARN_ON_ONCE(!list_empty(&sysv_state->shm_clist));
++	kfree(sysv_state);
++#endif
+ 	if (tsk->flags & PF_KTHREAD)
+ 		free_kthread_struct(tsk);
+ 	bpf_task_storage_free(tsk);
+@@ -884,6 +894,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
+ {
+ 	struct task_struct *tsk;
+ 	int err;
++#ifdef CONFIG_SYSVIPC
++	struct sysv_task_state *sysv_state;
++#endif
+ 
+ 	if (node == NUMA_NO_NODE)
+ 		node = tsk_fork_get_node(orig);
+@@ -908,6 +921,15 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
+ 	if (err)
+ 		goto free_stack;
+ 
++#ifdef CONFIG_SYSVIPC
++	/* Never inherit the parent's state or allocate after IPC publication. */
++	sysv_state = kzalloc_node(sizeof(*sysv_state), GFP_KERNEL_ACCOUNT, node);
++	if (!sysv_state)
++		goto free_scs;
++	sysv_task_set_state(tsk, sysv_state);
++	INIT_LIST_HEAD(&sysv_state->shm_clist);
++#endif
++
+ #ifdef CONFIG_SECCOMP
+ 	/*
+ 	 * We must handle setting up seccomp filters once we're under
+@@ -989,6 +1011,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
+ #endif
+ 	return tsk;
+ 
++#ifdef CONFIG_SYSVIPC
++free_scs:
++	scs_release(tsk);
++#endif
+ free_stack:
+ 	exit_task_stack_account(tsk);
+ 	free_thread_stack(tsk);
+diff --git a/kernel/kcmp.c b/kernel/kcmp.c
+index 7c1a65bd5..1b6117ad4 100644
+--- a/kernel/kcmp.c
++++ b/kernel/kcmp.c
+@@ -14,6 +14,7 @@
+ #include <linux/kcmp.h>
+ #include <linux/capability.h>
+ #include <linux/list.h>
++#include <linux/sysv_task.h>
+ #include <linux/eventpoll.h>
+ #include <linux/file.h>
+ 
+@@ -196,8 +197,8 @@ SYSCALL_DEFINE5(kcmp, pid_t, pid1, pid_t, pid2, int, type,
+ 		break;
+ 	case KCMP_SYSVSEM:
+ #ifdef CONFIG_SYSVIPC
+-		ret = kcmp_ptr(task1->sysvsem.undo_list,
+-			       task2->sysvsem.undo_list,
++		ret = kcmp_ptr(sysv_task_state(task1)->undo_list,
++			       sysv_task_state(task2)->undo_list,
+ 			       KCMP_SYSVSEM);
+ #else
+ 		ret = -EOPNOTSUPP;
+diff --git a/include/linux/sysv_task.h b/include/linux/sysv_task.h
+new file mode 100644
+index 000000000..5766ab082
+--- /dev/null
++++ b/include/linux/sysv_task.h
+@@ -0,0 +1,44 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_SYSV_TASK_H
++#define _LINUX_SYSV_TASK_H
++
++#include <linux/list.h>
++#include <linux/sched.h>
++
++struct sem_undo_list;
++
++/*
++ * A task owns one state object from dup_task_struct() until free_task().
++ * The pointer is immutable while the task is visible; semaphore undo sharing
++ * and the creator list retain their existing reference-counting/locking rules.
++ * The fourth literal Android kABI reserve stores the pointer bits. Keeping that
++ * member's C declaration intact also preserves Rust bindgen's member graph:
++ * ANDROID_KABI_USE's anonymous wrapper adds a generated Rust field name even
++ * when gendwarfksyms reduces its contents to the original reserved u64.
++ */
++struct sysv_task_state {
++	struct sem_undo_list *undo_list;
++	struct list_head shm_clist;
++};
++
++#ifdef CONFIG_SYSVIPC
++#if !defined(CONFIG_64BIT) || !defined(CONFIG_ANDROID_KABI_RESERVE)
++#error "The 6.18 SysV IPC port requires a 64-bit Android kABI reserve"
++#endif
++
++_Static_assert(sizeof(((struct task_struct *)0)->__kabi_reserved4) ==
++	       sizeof(struct sysv_task_state *), "SysV state must fit the reserve");
++
++static inline struct sysv_task_state *sysv_task_state(const struct task_struct *task)
++{
++	return (struct sysv_task_state *)(unsigned long)READ_ONCE(task->__kabi_reserved4);
++}
++
++static inline void sysv_task_set_state(struct task_struct *task,
++				     struct sysv_task_state *state)
++{
++	WRITE_ONCE(task->__kabi_reserved4, (unsigned long)state);
++}
++#endif /* CONFIG_SYSVIPC */
++
++#endif /* _LINUX_SYSV_TASK_H */

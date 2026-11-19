@@ -20,6 +20,7 @@
 #include <linux/sched/numa_balancing.h>
 #include <linux/sched/stat.h>
 #include <linux/sched/task.h>
+#include <linux/sysv_task.h>
 #include <linux/sched/task_stack.h>
 #include <linux/sched/cputime.h>
 #include <linux/sched/ext.h>
@@ -520,6 +521,15 @@ void free_task(struct task_struct *tsk)
 	rt_mutex_debug_task_free(tsk);
 	ftrace_graph_exit_task(tsk);
 	arch_release_task_struct(tsk);
+
+#ifdef CONFIG_SYSVIPC
+	/* exit_sem()/exit_shm() have detached all IPC resources by this point. */
+	struct sysv_task_state *sysv_state = sysv_task_state(tsk);
+
+	WARN_ON_ONCE(sysv_state->undo_list);
+	WARN_ON_ONCE(!list_empty(&sysv_state->shm_clist));
+	kfree(sysv_state);
+#endif
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
 	bpf_task_storage_free(tsk);
@@ -884,6 +894,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 {
 	struct task_struct *tsk;
 	int err;
+#ifdef CONFIG_SYSVIPC
+	struct sysv_task_state *sysv_state;
+#endif
 
 	if (node == NUMA_NO_NODE)
 		node = tsk_fork_get_node(orig);
@@ -907,6 +920,15 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	err = scs_prepare(tsk, node);
 	if (err)
 		goto free_stack;
+
+#ifdef CONFIG_SYSVIPC
+	/* Never inherit the parent's state or allocate after IPC publication. */
+	sysv_state = kzalloc_node(sizeof(*sysv_state), GFP_KERNEL_ACCOUNT, node);
+	if (!sysv_state)
+		goto free_scs;
+	sysv_task_set_state(tsk, sysv_state);
+	INIT_LIST_HEAD(&sysv_state->shm_clist);
+#endif
 
 #ifdef CONFIG_SECCOMP
 	/*
@@ -989,6 +1011,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 #endif
 	return tsk;
 
+#ifdef CONFIG_SYSVIPC
+free_scs:
+	scs_release(tsk);
+#endif
 free_stack:
 	exit_task_stack_account(tsk);
 	free_thread_stack(tsk);

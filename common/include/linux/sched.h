@@ -1205,10 +1205,6 @@ struct task_struct {
 
 	struct nameidata		*nameidata;
 
-#ifdef CONFIG_SYSVIPC
-	struct sysv_sem			sysvsem;
-	struct sysv_shm			sysvshm;
-#endif
 #ifdef CONFIG_DETECT_HUNG_TASK
 	unsigned long			last_switch_count;
 	unsigned long			last_switch_time;
@@ -1698,7 +1694,7 @@ struct task_struct {
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
 	ANDROID_KABI_RESERVE(3);
-	ANDROID_KABI_RESERVE(4);
+	ANDROID_KABI_RESERVE(4); /* Owned SysV state bits; keep the literal reserve. */
 
 #ifdef CONFIG_RV
 	/*

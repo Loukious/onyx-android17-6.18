@@ -147,7 +147,11 @@ static bool migrate_one_irq(struct irq_desc *desc)
 	}
 
 	if (err) {
+#ifdef CONFIG_ONYX_PERFORMANCE
+		pr_debug_ratelimited("IRQ%u: set affinity failed(%d).\n",
+#else
 		pr_warn_ratelimited("IRQ%u: set affinity failed(%d).\n",
+#endif
 				    d->irq, err);
 		brokeaff = false;
 	}

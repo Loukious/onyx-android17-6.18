@@ -1,0 +1,70 @@
+From: Onyx kernel integration
+Subject: [PATCH] fs: reject new casefolded reserved basenames without changing lookup
+
+fs: reject new casefolded reserved basenames without changing lookup.
+
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -3761,9 +3761,36 @@
+ 
+ 	return !utf8_validate(dir->i_sb->s_encoding, name);
+ }
++
++/* Creation-only check: preserve normalization and lookup of existing names,
++ * but do not introduce basenames casefolding to empty, "." or "..". */
++static inline bool generic_ci_validate_new_name(struct inode *dir,
++					       const struct qstr *name)
++{
++	unsigned char folded[3];
++	int len;
++
++	if (!IS_CASEFOLDED(dir) || !dir->i_sb->s_encoding)
++		return true;
++
++	/* Three bytes suffice for two dots and the terminator. Longer names
++	 * return -EINVAL here; the full strict validation below handles them. */
++	len = utf8_casefold(dir->i_sb->s_encoding, name, folded, sizeof(folded));
++	if (!len || (len == 1 && folded[0] == '.') ||
++	    (len == 2 && folded[0] == '.' && folded[1] == '.'))
++		return false;
++
++	return generic_ci_validate_strict_name(dir, name);
++}
+ #else
+ static inline bool generic_ci_validate_strict_name(struct inode *dir,
+ 						   const struct qstr *name)
++{
++	return true;
++}
++
++static inline bool generic_ci_validate_new_name(struct inode *dir,
++					       const struct qstr *name)
+ {
+ 	return true;
+ }
+diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
+--- a/fs/ext4/namei.c
++++ b/fs/ext4/namei.c
+@@ -2380,7 +2380,7 @@
+ 	if (fscrypt_is_nokey_name(dentry))
+ 		return -ENOKEY;
+ 
+-	if (!generic_ci_validate_strict_name(dir, &dentry->d_name))
++	if (!generic_ci_validate_new_name(dir, &dentry->d_name))
+ 		return -EINVAL;
+ 
+ 	retval = ext4_fname_setup_filename(dir, &dentry->d_name, 0, &fname);
+diff --git a/fs/f2fs/dir.c b/fs/f2fs/dir.c
+--- a/fs/f2fs/dir.c
++++ b/fs/f2fs/dir.c
+@@ -817,6 +817,9 @@
+ 	struct f2fs_dir_entry *de = NULL;
+ 	int err;
+ 
++	if (!generic_ci_validate_new_name(dir, name))
++		return -EINVAL;
++
+ 	err = f2fs_setup_filename(dir, name, 0, &fname);
+ 	if (err)
+ 		return err;

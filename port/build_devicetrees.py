@@ -24,6 +24,18 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def dependency_name(path, workspace):
+    """Record canonical project paths even when locked projects are symlinked."""
+    resolved = path.resolve()
+    for project in (DT_PROJECT, KERNEL_PROJECT, MODULE_PROJECT, TOOL_PROJECT):
+        root = (workspace / project).resolve()
+        if resolved.is_relative_to(root):
+            return (Path(project) / resolved.relative_to(root)).as_posix()
+    if resolved.is_relative_to(workspace):
+        return resolved.relative_to(workspace).as_posix()
+    raise ValueError(f"device-tree dependency is outside the locked workspace: {path}")
+
+
 def read_fdt(path):
     """Read structure properties without relying on host Python libfdt versions."""
     data = path.read_bytes()
@@ -248,7 +260,7 @@ def main():
         if (blob_offset < offset + entry_size or blob_offset + blob_size != size
                 or image[blob_offset:size] != (merged / config["board_overlay"]).read_bytes()):
             raise ValueError("DTBO image does not contain the validated board overlay")
-    source_hashes = {p.relative_to(workspace).as_posix(): digest(p) for p in sorted(dependencies)}
+    source_hashes = {dependency_name(p, workspace): digest(p) for p in sorted(dependencies)}
     inputs = output / "inputs"
     inputs.mkdir()
     for name in ["devicetrees.json", "sources.json", "onyx-port.xml", "dependency-lock.xml",

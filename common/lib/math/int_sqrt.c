@@ -17,6 +17,29 @@
  *
  * Computes: floor(sqrt(x))
  */
+#ifdef CONFIG_ONYX_PERFORMANCE
+unsigned long int_sqrt(unsigned long x)
+{
+	unsigned long place = 1UL << (BITS_PER_LONG - 2);
+	unsigned long root = 0, tmp;
+
+	if (x <= 1)
+		return x;
+	/* Do not drop the top power of four for large inputs. */
+	while (place > x)
+		place >>= 2;
+	do {
+		tmp = root + place;
+		root >>= 1;
+		if (x >= tmp) {
+			x -= tmp;
+			root += place;
+		}
+		place >>= 2;
+	} while (place);
+	return root;
+}
+#else
 unsigned long int_sqrt(unsigned long x)
 {
 	unsigned long b, m, y = 0;
@@ -38,6 +61,7 @@ unsigned long int_sqrt(unsigned long x)
 
 	return y;
 }
+#endif
 EXPORT_SYMBOL(int_sqrt);
 
 #if BITS_PER_LONG < 64

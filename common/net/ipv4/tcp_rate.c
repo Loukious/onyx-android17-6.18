@@ -41,6 +41,9 @@ void tcp_rate_skb_sent(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* record exact in-flight state for an interested CC */
+	tcp_bbr3_stamp_skb(sk, skb);
+
 	 /* In general we need to start delivery rate samples from the
 	  * time we received the most recent ACK, to ensure we include
 	  * the full time the network needs to deliver all in-flight

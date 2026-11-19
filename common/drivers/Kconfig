@@ -251,4 +251,7 @@ source "drivers/hte/Kconfig"
 
 source "drivers/cdx/Kconfig"
 
+source "drivers/onyx_features/Kconfig"
+source "drivers/nomount/Kconfig"
+
 endmenu

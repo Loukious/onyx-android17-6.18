@@ -34,8 +34,9 @@ def module_shipping_roots(source, report):
     native = [entry['module'] for entry in records]
     if len(native) != len(set(native)) or not migrated <= set(native):
         raise ValueError('Verified native module records omit or duplicate source-ROM providers')
-    return {'system_dlkm': sorted(set(native) - migrated - external),
-            'vendor_dlkm': sorted(external | migrated),
+    addons = {entry['module'] for entry in report.get('platform_addon_verification', [])}
+    return {'system_dlkm': sorted(set(native) - migrated - external - addons),
+            'vendor_dlkm': sorted(external | migrated | addons),
             'vendor_ramdisk': sorted(external | migrated)}
 
 
@@ -88,6 +89,10 @@ def package(source, artifact, destination):
     report = read(artifact / 'report.json')
     if report.get('qdss_diagnostic') is not False:
         raise ValueError('ROM builds require the ordinary kernel recipe')
+    if (source / 'port/features/manifest.json').is_file():
+        sys.path.insert(0, str(source / 'port'))
+        from features import verify_artifact as verify_features
+        verify_features(artifact, report)
     for name, expected in report['sha256'].items():
         path = artifact / name
         if Path(name).is_absolute() or '..' in Path(name).parts or digest(path) != expected:
@@ -165,6 +170,7 @@ def package(source, artifact, destination):
                 if path.name in ('modules.load', 'modules.load.recovery', 'modules.blocklist', 'modules.options'):
                     shutil.copyfile(path, stage / (partition + '.' + path.name))
         receipt = {'source': source_state(source), 'kernel_release': report['kernel_release'],
+                   'variant': report.get('variant'), 'feature_validation': report.get('feature_validation'),
                    'kernelsu_next': report['kernelsu_next'], 'module_count': len(all_modules),
                    'partitions': reports, 'module_verification': verification,
                    'artifact': str(artifact), 'artifact_report_sha256': digest(artifact / 'report.json'),
@@ -184,7 +190,7 @@ def package(source, artifact, destination):
     return receipt
 
 
-def build(source, output, workspace_root, jobs, memory_mb):
+def build(source, output, workspace_root, jobs, memory_mb, variant='balanced'):
     source, output, workspace_root = (p.resolve() for p in (source, output, workspace_root))
     outside_source(source, output, workspace_root)
     if output == workspace_root or output.is_relative_to(workspace_root) or workspace_root.is_relative_to(output):
@@ -216,6 +222,7 @@ def build(source, output, workspace_root, jobs, memory_mb):
             subprocess.run([sys.executable, *map(str, command)], env=env, check=True)
         previous = set((workspace / 'artifacts').glob('*'))
         subprocess.run([sys.executable, str(source / 'port/build.py'), str(workspace),
+                        '--variant', variant,
                         '--jobs', str(jobs), '--memory-mb', str(memory_mb),
                         '--cache-dir', str(workspace_root / 'kleaf-cache')], env=env, check=True)
         created = set((workspace / 'artifacts').glob('*')) - previous
@@ -233,8 +240,10 @@ if __name__ == '__main__':
     parser.add_argument('--workspace', type=Path, required=True)
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 1, 12))
     parser.add_argument('--memory-mb', type=int, default=20000)
+    parser.add_argument('--variant', choices=('balanced', 'performance'),
+                        default=os.environ.get('ONYX_KERNEL_VARIANT', 'balanced'))
     args = parser.parse_args()
     if args.jobs < 1 or args.memory_mb < 1024:
         parser.error('Invalid kernel build resource limits')
-    receipt = build(args.source, args.output, args.workspace, args.jobs, args.memory_mb)
+    receipt = build(args.source, args.output, args.workspace, args.jobs, args.memory_mb, args.variant)
     print(json.dumps({key: receipt[key] for key in ('source', 'kernel_release', 'module_count')}, indent=2))

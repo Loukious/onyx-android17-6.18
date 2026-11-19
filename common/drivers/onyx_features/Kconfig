@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-only
+menu "Onyx kernel profiles"
+config ONYX_FEATURES
+	bool "Onyx shared feature support"
+	default y
+	select KEYS
+
+config ONYX_PERFORMANCE
+	bool "Onyx performance tuning profile"
+	depends on ONYX_FEATURES
+	default n
+	help
+	  Select the documented performance profile. Balanced builds leave
+	  this disabled. Both profiles retain the same peripheral features.
+endmenu

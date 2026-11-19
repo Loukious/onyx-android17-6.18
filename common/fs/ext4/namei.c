@@ -2380,7 +2380,7 @@ static int ext4_add_entry(handle_t *handle, struct dentry *dentry,
 	if (fscrypt_is_nokey_name(dentry))
 		return -ENOKEY;
 
-	if (!generic_ci_validate_strict_name(dir, &dentry->d_name))
+	if (!generic_ci_validate_new_name(dir, &dentry->d_name))
 		return -EINVAL;
 
 	retval = ext4_fname_setup_filename(dir, &dentry->d_name, 0, &fname);

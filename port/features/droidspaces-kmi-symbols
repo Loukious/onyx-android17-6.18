@@ -1,0 +1,3 @@
+[abi_symbol_list]
+  init_ipc_ns
+  put_ipc_ns

@@ -255,7 +255,12 @@ static int alarmtimer_suspend(struct device *dev)
 		return 0;
 
 	if (ktime_to_ns(min) < 2 * NSEC_PER_SEC) {
+#ifdef CONFIG_ONYX_PERFORMANCE
+		pm_wakeup_event(dev, clamp_t(s64, ktime_to_ms(min) + 1,
+					    1, 2 * MSEC_PER_SEC));
+#else
 		pm_wakeup_event(dev, 2 * MSEC_PER_SEC);
+#endif
 		return -EBUSY;
 	}
 

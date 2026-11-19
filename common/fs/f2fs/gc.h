@@ -10,7 +10,11 @@
 						 * whether IO subsystem is idle
 						 * or not
 						 */
+#ifdef CONFIG_ONYX_PERFORMANCE
+#define DEF_GC_THREAD_URGENT_SLEEP_TIME	50	/* 50 ms */
+#else
 #define DEF_GC_THREAD_URGENT_SLEEP_TIME	500	/* 500 ms */
+#endif
 #define DEF_GC_THREAD_MIN_SLEEP_TIME	30000	/* milliseconds */
 #define DEF_GC_THREAD_MAX_SLEEP_TIME	60000
 #define DEF_GC_THREAD_NOGC_SLEEP_TIME	300000	/* wait 5 min */

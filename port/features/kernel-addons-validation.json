@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "patch_series": [
+    {
+      "path": "port/features/patches/bbrv3-6.18.patch",
+      "sha256": "781cbafefac9ec1886682a037ad67846dc05cd4fbc8d2beda615afbc0a5a0d89"
+    },
+    {
+      "path": "port/features/patches/baseband-guard-6.18.patch",
+      "sha256": "a6a0baeee167c2cf890ccf7e6d4f2582a4557e0d7820ddcc78bb8f7f59a6a915"
+    },
+    {
+      "path": "port/features/patches/unicode-basename-guard.patch",
+      "sha256": "34000eda819c91b78b997e4ed4d90dd1610fe87bab44a59e99e854dfd3a7888d"
+    },
+    {
+      "path": "port/features/patches/usb-dvd-emulation.patch",
+      "sha256": "d3cfe540bc660488945967fbbb2fbdbecd66d63a5c3075d78a0773e6b40291f5"
+    },
+    {
+      "path": "port/features/patches/performance-gated.patch",
+      "sha256": "7be2553e90e13e5125aefbe85c9d74e14bcf540cade3d0f8d139fa70c3170303"
+    }
+  ],
+  "replay": {
+    "matched_files": 45,
+    "success": true
+  },
+  "host_C_tests": {
+    "tests": 6,
+    "success": true
+  },
+  "arm64_memcmp_emulator": {
+    "unicorn_version": "2.1.4",
+    "cases": 3825,
+    "success": true
+  },
+  "arm64_objects": {
+    "successful": 48,
+    "failed": 0,
+    "kcfi_successful": 8,
+    "kcfi_failed": 0
+  },
+  "checkpatch": {
+    "bbrv3-6.18.patch": {
+      "returncode": 1,
+      "counts": [
+        "total: 0 errors, 22 warnings, 11 checks, 2865 lines checked"
+      ]
+    },
+    "baseband-guard-6.18.patch": {
+      "returncode": 1,
+      "counts": [
+        "total: 0 errors, 58 warnings, 1380 lines checked"
+      ]
+    },
+    "unicode-basename-guard.patch": {
+      "returncode": 1,
+      "counts": [
+        "total: 0 errors, 3 warnings, 53 lines checked"
+      ]
+    },
+    "usb-dvd-emulation.patch": {
+      "returncode": 1,
+      "counts": [
+        "total: 0 errors, 2 warnings, 483 lines checked"
+      ]
+    },
+    "performance-gated.patch": {
+      "returncode": 1,
+      "counts": [
+        "total: 0 errors, 3 warnings, 340 lines checked"
+      ]
+    }
+  },
+  "checkpatch_options": [
+    "--no-signoff: uncommitted replay patches",
+    "--ignore FSF_MAILING_ADDRESS: verbatim upstream LICENSE text, not a new sample notice"
+  ],
+  "full_kernel_build_and_device_boot": "Covered separately by aggregate build/device validation"
+}

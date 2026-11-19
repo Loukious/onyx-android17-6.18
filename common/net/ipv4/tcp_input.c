@@ -342,6 +342,12 @@ static bool tcp_in_quickack_mode(struct sock *sk)
 		(icsk->icsk_ack.quick && !inet_csk_in_pingpong_mode(sk));
 }
 
+
+/* Preserve existing ECN callbacks and additionally notify BBRv3. */
+static inline bool tcp_ca_wants_ce_events(const struct sock *sk)
+{
+	return tcp_ca_needs_ecn(sk) || tcp_bbr3_wants_ce_events(sk);
+}
 static void tcp_data_ecn_check(struct sock *sk, const struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -359,7 +365,7 @@ static void tcp_data_ecn_check(struct sock *sk, const struct sk_buff *skb)
 			tcp_enter_quickack_mode(sk, 2);
 		break;
 	case INET_ECN_CE:
-		if (tcp_ca_needs_ecn(sk))
+		if (tcp_ca_wants_ce_events(sk))
 			tcp_ca_event(sk, CA_EVENT_ECN_IS_CE);
 
 		if (!(tp->ecn_flags & TCP_ECN_DEMAND_CWR) &&
@@ -377,7 +383,7 @@ static void tcp_data_ecn_check(struct sock *sk, const struct sk_buff *skb)
 		tp->ecn_flags |= TCP_ECN_SEEN;
 		break;
 	default:
-		if (tcp_ca_needs_ecn(sk))
+		if (tcp_ca_wants_ce_events(sk))
 			tcp_ca_event(sk, CA_EVENT_ECN_NO_CE);
 		if (!tcp_ecn_mode_rfc3168(tp))
 			break;
@@ -1296,6 +1302,11 @@ static void tcp_verify_retransmit_hint(struct tcp_sock *tp, struct sk_buff *skb)
 static void tcp_notify_skb_loss_event(struct tcp_sock *tp, const struct sk_buff *skb)
 {
 	tp->lost += tcp_skb_pcount(skb);
+
+	/* Let a congestion control module that asks for it see the loss.
+	 * A function call, not a struct field: no ABI surface.
+	 */
+	tcp_bbr3_skb_marked_lost((struct sock *)tp, skb);
 }
 
 void tcp_mark_skb_lost(struct sock *sk, struct sk_buff *skb)
@@ -3946,6 +3957,7 @@ static void tcp_process_tlp_ack(struct sock *sk, u32 ack, int flag)
 		/* ACK advances: there was a loss, so reduce cwnd. Reset
 		 * tlp_high_seq in tcp_init_cwnd_reduction()
 		 */
+		tcp_bbr3_note_tlp_recovery(sk);
 		tcp_init_cwnd_reduction(sk);
 		tcp_set_ca_state(sk, TCP_CA_CWR);
 		tcp_end_cwnd_reduction(sk);
@@ -5947,7 +5959,8 @@ static void __tcp_ack_snd_check(struct sock *sk, int ofo_possible)
 	      * If application uses SO_RCVLOWAT, we want send ack now if
 	      * we have not received enough bytes to satisfy the condition.
 	      */
-	    (tp->rcv_nxt - tp->copied_seq < sk->sk_rcvlowat ||
+	    (tcp_bbr3_fast_ack_mode(sk) ||
+	     tp->rcv_nxt - tp->copied_seq < sk->sk_rcvlowat ||
 	     __tcp_select_window(sk) >= tp->rcv_wnd)) ||
 	    /* We ACK each frame or... */
 	    tcp_in_quickack_mode(sk) ||

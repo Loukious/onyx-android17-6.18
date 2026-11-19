@@ -95,6 +95,10 @@ def main():
                         help="Reuse Kleaf's supported incremental OUT_DIR cache")
     parser.add_argument("--qdss-diagnostic", action="store_true",
                         help="temporarily apply reviewed opt-in AMBA/QDSS logging")
+    parser.add_argument("--variant", choices=("balanced", "performance"), default="balanced")
+    parser.add_argument("--output-root", type=Path, help="Place Bazel outputs on a separate build drive")
+    parser.add_argument("--artifact-root", type=Path, help="Place verified build artifacts on a separate drive")
+    parser.add_argument("--bazel-batch", action="store_true", help="Use a fresh Bazel process with the compilation cache")
     args = parser.parse_args()
     if args.jobs < 1 or args.memory_mb < 1024:
         parser.error("jobs must be positive and memory-mb at least 1024")
@@ -106,8 +110,11 @@ def main():
             command.append("--verify-only")
         subprocess.run(command, check=True)
 
+    from features import stage as stage_features, applied as feature_fixes, package_addon
+    variant = stage_features(workspace, args.variant)
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    artifacts = workspace / "artifacts" / stamp
+    artifacts = (args.artifact_root.resolve() if args.artifact_root else workspace / "artifacts") / stamp
     artifacts.mkdir(parents=True)
     from verify_mi_thermal import verify as verify_mi_thermal
     thermal_validation = verify_mi_thermal(
@@ -185,30 +192,37 @@ def main():
         cache = args.cache_dir.resolve()
         cache.mkdir(parents=True, exist_ok=True)
         cache_flags = ["--config=local", f"--cache_dir={cache}"]
-    command = ["tools/bazel", "build", *cache_flags, "--keep_going", f"--jobs={args.jobs}",
+    bazel = ["tools/bazel"]
+    if args.bazel_batch:
+        bazel.append("--batch")
+    if args.output_root:
+        bazel.append("--output_root=" + str(args.output_root.resolve()))
+    command = [*bazel, "build", *cache_flags, "--keep_going", f"--jobs={args.jobs}",
                f"--local_resources=memory={args.memory_mb}",
-               "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx:kmi_symbol_lists",
-               "//common:kernel_aarch64", "//onyx:platform_modules"]
+               "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx_features:kmi_symbol_lists",
+               "//common:kernel_aarch64", "//onyx:platform_modules", "//onyx_features:susfs"]
     print(f"Building; log: {artifacts / 'build.log'}", flush=True)
     from qdss_diagnostic import applied
     from common_fixes import applied as common_fixes
     diagnostic = (applied(workspace / 'common', artifacts / 'common-diagnostic')
                   if args.qdss_diagnostic else nullcontext())
     with (artifacts / "build.log").open("w") as log:
-        with diagnostic, common_fixes(workspace / 'common', artifacts / 'common-fixes'):
+        with diagnostic, common_fixes(workspace / 'common', artifacts / 'common-fixes'), feature_fixes(workspace / 'common', artifacts / 'feature-fixes'):
             from verify_cti_assoc import verify as verify_cti_assoc
             cti_assoc_validation = verify_cti_assoc(workspace / "common")
             (artifacts / "cti-assoc-host-validation.json").write_text(
                 json.dumps(cti_assoc_validation, indent=2) + "\n")
             subprocess.run(command, cwd=workspace, stdout=log,
                            stderr=subprocess.STDOUT, check=True)
-    execution_root = Path(subprocess.check_output(
-        ["tools/bazel", "info", "execution_root"], cwd=workspace, text=True).strip())
-    query = subprocess.check_output([
-        "tools/bazel", "cquery", *cache_flags, "--output=files",
-        "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx:kmi_symbol_lists",
-        "//common:kernel_aarch64 + //onyx:platform_modules"
-    ], cwd=workspace, text=True)
+            # Resolve files while the same BUILD fragments are active. Restoring
+            # them first would make cquery select a different kernel transition.
+            execution_root = Path(subprocess.check_output(
+                [*bazel, "info", "execution_root"], cwd=workspace, text=True).strip())
+            query = subprocess.check_output([
+                *bazel, "cquery", *cache_flags, "--output=files",
+                "--//build/kernel/kleaf:user_kmi_symbol_lists=//onyx_features:kmi_symbol_lists",
+                "//common:kernel_aarch64 + //onyx:platform_modules + //onyx_features:susfs"
+            ], cwd=workspace, text=True)
     (artifacts / "bazel-outputs.txt").write_text(query)
     outputs = [execution_root / line for line in query.splitlines()]
     kernel_dir = next(p.parent for p in outputs if p.name == "Image")
@@ -233,7 +247,12 @@ def main():
     native_verification, native_abi_validation, native_import_admission = verify_native_modules(
         kernel_dir, symvers, release, modules)
 
+    addon = next(p for p in outputs if p.name == 'susfs_guard_lkm.ko')
+    addon_verification = package_addon(addon, kernel_dir, artifacts, workspace, args.variant)
+
     for path in outputs:
+        if 'onyx_features' in path.relative_to(execution_root).parts:
+            continue
         category = output_category(path, execution_root)
         target = artifacts / category / path.name
         if path.is_file():
@@ -272,6 +291,9 @@ def main():
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copytree(HERE / "patches", inputs / "patches")
     shutil.copytree(HERE / "common-patches", inputs / "common-patches")
+    shutil.copytree(HERE / "features", inputs / "features",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copyfile(HERE / "features.py", inputs / "features.py")
     shutil.copytree(HERE / "kernelsu", inputs / "kernelsu")
     shutil.copyfile(HERE / "tests/mi_thermal_harness.c", inputs / "mi_thermal_harness.c")
     shutil.copytree(HERE / "tests", inputs / "tests",
@@ -297,6 +319,8 @@ def main():
                 hashes[path.relative_to(artifacts).as_posix()] = hashlib.file_digest(
                     stream, "sha256").hexdigest()
     report = {
+        "variant": variant,
+        "platform_addon_verification": addon_verification,
         "command": command,
         "automation_revision": os.environ.get("KONOHA_CI_REVISION"),
         "qdss_diagnostic": args.qdss_diagnostic,
@@ -336,6 +360,8 @@ def main():
             "The default Kleaf build uses the maybe-dirty suffix without stamping; input revisions are recorded separately.",
         ],
     }
+    from features import verify_artifact as verify_features
+    report['feature_validation'] = verify_features(artifacts, report)
     (artifacts / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"Build and module CRC checks passed: {artifacts}")
 

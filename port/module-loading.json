@@ -91,6 +91,17 @@
         ]
       },
       "reason": "Load the Wonder auxiliary driver for the Onyx native Mosey service."
+    },
+    {
+      "name": "official-next-susfs-lkm",
+      "modules": [
+        "susfs_guard_lkm.ko"
+      ],
+      "ship": [
+        "vendor_dlkm"
+      ],
+      "load": {},
+      "reason": "Ship the matched SUSFS LKM for the KernelSU Next special loader; vanilla modules.load must not load it."
     }
   ]
 }
