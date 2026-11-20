@@ -6379,7 +6379,15 @@ ddk_module(
     out = "audpkt_ion_dlkm.ko",
     kconfig = "Kconfig",
     defconfig = "platform_defconfig",
-    deps = [":audio_ion_headers", ":scm_headers", ":iommu_headers", ":qcom_scm"],
+    deps = [
+        ":audio_ion_headers",
+        ":audio_spf_headers",
+        ":audio_gpr_headers",
+        ":scm_headers",
+        ":iommu_headers",
+        ":qcom_scm",
+        ":spf_core_dlkm",
+    ],
     copts = ["-include", "$(location :qcom/opensource/audio-kernel/config/sunautoconf.h)"],
     kernel_build = "//common:kernel_aarch64",
 )

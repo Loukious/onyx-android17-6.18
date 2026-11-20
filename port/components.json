@@ -9096,9 +9096,12 @@
         "defconfig": "platform_defconfig",
         "deps": [
           ":audio_ion_headers",
+          ":audio_spf_headers",
+          ":audio_gpr_headers",
           ":scm_headers",
           ":iommu_headers",
-          ":qcom_scm"
+          ":qcom_scm",
+          ":spf_core_dlkm"
         ],
         "copts": [
           "-include",

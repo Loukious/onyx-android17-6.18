@@ -37,6 +37,7 @@
 #define dev_dbg(...) ((void)0)
 #define dev_info(...) ((void)0)
 #define pr_err(...) ((void)0)
+#define pr_err_ratelimited(...) ((void)0)
 #define pr_debug(...) ((void)0)
 #define check_add_overflow(a,b,out) __builtin_add_overflow((a),(b),(out))
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
@@ -71,12 +72,12 @@ struct file {struct inode *f_inode;void *private_data;};
 struct file_operations {void *owner;int (*open)(struct inode *,struct file *);int (*release)(struct inode *,struct file *);long (*unlocked_ioctl)(struct file *,unsigned int,unsigned long);long (*compat_ioctl)(struct file *,unsigned int,unsigned long);};
 struct class {int unused;};
 struct device_node {bool smmu;unsigned refs;};
-struct device {atomic_uint refs;void (*release)(struct device *);struct device *parent;struct class *class;dev_t devt;struct device_node *of_node;void *data;void *managed[8];unsigned allocations;bool added;};
+struct device {atomic_uint refs;void (*release)(struct device *);struct device *parent;struct class *class;dev_t devt;struct device_node *of_node;void *data;void *managed[8];unsigned allocations;bool added;bool iommu_binding_attached;};
 struct cdev {const struct file_operations *fops;void *owner;struct device *parent;bool added;};
 struct platform_device {struct device dev;};
 static struct device *get_device(struct device *d){assert(atomic_fetch_add(&d->refs,1)>0);return d;}
 static void put_device(struct device *d){assert(d);unsigned old=atomic_fetch_sub(&d->refs,1);assert(old);if(old==1&&d->release)d->release(d);}
-static void device_initialize(struct device *d){atomic_init(&d->refs,1);}
+static void device_initialize(struct device *d){atomic_init(&d->refs,1);d->iommu_binding_attached=true;}
 static void platform_set_drvdata(struct platform_device *p,void *d){p->dev.data=d;}
 static void *platform_get_drvdata(struct platform_device *p){return p->dev.data;}
 static void dev_set_drvdata(struct device *d,void *p){d->data=p;}
@@ -135,7 +136,7 @@ static struct dma_buf *dma_buf_get(int fd){if(fd<0||fd>=8||!fd_table[fd])return 
 static void dma_buf_put(struct dma_buf *b){assert(b&&!IS_ERR(b)&&atomic_fetch_sub(&b->refs,1)>1);}
 static struct dma_buf_attachment *dma_buf_attach(struct dma_buf *b,struct device *d){assert(b&&d);attach_calls++;if(fail_attach)return ERR_PTR(-EIO);struct dma_buf_attachment *a=kzalloc(sizeof(*a),0);if(!a)return ERR_PTR(-ENOMEM);a->buffer=b;a->dev=d;attachments++;return a;}
 static struct sg_table *dma_buf_map_attachment_unlocked(struct dma_buf_attachment *a,int direction){assert(a&&direction==0&&!a->mapped);map_calls++;if(block_map){pthread_mutex_lock(&dma_gate);map_entered=true;pthread_cond_broadcast(&dma_changed);while(!map_release)pthread_cond_wait(&dma_changed,&dma_gate);pthread_mutex_unlock(&dma_gate);}if(fail_map)return ERR_PTR(-EIO);a->mapped=true;maps++;return &a->buffer->table;}
-static void dma_buf_unmap_attachment_unlocked(struct dma_buf_attachment *a,struct sg_table *t,int d){assert(a&&a->mapped&&t==&a->buffer->table&&!d);a->mapped=false;unmaps++;}
+static void dma_buf_unmap_attachment_unlocked(struct dma_buf_attachment *a,struct sg_table *t,int d){assert(a&&a->mapped&&t==&a->buffer->table&&!d);assert(a->dev->iommu_binding_attached);a->mapped=false;unmaps++;}
 static void dma_buf_detach(struct dma_buf *b,struct dma_buf_attachment *a){assert(a&&a->buffer==b&&!a->mapped&&attachments-->0);kfree(a);}
 struct iosys_map {void *vaddr;};
 static int dma_buf_begin_cpu_access(struct dma_buf *b,int d){assert(b&&!d);b->cpu++;return 0;}
@@ -154,6 +155,10 @@ static bool fail_assign,fail_unassign;
 static unsigned assignments,unassignments;
 static int qcom_scm_assign_mem(phys_addr_t p,size_t len,u64 *sources,const struct qcom_scm_vmperm *dest,int count){struct dma_buf *b=NULL;for(unsigned i=0;i<2;i++)if(buffers[i].sg[0].physical==p&&buffers[i].size==len)b=&buffers[i];assert(b);if(*sources==BIT_ULL(QCOM_SCM_VMID_HLOS)){assert(count==2&&dest[0].vmid==VMID_LPASS&&dest[1].vmid==VMID_ADSP_HEAP);if(fail_assign)return -EIO;assert(!b->secure);b->secure=true;assignments++;}else{assert(*sources==(BIT_ULL(VMID_LPASS)|BIT_ULL(VMID_ADSP_HEAP))&&count==1&&dest[0].vmid==QCOM_SCM_VMID_HLOS);if(fail_unassign)return -EIO;assert(b->secure);b->secure=false;unassignments++;}return 0;}
 /* UAPI */
+/* Fault-inject the outer SPF result; the combined fixture decodes real replies. */
+static int close_all_error;
+static unsigned close_all_calls;
+static int spf_core_apm_close_all_checked(void){close_all_calls++;return close_all_error;}
 struct of_device_id {const char *compatible;};
 struct platform_driver {struct {const char *name;void *owner;const struct of_device_id *of_match_table;bool suppress_bind_attrs;} driver;int (*probe)(struct platform_device *);void (*remove)(struct platform_device *);};
 static int platform_driver_register(struct platform_driver *p){(void)p;return 0;}
@@ -172,7 +177,7 @@ static int bind(struct platform_device *p){int ret=msm_audio_ion_probe(p);if(ret
 static void remove_provider(struct platform_device *p){msm_audio_ion_remove(p);managed_cleanup(&p->dev);}
 static void open_file(struct platform_device *p,unsigned f){struct msm_audio_ion_private *priv=platform_get_drvdata(p);inodes[f].i_cdev=&priv->cdev;files[f].f_inode=&inodes[f];assert(!msm_audio_ion_open(&inodes[f],&files[f]));}
 static long ioctl_fd(unsigned f,unsigned cmd,unsigned long fd){return msm_audio_ion_ioctl(&files[f],cmd,fd);}
-static void close_file(unsigned f){assert(!msm_audio_ion_release(&inodes[f],&files[f]));}
+static void close_file(unsigned f){assert(!msm_audio_ion_release(&inodes[f],&files[f]));msm_audio_ion_crash_handler();}
 static void clean(void){assert(!live&&!regions&&!classes&&!attachments&&maps==unmaps&&!module_pins&&iommu_node.refs==1&&main_platform.dev.refs==1&&cma_platform.dev.refs==1);for(unsigned i=0;i<2;i++)assert(buffers[i].refs==1&&!buffers[i].secure&&!buffers[i].cpu&&!buffers[i].vmap);}
 static unsigned basic(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));dma_addr_t addr;size_t len;assert(!msm_audio_get_phy_addr(0,&addr,&len)&&addr==0x100000&&len==8192);assert(!ioctl_fd(0,IOCTL_UNMAP_PHYS_ADDR,0));assert(msm_audio_get_phy_addr(0,&addr,&len)==-ENOENT);close_file(0);remove_provider(&cma_platform);clean();return 3;}
 static unsigned identity(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));fd_table[0]=&buffers[1];dma_addr_t addr;size_t len;assert(msm_audio_get_phy_addr(0,&addr,&len)==-ENOENT);assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));assert(!msm_audio_get_phy_addr(0,&addr,&len)&&addr==0x110000);fd_table[0]=&buffers[0];assert(!msm_audio_get_phy_addr(0,&addr,&len)&&addr==0x100000);close_file(0);remove_provider(&cma_platform);clean();return 4;}
@@ -182,15 +187,69 @@ static unsigned secure(void){init();assert(!bind(&cma_platform));open_file(&cma_
 static unsigned quarantine(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));assert(!ioctl_fd(0,IOCTL_MAP_HYP_ASSIGN,0));fail_unassign=true;close_file(0);assert(buffers[0].secure&&attachments==1&&module_pins==1);remove_provider(&cma_platform);assert(buffers[0].secure&&attachments==1&&cma_platform.dev.refs==2);msm_audio_ion_crash_handler();assert(buffers[0].secure&&attachments==1);fail_unassign=false;msm_audio_ion_crash_handler();clean();return 3;}
 static unsigned faults(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);for(int n=0;n<3;n++){fail_alloc=n;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-ENOMEM&&buffers[0].refs==1&&!attachments);}fail_alloc=-1;fail_attach=true;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-EIO);fail_attach=false;fail_map=true;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-EIO&&!attachments);fail_map=false;fail_module_get=true;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-ENODEV&&!attachments);fail_module_get=false;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,7)==-EBADF);assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,1ULL<<32)==-EINVAL);dma_addr_t a;size_t len;assert(msm_audio_get_phy_addr(0,NULL,&len)==-EINVAL&&msm_audio_get_phy_addr(0,&a,NULL)==-EINVAL);close_file(0);remove_provider(&cma_platform);clean();return 10;}
 static unsigned cleanup(void){init();assert_region=true;for(int n=1;n<=4;n++){fail_stage=n;assert(bind(&cma_platform)==-ENOMEM);assert(!live&&!regions&&!classes&&cma_platform.dev.refs==1);}fail_stage=0;bad_version=true;assert(bind(&main_platform)==-EINVAL);bad_version=false;bad_phandle=true;assert(bind(&main_platform)==-EPROBE_DEFER);bad_phandle=false;zero_args=true;assert(bind(&main_platform)==-EINVAL);zero_args=false;clean();return 7;}
-static unsigned crash_secure(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));assert(!ioctl_fd(0,IOCTL_MAP_HYP_ASSIGN,0));fail_unassign=true;msm_audio_ion_crash_handler();assert(buffers[0].secure&&attachments==1&&buffers[0].refs==2);fail_unassign=false;msm_audio_ion_crash_handler();assert(!buffers[0].secure&&!attachments);close_file(0);remove_provider(&cma_platform);clean();return 2;}
+static unsigned crash_secure(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));assert(!ioctl_fd(0,IOCTL_MAP_HYP_ASSIGN,0));fail_unassign=true;msm_audio_ion_crash_handler();assert(buffers[0].secure&&attachments==1&&buffers[0].refs==2);fail_unassign=false;msm_audio_ion_crash_handler();assert(buffers[0].secure&&attachments==1&&buffers[0].refs==2);close_file(0);assert(!buffers[0].secure&&!attachments);remove_provider(&cma_platform);clean();return 3;}
 static unsigned shared_secure(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);open_file(&cma_platform,1);assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));assert(!ioctl_fd(1,IOCTL_MAP_PHYS_ADDR,0));assert(!ioctl_fd(0,IOCTL_MAP_HYP_ASSIGN,0));assert(!ioctl_fd(0,IOCTL_UNMAP_PHYS_ADDR,0)&&buffers[0].secure&&attachments==1);assert(!ioctl_fd(1,IOCTL_UNMAP_HYP_ASSIGN,0)&&!buffers[0].secure);assert(!ioctl_fd(1,IOCTL_UNMAP_HYP_ASSIGN,0)&&unassignments==1);assert(!ioctl_fd(1,IOCTL_UNMAP_PHYS_ADDR,0));close_file(0);close_file(1);remove_provider(&cma_platform);clean();return 4;}
 static unsigned providers(void){init();assert(!bind(&main_platform));assert(!bind(&cma_platform));open_file(&main_platform,0);open_file(&cma_platform,1);assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));assert(ioctl_fd(1,IOCTL_MAP_PHYS_ADDR,0)==-EBUSY);assert(!ioctl_fd(1,IOCTL_MAP_PHYS_ADDR,1));remove_provider(&main_platform);dma_addr_t address;size_t len;assert(msm_audio_get_phy_addr(0,&address,&len)==-ENOENT);assert(!msm_audio_get_phy_addr(1,&address,&len)&&address==0x110000);close_file(0);close_file(1);remove_provider(&cma_platform);clean();return 3;}
 static unsigned boundaries(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);buffers[0].size=0;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-EINVAL);buffers[0].size=8192;buffers[0].table.nents=0;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-EINVAL);buffers[0].table.nents=1;buffers[0].sg[0].dma_address=UINT64_MAX-4095;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-EOVERFLOW);buffers[0].sg[0].dma_address=0x100000;buffers[0].sg[0].physical=UINT64_MAX-4095;assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-EOVERFLOW);buffers[0].sg[0].physical=0x100001;assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));assert(ioctl_fd(0,IOCTL_MAP_HYP_ASSIGN,0)==-EINVAL&&!assignments);close_file(0);remove_provider(&cma_platform);clean();return 5;}
-static unsigned publication(void){init();fail_stage=5;assert(bind(&cma_platform)==-ENOMEM&&buffers[0].secure&&attachments==1&&!regions&&!classes);assert(publish_fops->unlocked_ioctl(&publish_file,IOCTL_MAP_PHYS_ADDR,0)==-ENODEV);fail_unassign=false;assert(!publish_fops->release(&publish_inode,&publish_file));clean();return 2;}
+static unsigned publication(void){init();fail_stage=5;assert(bind(&cma_platform)==-ENOMEM&&buffers[0].secure&&attachments==1&&!regions&&!classes);assert(publish_fops->unlocked_ioctl(&publish_file,IOCTL_MAP_PHYS_ADDR,0)==-ENODEV);fail_unassign=false;assert(!publish_fops->release(&publish_inode,&publish_file));assert(attachments==1);msm_audio_ion_crash_handler();clean();return 3;}
 static unsigned open_remove(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);remove_provider(&cma_platform);assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-ENODEV);close_file(0);clean();return 1;}
 static long map_result;
 static atomic_bool removal_done;
 static void *map_thread(void *unused){(void)unused;map_result=ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0);return NULL;}
 static void *remove_thread(void *unused){(void)unused;remove_provider(&cma_platform);atomic_store(&removal_done,true);return NULL;}
-static unsigned removal(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);block_map=true;pthread_t mapper,remover;assert(!pthread_create(&mapper,NULL,map_thread,NULL));pthread_mutex_lock(&dma_gate);while(!map_entered)pthread_cond_wait(&dma_changed,&dma_gate);pthread_mutex_unlock(&dma_gate);assert(!pthread_create(&remover,NULL,remove_thread,NULL));struct timespec pause={.tv_nsec=20000000};nanosleep(&pause,NULL);assert(!atomic_load(&removal_done));pthread_mutex_lock(&dma_gate);map_release=true;pthread_cond_broadcast(&dma_changed);pthread_mutex_unlock(&dma_gate);assert(!pthread_join(mapper,NULL)&&!pthread_join(remover,NULL));assert(!map_result&&!attachments&&ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-ENODEV);close_file(0);clean();return 1;}
-int main(int argc,char **argv){assert(argc==2);unsigned n=0;if(!strcmp(argv[1],"basic"))n=basic();else if(!strcmp(argv[1],"identity"))n=identity();else if(!strcmp(argv[1],"sharing"))n=sharing();else if(!strcmp(argv[1],"ranges"))n=ranges();else if(!strcmp(argv[1],"secure"))n=secure();else if(!strcmp(argv[1],"quarantine"))n=quarantine();else if(!strcmp(argv[1],"faults"))n=faults();else if(!strcmp(argv[1],"cleanup"))n=cleanup();else if(!strcmp(argv[1],"crash_secure"))n=crash_secure();else if(!strcmp(argv[1],"shared_secure"))n=shared_secure();else if(!strcmp(argv[1],"providers"))n=providers();else if(!strcmp(argv[1],"boundaries"))n=boundaries();else if(!strcmp(argv[1],"publication"))n=publication();else if(!strcmp(argv[1],"open_remove"))n=open_remove();else if(!strcmp(argv[1],"removal"))n=removal();else abort();printf("{\"ion_%s_cases\":%u}\n",argv[1],n);}
+static unsigned removal(void){init();assert(!bind(&cma_platform));open_file(&cma_platform,0);block_map=true;pthread_t mapper,remover;assert(!pthread_create(&mapper,NULL,map_thread,NULL));pthread_mutex_lock(&dma_gate);while(!map_entered)pthread_cond_wait(&dma_changed,&dma_gate);pthread_mutex_unlock(&dma_gate);assert(!pthread_create(&remover,NULL,remove_thread,NULL));struct timespec pause={.tv_nsec=20000000};nanosleep(&pause,NULL);assert(!atomic_load(&removal_done));pthread_mutex_lock(&dma_gate);map_release=true;pthread_cond_broadcast(&dma_changed);pthread_mutex_unlock(&dma_gate);assert(!pthread_join(mapper,NULL)&&!pthread_join(remover,NULL));assert(!map_result&&!attachments&&ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-ENODEV);close_file(0);assert(!attachments);clean();return 2;}
+
+/* Driver unbind and IOMMU device removal are separate lifetime events. */
+static void detach_iommu(struct platform_device *p)
+{
+	assert(p->dev.iommu_binding_attached);
+	p->dev.iommu_binding_attached=false;
+}
+
+static unsigned retiring_provider(void)
+{
+	init();assert(!bind(&main_platform)&&!bind(&cma_platform));
+	open_file(&main_platform,0);open_file(&cma_platform,1);
+	assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));
+	assert(!ioctl_fd(1,IOCTL_MAP_PHYS_ADDR,1));
+	assert(attachments==2&&module_pins==2);
+	unsigned before=close_all_calls;
+	remove_provider(&main_platform);
+	assert(close_all_calls==before+1);
+	assert(!msm_audio_find_buffer(&buffers[0])&&buffers[0].refs==1);
+	assert(attachments==1&&module_pins==1&&unmaps==1);
+	/* The successful retiring-provider cleanup precedes physical deletion. */
+	detach_iommu(&main_platform);
+	assert(ioctl_fd(0,IOCTL_UNMAP_PHYS_ADDR,0)==-ENOENT);
+	close_file(0);
+	dma_addr_t address;size_t length;
+	assert(!msm_audio_get_phy_addr(1,&address,&length)&&address==0x110000);
+	assert(msm_audio_find_buffer(&buffers[1])&&attachments==1&&buffers[1].refs==2);
+	remove_provider(&cma_platform);
+	assert(!attachments&&unmaps==2&&buffers[1].refs==1);
+	detach_iommu(&cma_platform);
+	assert(ioctl_fd(1,IOCTL_UNMAP_PHYS_ADDR,1)==-ENOENT);
+	close_file(1);clean();return 10;
+}
+
+static unsigned failed_retirement(int error)
+{
+	init();assert(!bind(&main_platform));open_file(&main_platform,0);
+	assert(!ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0));
+	close_all_error=error;
+	remove_provider(&main_platform);
+	assert(close_all_calls==1&&attachments==1&&module_pins==1&&buffers[0].refs==2);
+	/* Failed quiescence cannot justify deleting the IOMMU binding. */
+	assert(main_platform.dev.iommu_binding_attached&&main_platform.dev.refs==2);
+	assert(ioctl_fd(0,IOCTL_MAP_PHYS_ADDR,0)==-ENODEV);
+	assert(!msm_audio_ion_release(&inodes[0],&files[0]));
+	assert(msm_audio_find_buffer(&buffers[0])&&list_empty(&msm_audio_find_buffer(&buffers[0])->files));
+	msm_audio_ion_crash_handler();
+	assert(attachments==1&&!unmaps&&main_platform.dev.iommu_binding_attached);
+	close_all_error=0;
+	msm_audio_ion_crash_handler();
+	assert(!attachments&&!msm_audio_find_buffer(&buffers[0])&&unmaps==1);
+	detach_iommu(&main_platform);clean();return 7;
+}
+
+int main(int argc,char **argv){assert(argc==2);unsigned n=0;if(!strcmp(argv[1],"basic"))n=basic();else if(!strcmp(argv[1],"identity"))n=identity();else if(!strcmp(argv[1],"sharing"))n=sharing();else if(!strcmp(argv[1],"ranges"))n=ranges();else if(!strcmp(argv[1],"secure"))n=secure();else if(!strcmp(argv[1],"quarantine"))n=quarantine();else if(!strcmp(argv[1],"faults"))n=faults();else if(!strcmp(argv[1],"cleanup"))n=cleanup();else if(!strcmp(argv[1],"crash_secure"))n=crash_secure();else if(!strcmp(argv[1],"shared_secure"))n=shared_secure();else if(!strcmp(argv[1],"providers"))n=providers();else if(!strcmp(argv[1],"boundaries"))n=boundaries();else if(!strcmp(argv[1],"publication"))n=publication();else if(!strcmp(argv[1],"open_remove"))n=open_remove();else if(!strcmp(argv[1],"removal"))n=removal();else if(!strcmp(argv[1],"retiring_provider"))n=retiring_provider();else if(!strcmp(argv[1],"retirement_timeout"))n=failed_retirement(-ETIMEDOUT);else if(!strcmp(argv[1],"retirement_missing"))n=failed_retirement(-ENODEV);else abort();printf("{\"ion_%s_cases\":%u}\n",argv[1],n);}

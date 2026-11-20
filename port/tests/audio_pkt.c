@@ -188,7 +188,10 @@ static pthread_cond_t close_changed=PTHREAD_COND_INITIALIZER;
 static bool block_close,close_entered,close_release;
 static atomic_uint close_inflight;
 static void spf_core_apm_close_all(void){assert(!atomic_fetch_add(&close_inflight,1));if(block_close){pthread_mutex_lock(&close_gate);close_entered=true;pthread_cond_broadcast(&close_changed);while(!close_release)pthread_cond_wait(&close_changed,&close_gate);pthread_mutex_unlock(&close_gate);}close_alls++;assert(atomic_fetch_sub(&close_inflight,1)==1);}
-static void msm_audio_ion_crash_handler(void){ion_crashes++;}
+static void msm_audio_ion_crash_handler(void){spf_core_apm_close_all();ion_crashes++;}
+static DEFINE_MUTEX(model_remote_lock);
+static void msm_audio_ion_remote_lock(void){mutex_lock(&model_remote_lock);}
+static void msm_audio_ion_remote_unlock(void){mutex_unlock(&model_remote_lock);}
 static int msm_audio_get_phy_addr(int fd,dma_addr_t *address,size_t *length){assert(address&&length);if(fd<0||fd>=8||!lengths[fd])return -EBADF;if(fd==translate_error_fd)return -EIO;assert(translations<8);translated_fds[translations++]=fd;*address=addresses[fd];*length=lengths[fd];return 0;}
 /* SOURCE */
 _Static_assert(sizeof(struct gpr_hdr)==24,"native GPR header");

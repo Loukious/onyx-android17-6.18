@@ -175,7 +175,6 @@ static int audio_pkt_release(struct inode *inode, struct file *file)
 	priv->opens--;
 	if (!priv->opens && priv->ever_bound && !READ_ONCE(priv->stopping)) {
 		skb_queue_purge(&priv->queue);
-		spf_core_apm_close_all();
 		msm_audio_ion_crash_handler();
 	}
 	mutex_unlock(&priv->lock);
@@ -242,21 +241,24 @@ static ssize_t audio_pkt_write(struct file *file, const char __user *buf,
 	ret = audio_pkt_validate_header(hdr, count, &header);
 	if (ret)
 		goto free;
-	if (hdr->opcode == APM_CMD_SHARED_MEM_MAP_REGIONS) {
-		ret = audio_pkt_update_regions(hdr, count, header);
-		if (ret)
-			goto free;
-	}
 	ret = mutex_lock_interruptible(&priv->lock);
 	if (ret)
 		goto free;
+	msm_audio_ion_remote_lock();
 	if (READ_ONCE(priv->stopping) || !READ_ONCE(priv->bound) || !priv->adev) {
 		ret = -ENETRESET;
 	} else {
+		if (hdr->opcode == APM_CMD_SHARED_MEM_MAP_REGIONS) {
+			ret = audio_pkt_update_regions(hdr, count, header);
+			if (ret)
+				goto unlock;
+		}
 		ret = gpr_send_pkt(priv->adev, (struct gpr_pkt *)hdr);
 		if (ret == -ECONNRESET)
 			ret = -ENETRESET;
 	}
+unlock:
+	msm_audio_ion_remote_unlock();
 	mutex_unlock(&priv->lock);
 free:
 	kfree(hdr);
@@ -521,7 +523,6 @@ static void audio_pkt_platform_driver_remove(struct platform_device *pdev)
 	skb_queue_purge(&priv->backups);
 	mutex_lock(&priv->lock);
 	if (priv->ever_bound) {
-		spf_core_apm_close_all();
 		msm_audio_ion_crash_handler();
 	}
 	mutex_unlock(&priv->lock);

@@ -151,6 +151,7 @@ def main():
         json.dumps(memlat_validation, indent=2) + "\n")
     from importlib import import_module
     provider_verifiers = {
+        "audio_dma_lifetime": "verify_audio_dma_lifetime",
         "boot_diagnostics": "verify_boot_diagnostics",
         "business_misc": "verify_business_misc",
         "ibat_ocp": "verify_ibat_ocp",

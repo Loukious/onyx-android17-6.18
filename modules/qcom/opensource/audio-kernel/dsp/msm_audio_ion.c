@@ -23,6 +23,7 @@
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <soc/qcom/secure_buffer.h>
 #include <dsp/msm_audio_ion.h>
+#include <dsp/spf-core.h>
 
 MODULE_IMPORT_NS("DMA_BUF");
 
@@ -58,6 +59,24 @@ struct msm_audio_alloc_data {
 /* Protect the registry, DMA/SCM transitions, file owners and provider removal. */
 static DEFINE_MUTEX(msm_audio_ion_lock);
 static LIST_HEAD(msm_audio_allocations);
+
+/* Packet translation/send and CLOSE_ALL + reclamation form one transaction.
+ * Lock ordering is packet lock -> remote lock -> ion registry lock. The
+ * registry lock is never held while waiting for a remote response.
+ */
+static DEFINE_MUTEX(msm_audio_remote_lock);
+
+void msm_audio_ion_remote_lock(void)
+{
+	mutex_lock(&msm_audio_remote_lock);
+}
+EXPORT_SYMBOL_GPL(msm_audio_ion_remote_lock);
+
+void msm_audio_ion_remote_unlock(void)
+{
+	mutex_unlock(&msm_audio_remote_lock);
+}
+EXPORT_SYMBOL_GPL(msm_audio_ion_remote_unlock);
 
 static struct msm_audio_alloc_data *msm_audio_find_buffer(struct dma_buf *buffer)
 {
@@ -359,18 +378,37 @@ int msm_audio_get_phy_addr(int fd, dma_addr_t *paddr, size_t *pa_len)
 }
 EXPORT_SYMBOL(msm_audio_get_phy_addr);
 
-void msm_audio_ion_crash_handler(void)
+static void msm_audio_ion_reclaim(struct msm_audio_ion_private *retiring)
 {
 	struct msm_audio_alloc_data *data, *next;
 	int ret;
 
+	msm_audio_ion_remote_lock();
+	ret = spf_core_apm_close_all_checked();
+	if (ret) {
+		pr_err_ratelimited("audio-ion: retaining DMA mappings: CLOSE_ALL failed: %d\n", ret);
+		goto unlock_remote;
+	}
 	mutex_lock(&msm_audio_ion_lock);
 	list_for_each_entry_safe(data, next, &msm_audio_allocations, node) {
+		/* CLOSE_ALL ends remote use, not another live file's ownership.
+		 * A stopping provider must release its own DMA mappings before the
+		 * device core deletes that provider's IOMMU attachment.
+		 */
+		if (!list_empty(&data->files) && data->priv != retiring)
+			continue;
 		ret = msm_audio_destroy_mapping(data);
 		if (ret)
 			dev_err(&data->priv->chardev, "secure buffer retained: %d\n", ret);
 	}
 	mutex_unlock(&msm_audio_ion_lock);
+unlock_remote:
+	msm_audio_ion_remote_unlock();
+}
+
+void msm_audio_ion_crash_handler(void)
+{
+	msm_audio_ion_reclaim(NULL);
 }
 EXPORT_SYMBOL(msm_audio_ion_crash_handler);
 
@@ -396,19 +434,16 @@ static int msm_audio_ion_release(struct inode *inode, struct file *file)
 	struct msm_audio_ion_private *priv = file->private_data;
 	struct msm_audio_alloc_data *data, *next;
 	struct msm_audio_map_ref *ref;
-	int ret;
 
 	mutex_lock(&msm_audio_ion_lock);
 	list_for_each_entry_safe(data, next, &msm_audio_allocations, node) {
 		ref = msm_audio_find_file(data, file);
 		if (!ref)
 			continue;
-		if (list_is_singular(&data->files)) {
-			ret = msm_audio_destroy_mapping(data);
-			if (!ret)
-				continue;
-			dev_err(&priv->chardev, "secure buffer retained on close: %d\n", ret);
-		}
+		/* File exit does not prove the DSP has stopped using this mapping.
+		 * Keep orphan mappings in the registry, with their DMA/device/module
+		 * references, until a checked CLOSE_ALL permits reclamation.
+		 */
 		list_del(&ref->node);
 		kfree(ref);
 	}
@@ -527,14 +562,10 @@ static int msm_audio_ion_probe(struct platform_device *pdev)
 	priv->cdev.owner = THIS_MODULE;
 	ret = cdev_device_add(&priv->cdev, &priv->chardev);
 	if (ret) {
-		struct msm_audio_alloc_data *data, *next;
-
 		mutex_lock(&msm_audio_ion_lock);
 		priv->stopping = true;
-		list_for_each_entry_safe(data, next, &msm_audio_allocations, node)
-			if (data->priv == priv)
-				msm_audio_destroy_mapping(data);
 		mutex_unlock(&msm_audio_ion_lock);
+		msm_audio_ion_reclaim(priv);
 		goto destroy_class;
 	}
 	platform_set_drvdata(pdev, priv);
@@ -551,20 +582,13 @@ put_device:
 static void msm_audio_ion_remove(struct platform_device *pdev)
 {
 	struct msm_audio_ion_private *priv = platform_get_drvdata(pdev);
-	struct msm_audio_alloc_data *data, *next;
-	int ret;
 
 	mutex_lock(&msm_audio_ion_lock);
 	priv->stopping = true;
-	list_for_each_entry_safe(data, next, &msm_audio_allocations, node) {
-		if (data->priv != priv)
-			continue;
-		ret = msm_audio_destroy_mapping(data);
-		if (ret)
-			dev_err(&priv->chardev, "secure buffer retained on remove: %d\n", ret);
-	}
 	platform_set_drvdata(pdev, NULL);
 	mutex_unlock(&msm_audio_ion_lock);
+	/* Driver withdrawal alone is not evidence that remote DMA stopped. */
+	msm_audio_ion_reclaim(priv);
 	cdev_device_del(&priv->cdev, &priv->chardev);
 	class_destroy(priv->class);
 	unregister_chrdev_region(priv->devt, 1);

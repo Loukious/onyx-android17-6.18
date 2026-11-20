@@ -241,13 +241,13 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(spf_core_is_apm_ready);
 
-void spf_core_apm_close_all(void)
+int spf_core_apm_close_all_checked(void)
 {
 	struct spf_core_private *priv = spf_private_get();
-	int ret;
+	int ret = -ENODEV;
 
 	if (!priv)
-		return;
+		return ret;
 	mutex_lock(&priv->lock);
 	if (priv->spf_core_drv && !READ_ONCE(priv->stopping)) {
 		ret = spf_run_command(priv->spf_core_drv, APM_CMD_CLOSE_ALL,
@@ -257,6 +257,14 @@ void spf_core_apm_close_all(void)
 	}
 	mutex_unlock(&priv->lock);
 	spf_private_put(priv);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(spf_core_apm_close_all_checked);
+
+/* Keep the legacy exported ABI; teardown callers need the checked variant. */
+void spf_core_apm_close_all(void)
+{
+	spf_core_apm_close_all_checked();
 }
 EXPORT_SYMBOL_GPL(spf_core_apm_close_all);
 

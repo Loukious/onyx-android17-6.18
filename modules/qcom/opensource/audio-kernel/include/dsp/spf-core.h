@@ -17,5 +17,6 @@
 
 bool spf_core_is_apm_ready(int timeout_ms);
 void spf_core_apm_close_all(void);
+int spf_core_apm_close_all_checked(void);
 
 #endif

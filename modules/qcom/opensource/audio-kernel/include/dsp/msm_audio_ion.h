@@ -28,4 +28,7 @@ struct audio_buffer {
 };
 int msm_audio_get_phy_addr(int fd, dma_addr_t *paddr, size_t *pa_len);
 void msm_audio_ion_crash_handler(void);
+/* Hold across packet address translation and submission to the remote DSP. */
+void msm_audio_ion_remote_lock(void);
+void msm_audio_ion_remote_unlock(void);
 #endif /* _LINUX_MSM_AUDIO_ION_H */
