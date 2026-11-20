@@ -31,7 +31,7 @@ def bundle_files(identity):
         for row in variant_assets.rows(identity):
             extra, complete = row.get('installers', []), row.get('full_recovery', [])
             if extra and (len(extra) != len(set(extra)) or set(extra) !=
-                    set(installer_assets.names(row['kernel_release'], 3, row['id'])) |
+                    set(installer_assets.expected_names(row)) |
                     {variant_assets.installer_metadata_name(row['id'])}):
                 raise ValueError('Invalid variant installer asset inventory')
             if complete and (len(complete) != len(set(complete)) or set(complete) !=

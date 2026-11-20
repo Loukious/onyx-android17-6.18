@@ -41,6 +41,15 @@ def names(release, asset_format=1, variant=None):
             'Onyx-NetHunter-External-WiFi-KSU-Module.zip')
 
 
+def expected_names(identity):
+    """Names actually produced for the selected SUSFS implementation."""
+    version = asset_format(identity)
+    filenames = names(identity['kernel_release'], version, identity.get('id'))
+    if version == 3 and variant_assets.susfs_builtin(identity):
+        return filenames[:3]
+    return filenames
+
+
 def module_name(filename):
     return Path(filename).name.removesuffix('.ko').replace('-', '_')
 

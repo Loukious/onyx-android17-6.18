@@ -211,6 +211,32 @@ class VariantReleaseTests(unittest.TestCase):
             self.assertIn('SUSFS is built into both kernels', notes)
             self.assertNotIn('SUSFS-KSU-Module.zip', notes)
 
+    def test_builtin_installer_inventory_accepts_three_archives_and_rejects_incomplete_or_stale_sets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, _, _, identity = self.export(Path(temporary))
+            for row in identity['variants']:
+                row['features'] = ['ntsync', 'susfs-next-builtin']
+                names = installer_assets.names(row['kernel_release'], 3, row['id'])
+                row['installers'] = list(names[:3]) + [variant_assets.installer_metadata_name(row['id'])]
+                row['sha256'].update({name: installer_assets.sha(name.encode()) for name in row['installers']})
+                row['downloads'] = variant_assets.download_map(row)
+            identity['sha256'] = {name: value for row in identity['variants']
+                                  for name, value in row['sha256'].items()}
+            files = publish_release.bundle_files(identity)
+            self.assertTrue(all(set(row['installers']) <= files for row in identity['variants']))
+            self.assertFalse(any('SUSFS-KSU-Module' in name for name in files))
+            for change in ('missing_wifi', 'stale_susfs', 'duplicate'):
+                malformed = copy.deepcopy(identity)
+                row = malformed['variants'][0]
+                if change == 'missing_wifi':
+                    row['installers'].remove(installer_assets.names(row['kernel_release'], 3, row['id'])[2])
+                elif change == 'stale_susfs':
+                    row['installers'].append(installer_assets.names(row['kernel_release'], 3, row['id'])[3])
+                else:
+                    row['installers'].append(row['installers'][0])
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'installer asset inventory'):
+                    publish_release.bundle_files(malformed)
+
     def test_builtin_susfs_rejects_stale_addon_and_missing_provenance(self):
         for stale in (True, False):
             with self.subTest(stale=stale), tempfile.TemporaryDirectory() as temporary:
