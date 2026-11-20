@@ -77,6 +77,9 @@
 #include <linux/ptrace.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/sysctl.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+#include <linux/susfs_def.h>
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 
 #include <trace/events/kmem.h>
 #include <trace/hooks/mm.h>
@@ -6953,11 +6956,25 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
 		struct folio *folio;
 		struct vm_area_struct *vma = NULL;
 		struct page *page = get_user_page_vma_remote(mm, addr,
-							     gup_flags, &vma);
+						     gup_flags, &vma);
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		/* GUP supplies the VMA and a page reference before this check. */
+		if (!IS_ERR(page) && vma && vma->vm_file &&
+		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
+			put_page(page);
+			break;
+		}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 
 		if (IS_ERR(page)) {
 			/* We might need to expand the stack to access it */
 			vma = vma_lookup(mm, addr);
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+			/* A failed GUP can still resolve a VMA for VM_IO access. */
+			if (vma && vma->vm_file &&
+			    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+				break;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 			if (!vma) {
 				vma = expand_stack(mm, addr);
 
