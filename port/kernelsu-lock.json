@@ -1,10 +1,10 @@
 {
   "repository": "https://github.com/pershoot/KernelSU-Next.git",
   "branch": "dev-susfs",
-  "revision": "39b15dead6fa806cb3582f866b081fa1d9e1c9e4",
-  "upstream_revision": "aa235b99574b5b349cdb4980bcb98fd58e6abb28",
+  "revision": "9940bcc8414555c2f9a282aa100c916104619d8e",
   "tag": "v3.4.2",
-  "git_commit_count": 3554,
-  "version": 33554,
-  "sha256": "ce75f0f5a2d3b45c259a39793a5e0256c144677dfca4daa1688208b465d585a4"
+  "git_commit_count": 3555,
+  "version": 33555,
+  "sha256": "ae3da204fbc4bb75c2f7875fceca94f69d9196f0a972acddf04bc5e62df10405",
+  "upstream_revision": "32e25d58fc1a187e1abe7278904c31571235fc83"
 }
