@@ -4,8 +4,8 @@
   "upstream": "https://lists.openwall.net/linux-kernel/2026/07/10/62",
   "files": {
     "BUILD.bazel": {
-      "before_sha256": "9b2d8cccd46ea86869edd394496f4d531ac77b1517ed4cf5ca2e3f9197d6d38e",
-      "candidate_sha256": "bab388c8665fffd378c1f3cc47bab2f82f39e1355eccc30499fc9e50cf26215f"
+      "before_sha256": "be41c41bac5e0884189a0f67f644b76c7178542d1010f317348baae1720eb271",
+      "candidate_sha256": "254ef8f74222995580454db16d65cf85f51f97afa8f3603e865ceb3365095035"
     },
     "arch/arm64/configs/gki_defconfig": {
       "before_sha256": "c92079fa0c102899644de89c8b7e80158cbfcfc000ddad3f881347ad810b997c",
