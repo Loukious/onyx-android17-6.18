@@ -80,7 +80,7 @@ wrong module sets, duplicates, missing hashes, changed binaries, wrong vermagic,
 missing import verification, mismatched pins/ABI/run identities, unsafe archive
 paths, failed device-tree verification and diagnostic builds. GitHub API/command
 fixtures verify draft creation, exact commit targets, successful full uploads,
-publication only after inventory/hash checks, existing-release preservation,
+publication only after inventory/hash checks, identical-release preservation,
 failed-build/stale-source rejection and incomplete/failed-upload recovery.
 An already-promoted candidate can recover publication without another source push.
 Regression cases additionally cover a head advance during upload, publication
@@ -146,7 +146,11 @@ The publisher keeps normal published-tag lookup and falls back to paginated
 authenticated inventory for drafts. Exact tag, target and source/GKI/KernelSU Next
 identities are checked before upload; the same immutable draft ID is checked
 again after upload, followed by complete inventory, size, digest and accepted
-source-head checks. Existing complete published releases remain untouched.
+source-head checks. Byte-identical complete published releases remain untouched.
+Rebuilds with the same verified source/GKI/KernelSU inputs reuse that tag and
+release ID. Replacement assets are staged as a draft, obsolete filenames are
+removed, and the exact new inventory, sizes and digests are verified before
+publication. Interrupted replacements resume through the same draft checks.
 
 `recover-release.yml` runs current CI code against an original successful build
 attempt without compiling again. Its selector requires an owned CI build run,

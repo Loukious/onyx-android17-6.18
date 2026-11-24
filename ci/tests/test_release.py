@@ -254,7 +254,7 @@ class ReleaseTests(unittest.TestCase):
                  advance_during_upload=False, hidden_draft=False, draft_exists=False, later_page=False,
                  wrong_draft=False, drift_after_upload=False, wrong_digest=False, api_calls=None,
                  hidden_listing=False, bad_created_id=False, partial_upload=False, duplicate_uploaded=False,
-                 published_during_upload=False):
+                 published_during_upload=False, published_mismatch=False, obsolete_asset=False, renamed_assets=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source, workspace, artifact, report = fixture(root)
@@ -264,13 +264,22 @@ class ReleaseTests(unittest.TestCase):
             assets = {p.name: {'id': 100 + i, 'name': p.name, 'size': p.stat().st_size, 'state': 'uploaded',
                               'digest': 'sha256:' + verify_artifacts.digest(p)} for i, p in enumerate(paths)}
             stored = {name: dict(asset) for name, asset in assets.items()} if existing else {}
+            if published_mismatch:
+                stored[next(iter(stored))]['digest'] = 'sha256:' + '0' * 64
+            if obsolete_asset:
+                stored['old-installer.zip'] = {'id': 999, 'name': 'old-installer.zip',
+                                                'size': 123, 'state': 'uploaded', 'digest': None}
+            if renamed_assets:
+                stored = {('previous-' + name if name not in ('release.json', 'SHA256SUMS') else name):
+                          {**asset, 'name': 'previous-' + name if name not in ('release.json', 'SHA256SUMS') else name}
+                          for name, asset in stored.items()}
             if partial_upload:
                 first, second = list(assets)[:2]
                 stored[first] = dict(assets[first])
                 stored[second] = {**assets[second], 'state': 'starter', 'size': 0, 'digest': None}
             commands = []
             head_reads = 0
-            created, uploaded, published = draft_exists, False, existing
+            created, uploaded, published = draft_exists or existing, False, existing
             tag = f'gki-6.18.38-s{SOURCE[:12]}-k{KSU[:12]}'
             release_path = 'repos/owner/repo/releases/77'
 
@@ -322,6 +331,12 @@ class ReleaseTests(unittest.TestCase):
                     del stored[matches[0]]
                     return None
                 if method == 'PATCH' and path == release_path:
+                    if data.get('draft') is True:
+                        self.assertTrue(published)
+                        self.assertFalse(uploaded)
+                        self.assertEqual(data, {'draft': True})
+                        published = False
+                        return release()
                     self.assertFalse(published)
                     self.assertEqual(stored, assets)
                     self.assertIs(data['draft'], False)
@@ -435,6 +450,38 @@ class ReleaseTests(unittest.TestCase):
         result, commands = self.exercise(existing=True)
         self.assertEqual(result['status'], 'verified inputs already released')
         self.assertIs(result['release_ready'], True)
+        self.assertEqual(commands, [])
+
+    def test_rebuilt_release_replaces_changed_bytes_and_old_download_names(self):
+        result, commands = self.exercise(existing=True, published_mismatch=True, obsolete_asset=True)
+        self.assertEqual(result['status'], 'verified build released')
+        self.assertEqual(commands[0], {'method': 'PATCH', 'path': 'repos/owner/repo/releases/77',
+                                      'data': {'draft': True}, 'filename': None})
+        self.assertFalse(any(c['path'] == 'repos/owner/repo/releases' for c in commands))
+        self.assertIn('repos/owner/repo/releases/assets/999', [c['path'] for c in commands if c['method'] == 'DELETE'])
+        self.assertEqual(len([c for c in commands if c['filename']]), 1)
+        self.assertEqual(commands[-1]['data']['draft'], False)
+
+    def test_replacement_upload_failure_leaves_a_resumable_draft(self):
+        result, commands = self.exercise(existing=True, published_mismatch=True, upload_failure=True)
+        self.assertIn('Upload failed', result['error'])
+        self.assertEqual([c['data']['draft'] for c in commands if c['method'] == 'PATCH'], [True])
+
+    def test_replacement_updates_all_download_names_without_leaving_old_assets(self):
+        result, commands = self.exercise(existing=True, renamed_assets=True)
+        self.assertEqual(result['status'], 'verified build released')
+        self.assertEqual(len([c for c in commands if c['method'] == 'DELETE']), len(publish_release.FILES))
+        self.assertEqual(len([c for c in commands if c['filename']]), len(publish_release.FILES))
+        self.assertEqual(commands[-1]['data']['draft'], False)
+
+    def test_source_advance_during_replacement_cannot_publish_old_inputs(self):
+        result, commands = self.exercise(existing=True, published_mismatch=True, advance_during_upload=True)
+        self.assertFalse(result['release_ready'])
+        self.assertEqual([c['data']['draft'] for c in commands if c['method'] == 'PATCH'], [True])
+
+    def test_wrong_published_inputs_cannot_be_replaced(self):
+        result, commands = self.exercise(existing=True, published_mismatch=True, wrong_draft=True)
+        self.assertIn('different inputs', result['error'])
         self.assertEqual(commands, [])
 
     def test_creation_response_id_works_when_tag_and_listing_never_expose_new_draft(self):

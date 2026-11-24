@@ -393,10 +393,24 @@ def publish(repository, bundle, source_root, source, kernel, kernelsu, run_id, a
     if existing:
         release_inputs(existing, tag, source, kernel, kernelsu)
         if not existing['draft']:
-            if {asset['name'] for asset in existing['assets']} != asset_names or any(asset['size'] < 1 for asset in existing['assets']):
-                raise ValueError('Published release has incomplete assets; refusing to overwrite it')
-            return {'status': 'verified inputs already released', 'release_ready': True,
-                    'tag': tag, 'url': existing['html_url']}
+            local_assets = {path.name: path for path in assets}
+            if (len(existing['assets']) == len(assets)
+                    and {asset['name'] for asset in existing['assets']} == asset_names
+                    and all(asset.get('state') == 'uploaded'
+                            and asset.get('size') == local_assets[asset['name']].stat().st_size
+                            and asset.get('digest') == 'sha256:' + digest(local_assets[asset['name']])
+                            for asset in existing['assets'])):
+                return {'status': 'verified inputs already released', 'release_ready': True,
+                        'tag': tag, 'url': existing['html_url']}
+            # Rebuilds can update installer tooling and download names while
+            # retaining the exact source/kernel/KernelSU tag. Reuse the release
+            # ID and stage the verified replacement through the normal draft
+            # upload checks, including retry after an interrupted replacement.
+            release_id = existing['id']
+            existing = api(prefix + '/releases/' + str(release_id), method='PATCH', data={'draft': True})
+            release_inputs(existing, tag, source, kernel, kernelsu)
+            if existing['id'] != release_id or existing.get('draft') is not True:
+                raise ValueError('Replacement release is not the expected draft')
     notes = release_notes(repository, identity)
     notes += google_changelog.summary(list(listed(prefix + '/releases')), tag, kernel)
     if not existing:
@@ -416,6 +430,13 @@ def publish(repository, bundle, source_root, source, kernel, kernelsu, run_id, a
     release_inputs(draft, tag, source, kernel, kernelsu)
     if draft['id'] != release_id or draft.get('draft') is not True:
         raise ValueError('Selected release is no longer the expected draft')
+    # Remove filenames from the previous build (including unstamped names)
+    # so the published manifest and checksums describe the exact new inventory.
+    for asset in draft['assets']:
+        if asset['name'] not in asset_names:
+            if type(asset.get('id')) is not int or asset['id'] < 1:
+                raise ValueError('Obsolete draft asset has an invalid ID: ' + asset['name'])
+            api(prefix + '/releases/assets/' + str(asset['id']), method='DELETE')
     for path in assets:
         matches = [asset for asset in draft['assets'] if asset['name'] == path.name]
         if len(matches) > 1:
