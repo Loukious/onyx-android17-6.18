@@ -10,8 +10,8 @@
       "candidate_sha256": "ccb46f715348b2378e3acfaa729d561cfdcbc1a860cf880ef8a455035ea72000"
     },
     "drivers/clk/clk.c": {
-      "before_sha256": "6b14c9047d0047d2588d874ea06aaad9c22633e530a104efc4e074b29d45d57d",
-      "candidate_sha256": "77e4eef61dfce4963df6b3447f5f8209b01a589085e82513449952db86d526f6"
+      "before_sha256": "7ee3d2031a5243a8a6d5a264a551a4894b551eaa3f9725285adeaf0923390cd0",
+      "candidate_sha256": "cf7bd7dbc477517ef56942b84678e8e1c6ee77e6f6847e7cb02fb3cca34e4b3a"
     }
   },
   "patch_sha256": "40af844c39469ee6f8fed4974e1f2a65c1cebb02d1fdc6509282a467f369d3fe",

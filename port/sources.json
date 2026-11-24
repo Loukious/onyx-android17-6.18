@@ -5,8 +5,8 @@
     "branch": "common-android17-6.18"
   },
   "common": {
-    "revision": "17b8bfe5ce7568445def263dc609f839f3b469f6",
-    "kernel": "6.18.63",
+    "revision": "f637f936075c055e47cb57c7914a6d752dfbb104",
+    "kernel": "6.18.64",
     "clang": "r596125",
     "rust": "1.91.1.p4",
     "kmi_generation": 6
