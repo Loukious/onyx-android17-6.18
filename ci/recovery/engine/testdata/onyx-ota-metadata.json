@@ -1,0 +1,7 @@
+{
+  "description": "Read-only liblp metadata prefix from Onyx after a completed Evolution X OTA; no filesystem contents or personal data. Slot a vendor_dlkm final extent is 56 sectors; its slot b counterpart is 624 sectors at the same physical and logical offsets.",
+  "captured_on": "2026-11-24",
+  "size": 405504,
+  "sha256": "867324dfa0344430dfa5d87b4e9ccc43b0a1bcaa416f3eb91f5b0189968804e9",
+  "source": "adb.exe exec-out read-only super prefix; both geometry and all primary/backup metadata copies included"
+}

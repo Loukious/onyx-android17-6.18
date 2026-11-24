@@ -90,6 +90,237 @@ func TestExactDLKMAliasAttributes(t *testing.T) {
 	}
 }
 
+func TestDLKMAliasUsesLogicalSectorsNotExtentBoundaries(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b []lpExtent
+		want bool
+	}{
+		{"resized final extent", []lpExtent{{100, 10, 0}, {200, 4, 10}}, []lpExtent{{100, 10, 0}, {200, 12, 10}}, true},
+		{"coalesced extent", []lpExtent{{100, 10, 0}, {110, 4, 10}}, []lpExtent{{100, 20, 0}}, true},
+		{"split within shorter final extent", []lpExtent{{100, 14, 0}}, []lpExtent{{100, 10, 0}, {110, 10, 10}}, true},
+		{"shifted shared sector", []lpExtent{{100, 10, 0}, {200, 4, 10}}, []lpExtent{{100, 10, 0}, {201, 12, 10}}, false},
+		{"logical gap", []lpExtent{{100, 10, 0}}, []lpExtent{{100, 10, 0}, {200, 4, 11}}, false},
+		{"tail reuses shared prefix", []lpExtent{{100, 10, 0}}, []lpExtent{{100, 10, 0}, {105, 4, 10}}, false},
+		{"tail overlaps another tail extent", []lpExtent{{100, 10, 0}}, []lpExtent{{100, 10, 0}, {200, 4, 10}, {202, 4, 14}}, false},
+		{"zero length extent", []lpExtent{{100, 10, 0}}, []lpExtent{{100, 10, 0}, {200, 0, 10}}, false},
+		{"physical overflow", []lpExtent{{100, 10, 0}}, []lpExtent{{100, 10, 0}, {^uint64(0), 4, 10}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := lpPartition{Name: "vendor_dlkm_a", Attributes: 5, Extents: tc.a}
+			b := lpPartition{Name: "vendor_dlkm_b", Attributes: 5, Extents: tc.b}
+			if got := exactDLKMAlias(a, b, 1, 1); got != tc.want {
+				t.Fatalf("alias = %t, want %t", got, tc.want)
+			}
+			if got := exactDLKMAlias(b, a, 1, 1); got != tc.want {
+				t.Fatalf("reverse alias = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompletedOnyxOTAMetadata(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "super.img")
+	if err := os.WriteFile(path, golden(t, "onyx-ota-metadata"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := readLP(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, base := range []string{"system_dlkm", "vendor_dlkm"} {
+		var text strings.Builder
+		fmt.Fprintf(&text, "Mapping: %s_a 254:3 event=0 uuid=\n", base)
+		for _, part := range metadata.Partitions {
+			if part.Name != base+"_a" {
+				continue
+			}
+			for _, extent := range part.Extents {
+				fmt.Fprintf(&text, "%d %d linear 259:17 %d\n", extent.Logical, extent.Count, extent.Start)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, base+"-map.txt"), []byte(text.String()), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := checkLayout(path, "_a", root); err != nil {
+		t.Fatal(err)
+	}
+	// The same real metadata must still reject an altered live mapping.
+	mapPath := filepath.Join(root, "vendor_dlkm-map.txt")
+	text, _ := os.ReadFile(mapPath)
+	text = []byte(strings.Replace(string(text), "21469208", "21469209", 1))
+	if err := os.WriteFile(mapPath, text, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkLayout(path, "_a", root); err == nil || !strings.Contains(err.Error(), "mapping differs") {
+		t.Fatalf("accepted changed mapping: %v", err)
+	}
+}
+
+func TestInactiveROMRecordEvidence(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(*lpPartition, *lpMetadata, *lpMetadata)
+		want   bool
+	}{
+		{"completed target", func(_ *lpPartition, _, _ *lpMetadata) {}, true},
+		{"readonly source", func(o *lpPartition, _, _ *lpMetadata) { o.Attributes = 1 }, true},
+		{"non Virtual AB", func(_ *lpPartition, a, _ *lpMetadata) { a.HeaderFlags = 0 }, false},
+		{"disabled record", func(o *lpPartition, _, _ *lpMetadata) { o.Attributes |= 8 }, false},
+		{"unflagged record", func(o *lpPartition, _, _ *lpMetadata) { o.Attributes = 0 }, false},
+		{"non ROM partition", func(o *lpPartition, _, _ *lpMetadata) { o.Name = "userdata_b" }, false},
+		{"DLKM partial alias", func(o *lpPartition, _, _ *lpMetadata) { o.Name = "vendor_dlkm_b" }, false},
+		{"active slot record", func(o *lpPartition, _, _ *lpMetadata) { o.Name = "vendor_a" }, false},
+		{"present in selected table", func(o *lpPartition, a, _ *lpMetadata) { a.Partitions = append(a.Partitions, *o) }, false},
+		{"missing updated peer", func(_ *lpPartition, a, _ *lpMetadata) { a.Partitions = nil }, false},
+		{"peer not updated", func(_ *lpPartition, a, _ *lpMetadata) { a.Partitions[0].Attributes = 1 }, false},
+		{"unmatched group", func(o *lpPartition, _, _ *lpMetadata) { o.Group = "other_b" }, false},
+		{"unmatched group flags", func(o *lpPartition, _, _ *lpMetadata) { o.GroupFlags = 1 }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := lpPartition{Name: "vendor_b", Attributes: 5, Group: "qti_b", Extents: []lpExtent{{100, 10, 0}}}
+			a := lpMetadata{HeaderFlags: 1, Partitions: []lpPartition{{Name: "vendor_a", Attributes: 5, Group: "qti_a", Extents: []lpExtent{{200, 10, 0}}}}}
+			b := lpMetadata{HeaderFlags: 1}
+			tc.change(&o, &a, &b)
+			if _, got := inactiveROMPartition(o, &a, &b, "_a"); got != tc.want {
+				t.Fatalf("inactive record = %t, want %t", got, tc.want)
+			}
+		})
+	}
+	for _, base := range []string{"system", "system_ext", "vendor", "product", "odm"} {
+		for _, slot := range []string{"_a", "_b"} {
+			opposite := "_b"
+			if slot == "_b" {
+				opposite = "_a"
+			}
+			o := lpPartition{Name: base + opposite, Attributes: 5, Group: "qti" + opposite, Extents: []lpExtent{{100, 10, 0}}}
+			a := lpMetadata{HeaderFlags: 1, Partitions: []lpPartition{{Name: base + slot, Attributes: 5, Group: "qti" + slot, Extents: []lpExtent{{200, 10, 0}}}}}
+			b := lpMetadata{HeaderFlags: 1}
+			if _, ok := inactiveROMPartition(o, &a, &b, slot); !ok {
+				t.Fatalf("rejected %s with active slot %s", base, slot)
+			}
+		}
+	}
+}
+
+func TestInactiveROMRuntimeEvidence(t *testing.T) {
+	for _, base := range []string{"vendor", "system_ext"} {
+		for _, extra := range []string{"", base + "_b", base + "_b-base", base + "_b-cow", "missing-peer"} {
+			names := []string{"vendor_dlkm_a", "system_dlkm_a", base + "_a"}
+			if extra == "missing-peer" {
+				names = names[:2]
+			} else if extra != "" {
+				names = append(names, extra)
+			}
+			err := checkDormantAllocationRuntime([]dormantAllocation{{base + "_b", base + "_b"}}, func() error { return nil }, func() ([]string, error) { return names, nil })
+			if (err == nil) != (extra == "") {
+				t.Fatalf("%s runtime names %v: %v", base, names, err)
+			}
+		}
+	}
+}
+
+func TestStaleInactiveROMOverlapsUseSelectedTableAndRuntime(t *testing.T) {
+	for _, pair := range [][2]string{{"vendor_dlkm", "vendor"}, {"system_dlkm", "system_ext"}} {
+		data := golden(t, "onyx-ota-metadata")
+		maximum, count := int(le.Uint32(data[4136:])), int(le.Uint32(data[4140:]))
+		// Keep the selected table byte-for-byte unchanged. In the old table,
+		// move the DLKM allocation into the old ROM partition's vacated range
+		// and leave its old ROM record over blocks now owned by active DLKM.
+		for _, offset := range []int{12288 + maximum, 12288 + (count+1)*maximum} {
+			h := data[offset : offset+maximum]
+			hs, ts := int(le.Uint32(h[8:])), int(le.Uint32(h[44:]))
+			tables := h[hs : hs+ts]
+			parts, extents := int(le.Uint32(h[80:])), int(le.Uint32(h[92:]))
+			var oldROM, oldDLKM []byte
+			for i := 0; i < int(le.Uint32(h[84:])); i++ {
+				row := tables[parts+i*52 : parts+(i+1)*52]
+				name, _ := nullString(row[:36])
+				if name == pair[1]+"_b" {
+					oldROM = row
+				}
+				if name == pair[0]+"_b" {
+					oldDLKM = row
+				}
+			}
+			if oldROM == nil || oldDLKM == nil {
+				t.Fatal("missing source fixture partitions")
+			}
+			romExtent := tables[extents+int(le.Uint32(oldROM[40:]))*24:]
+			dlkmFirst := int(le.Uint32(oldDLKM[40:]))
+			romStart := le.Uint64(romExtent[12:])
+			dlkmStart := le.Uint64(tables[extents+dlkmFirst*24+12:])
+			le.PutUint64(romExtent, 8)
+			le.PutUint64(romExtent[12:], dlkmStart)
+			for i := 0; i < int(le.Uint32(oldDLKM[44:])); i++ {
+				e := tables[extents+(dlkmFirst+i)*24:]
+				le.PutUint64(e[12:], romStart)
+				romStart += le.Uint64(e)
+			}
+			sum := sha256.Sum256(tables)
+			copy(h[48:80], sum[:])
+			clear(h[12:44])
+			sum = sha256.Sum256(h[:hs])
+			copy(h[12:44], sum[:])
+		}
+		root := t.TempDir()
+		path := filepath.Join(root, "super.img")
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		active, err := readLP(path, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, part := range active.Partitions {
+			base := strings.TrimSuffix(part.Name, "_a")
+			if base != "vendor_dlkm" && base != "system_dlkm" {
+				continue
+			}
+			var text strings.Builder
+			fmt.Fprintf(&text, "Mapping: %s 254:3 event=0 uuid=\n", part.Name)
+			for _, e := range part.Extents {
+				fmt.Fprintf(&text, "%d %d linear 259:17 %d\n", e.Logical, e.Count, e.Start)
+			}
+			if err := os.WriteFile(filepath.Join(root, base+"-map.txt"), []byte(text.String()), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, mode := range []string{"clean", "live-inactive", "pending-snapshot", "no-verifier"} {
+			called := false
+			verify := func(records []dormantAllocation) error {
+				called = true
+				if len(records) != 1 || records[0].Name != pair[1]+"_b" {
+					t.Fatalf("unexpected records %v", records)
+				}
+				return checkDormantAllocationRuntime(records, func() error {
+					if mode == "pending-snapshot" {
+						return errors.New("pending snapshot")
+					}
+					return nil
+				}, func() ([]string, error) {
+					names := []string{"vendor_dlkm_a", "system_dlkm_a", pair[1] + "_a"}
+					if mode == "live-inactive" {
+						names = append(names, pair[1]+"_b")
+					}
+					return names, nil
+				})
+			}
+			if mode == "no-verifier" {
+				verify = nil
+			}
+			err := checkLayoutWithRuntime(path, "_a", root, verify)
+			if (err == nil) != (mode == "clean") || (mode != "no-verifier" && !called) {
+				t.Fatalf("%v %s: called=%t error=%v", pair, mode, called, err)
+			}
+		}
+	}
+}
+
 func rewriteLPFixture(data []byte, change func([]byte, []byte, int, int)) {
 	for _, offset := range []int{12288, 12288 + 65536, 12288 + 2*65536, 12288 + 3*65536} {
 		header := data[offset : offset+65536]
@@ -332,7 +563,7 @@ func TestInactiveCOWMetadataEvidence(t *testing.T) {
 			if allowed != tc.want {
 				t.Fatalf("inactiveCOW = %t, want %t", allowed, tc.want)
 			}
-			if allowed && got != (dormantCOW{"odm_b-cow", "odm_b"}) {
+			if allowed && got != (dormantAllocation{"odm_b-cow", "odm_b"}) {
 				t.Fatalf("unexpected dormant allocation identity: %v", got)
 			}
 		})
@@ -420,7 +651,7 @@ func TestDormantCOWRuntimeEvidence(t *testing.T) {
 				}
 				return append([]string{"vendor_dlkm_a", "system_dlkm_a"}, tc.extraNames...), nil
 			}
-			err := checkDormantCOWRuntime([]dormantCOW{{"odm_b-cow", "odm_b"}}, snapshot, live)
+			err := checkDormantAllocationRuntime([]dormantAllocation{{"odm_b-cow", "odm_b"}}, snapshot, live)
 			if tc.wantError == "" {
 				if err != nil || snapshotCalls != 2 {
 					t.Fatalf("runtime proof: %v, snapshot calls %d", err, snapshotCalls)
@@ -461,12 +692,12 @@ func TestCapturedLayoutDormantCOW(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
-			verify := func(cows []dormantCOW) error {
+			verify := func(cows []dormantAllocation) error {
 				called = true
-				if len(cows) != 1 || cows[0] != (dormantCOW{"odm_b-cow", "odm_b"}) {
+				if len(cows) != 1 || cows[0] != (dormantAllocation{"odm_b-cow", "odm_b"}) {
 					t.Fatalf("unexpected captured dormant COW identity: %v", cows)
 				}
-				return checkDormantCOWRuntime(cows, func() error {
+				return checkDormantAllocationRuntime(cows, func() error {
 					if tc.snapshotError {
 						return errors.New("pending snapshot")
 					}

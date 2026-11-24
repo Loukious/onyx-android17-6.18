@@ -27,16 +27,41 @@ def artifact_name(run_id, attempt, version=ASSET_FORMAT):
     return f'{prefix}-{run_id}-{attempt}'
 
 
-def variant_prefix(variant):
+def build_timestamp(artifact_root):
+    """Artifact directories record build-start time in UTC."""
+    try:
+        value = artifact_root[:15]
+        if not re.fullmatch(r'[0-9]{8}T[0-9]{6}', value):
+            raise ValueError
+        datetime.strptime(value, '%Y%m%dT%H%M%S')
+        return value + 'Z'
+    except (TypeError, ValueError):
+        raise ValueError('Build artifact requires a valid UTC timestamp') from None
+
+
+def asset_timestamp(identity):
+    value = identity.get('asset_timestamp')
+    if value is not None and value != build_timestamp(identity.get('artifact_root')):
+        raise ValueError('Asset timestamp differs from its build artifact')
+    return value
+
+
+def variant_prefix(variant, timestamp=None):
     if variant not in VARIANTS:
         raise ValueError('Unsupported release variant')
-    return 'Onyx-' + variant.title() + '-'
+    prefix = 'Onyx-' + variant.title() + '-'
+    if timestamp is not None:
+        if not isinstance(timestamp, str) or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', timestamp):
+            raise ValueError('Invalid release filename timestamp')
+        datetime.strptime(timestamp, '%Y%m%dT%H%M%SZ')
+        prefix += timestamp[:8] + '-' + timestamp[9:15] + 'UTC-'
+    return prefix
 
 
-def archive_name(version=ASSET_FORMAT, variant=None):
+def archive_name(version=ASSET_FORMAT, variant=None, timestamp=None):
     asset_format({'asset_format': version})
     if version == VARIANT_ASSET_FORMAT:
-        return variant_prefix(variant) + 'GKI-6.18-ROM-Integration.tar.gz'
+        return variant_prefix(variant, timestamp) + 'GKI-6.18-ROM-Integration.tar.gz'
     return ('konoha-gki-and-modules.tar.gz' if version == 1 else
             'Onyx-GKI-6.18-ROM-Integration.tar.gz')
 

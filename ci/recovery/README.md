@@ -49,8 +49,9 @@ active/inactive storage is supported, as are exact opposite-slot DLKM aliases
 on clean Virtual A/B layouts where the active target is read-only and updated
 in liblp metadata. Its opposite-slot source may be read-only without the
 updated flag.
-The shorter partition must match an exact prefix of the longer partition at the
-same logical offsets. Either slot may have an additional disjoint tail. An active
+The shorter partition must map every logical sector to the same physical sector
+as the longer partition's prefix. Split/coalesced extents and a resized final
+extent are supported. Either slot may have an additional disjoint tail. An active
 tail is updated; an inactive tail is left untouched. Updating shared
 DLKM blocks also updates the inactive slot's drivers; switching slots does not
 restore the old drivers. The installer reports shared storage before rebuilding
@@ -73,9 +74,16 @@ copy-on-write allocation whose blocks the active layout has reused. Such an
 entry is accepted only in the inactive metadata's unflagged `cow` group, with
 the exact opposite-slot COW name and a verified updated parent, and only when
 the entry is absent from active metadata. The engine rechecks clean snapshot
-state and scans live device-mapper names before accepting it. A mapped COW,
-mapped inactive parent, active metadata allocation, unknown state, or ordinary
-partition overlap still aborts installation.
+state and scans live device-mapper names before accepting it.
+
+Inactive `system`, `system_ext`, `vendor`, `product` or `odm` records can also
+retain obsolete allocations after a completed Virtual A/B OTA. They are accepted
+only when absent from the selected metadata, with a read-only opposite-slot
+record, a matching slotted group and an updated current-slot peer. Clean snapshot
+state, both active DLKM mappings and the current-slot peer's live mapping are
+required. The inactive record and its snapshot mappings must have no live names.
+A live inactive allocation, overlap within active metadata, unknown snapshot
+state, unmatched DLKM maps or missing runtime evidence still aborts installation.
 
 This is not an installer for every stock or custom Onyx layout. Missing drivers,
 unsupported image formats, active snapshots, unproven or partial shared extents,
@@ -108,8 +116,16 @@ malformed inputs and liblp metadata. Independent AOSP-generated fixtures check
 boot headers and logical metadata. Google `avbtool` checks rebuilt hashes and
 hashtrees. EROFS tests retain binary xattrs, nanosecond timestamps and hardlinks.
 The shell transaction tests cover all six writes, complete rollback and
-preflight failures with zero partition writes. These are offline checks; this
-complete installer has not been flashed on a device.
+preflight failures with zero partition writes.
+
+The corrected layout helper was tested on the global development Onyx on
+2026-11-24, installing the unchanged released Linux 6.18.64 Performance payload
+over the installed 6.18.63 Balanced kernel. All six writes passed verification;
+Android booted with KernelSU root and enforcing SELinux. Independent readbacks
+and Google's AVB tool verified the images, and the logical metadata and retained
+physical partitions were unchanged. The dormant ordinary-ROM-record cases are
+covered by metadata/runtime tests; PixelOS and LineageOS device testing remains
+pending.
 
 `kernel.json` binds the payload to exact source, Google GKI and KernelSU Next commits.
 `full-recovery.json` binds the release ZIP to its payload and tool provenance.

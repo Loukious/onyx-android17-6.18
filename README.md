@@ -20,6 +20,11 @@ Release asset format 3 records both choices in `release.json`'s `variants` array
 including feature/profile metadata, download names and per-variant checksums.
 Publication waits for both complete builds and installer sets to pass verification.
 Earlier format 1 and 2 releases remain supported by the recovery workflow.
+New variant downloads include their build-start date and time in UTC, for example
+`Onyx-Performance-20261124-162430UTC-GKI-6.18-AnyKernel3.zip`. The same timestamp
+names that variant's recovery ZIP, modules, ROM archive and diagnostic files.
+`release.json` records the timestamp and exact download names; older releases
+retain their original filenames.
 The matched SUSFS addon uses KernelSU's special loader and must be installed to
 activate SUSFS. Choose [NoMount](https://github.com/maxsteeel/nomount) or
 [Mountify](https://github.com/backslashxx/mountify) separately if needed; CI does

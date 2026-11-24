@@ -216,8 +216,8 @@ class VariantReleaseTests(unittest.TestCase):
             _, _, _, _, identity = self.export(Path(temporary))
             for row in identity['variants']:
                 row['features'] = ['ntsync', 'susfs-next-builtin']
-                names = installer_assets.names(row['kernel_release'], 3, row['id'])
-                row['installers'] = list(names[:3]) + [variant_assets.installer_metadata_name(row['id'])]
+                names = installer_assets.names(row['kernel_release'], 3, row['id'], row['asset_timestamp'])
+                row['installers'] = list(names[:3]) + [variant_assets.installer_metadata_name(row['id'], row['asset_timestamp'])]
                 row['sha256'].update({name: installer_assets.sha(name.encode()) for name in row['installers']})
                 row['downloads'] = variant_assets.download_map(row)
             identity['sha256'] = {name: value for row in identity['variants']
@@ -229,9 +229,9 @@ class VariantReleaseTests(unittest.TestCase):
                 malformed = copy.deepcopy(identity)
                 row = malformed['variants'][0]
                 if change == 'missing_wifi':
-                    row['installers'].remove(installer_assets.names(row['kernel_release'], 3, row['id'])[2])
+                    row['installers'].remove(installer_assets.names(row['kernel_release'], 3, row['id'], row['asset_timestamp'])[2])
                 elif change == 'stale_susfs':
-                    row['installers'].append(installer_assets.names(row['kernel_release'], 3, row['id'])[3])
+                    row['installers'].append(installer_assets.names(row['kernel_release'], 3, row['id'], row['asset_timestamp'])[3])
                 else:
                     row['installers'].append(row['installers'][0])
                 with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'installer asset inventory'):

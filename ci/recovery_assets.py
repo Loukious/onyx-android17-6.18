@@ -21,10 +21,10 @@ ROOT = HERE.parents[1]
 SOFT_OMISSIONS = {'subsys_pil_tz', 'qcom_arm_smmu_mod', 'phy_msm_snps_hs'}
 
 
-def names(release, asset_format=1, variant=None):
-    installer_assets.names(release, asset_format, variant)
+def names(release, asset_format=1, variant=None, timestamp=None):
+    installer_assets.names(release, asset_format, variant, timestamp)
     if asset_format == 3:
-        prefix = release_naming.variant_prefix(variant)
+        prefix = release_naming.variant_prefix(variant, timestamp)
         return [prefix + 'GKI-6.18-Full-Recovery-Installer.zip', prefix + 'full-recovery.json']
     if asset_format == 2:
         return ['Onyx-GKI-6.18-Full-Recovery-Installer.zip', 'full-recovery.json']
@@ -273,11 +273,11 @@ def build(artifact, identity):
                   'README.md': ((HERE / 'README.md').read_bytes(), False)})
     if release_naming.asset_format(identity) >= 2:
         readme = files['README.md'][0].replace(
-            b'Onyx-Complete-<kernel-release>.zip', names(identity['kernel_release'], release_naming.asset_format(identity), identity.get('id'))[0].encode())
+            b'Onyx-Complete-<kernel-release>.zip', names(identity['kernel_release'], release_naming.asset_format(identity), identity.get('id'), release_naming.asset_timestamp(identity))[0].encode())
         files['README.md'] = (readme.replace(b'adb sideload ', b'adb.exe sideload '), False)
     files['SHA256SUMS'] = (installer_assets.payload(files, files), False)
     archive = installer_assets.zip_bytes(files)
-    zip_name, meta_name = names(identity['kernel_release'], release_naming.asset_format(identity), identity.get('id'))
+    zip_name, meta_name = names(identity['kernel_release'], release_naming.asset_format(identity), identity.get('id'), release_naming.asset_timestamp(identity))
     metadata = {'format': 1, 'source_revision': identity['source_revision'], 'common_revision': identity['common_revision'],
                 'kernelsu_revision': identity['kernelsu_revision'], 'kernel_release': identity['kernel_release'],
                 'sha256': {zip_name: digest(archive)}, 'modules': len(json.loads(files['kernel.json'][0])['modules']),
@@ -326,7 +326,7 @@ def add_variant_installers(bundle, identity):
     staged = {}
     for row in rows:
         with tempfile.TemporaryDirectory(prefix='onyx-variant-recovery-') as temporary:
-            with tarfile.open(bundle / release_naming.archive_name(3, row['id'])) as archive:
+            with tarfile.open(bundle / release_naming.archive_name(3, row['id'], release_naming.asset_timestamp(row))) as archive:
                 archive.extractall(temporary, filter='data')
             staged[row['id']] = build(Path(temporary) / row['artifact_root'], row)
     products = variant_assets.merge_products(identity, staged, 'full_recovery')

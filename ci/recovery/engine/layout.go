@@ -221,63 +221,113 @@ func exactDLKMAlias(active, other lpPartition, activeFlags, otherFlags uint32) b
 	if other.Name != opposite || len(active.Extents) == 0 || len(other.Extents) == 0 {
 		return false
 	}
-	prefix, extended := active.Extents, other.Extents
-	if len(prefix) > len(extended) {
-		prefix, extended = extended, prefix
-	}
-	logical := uint64(0)
-	for i, extent := range prefix {
-		if extent.Logical != logical || extent != extended[i] {
-			return false
-		}
-		logical += extent.Count
-	}
-	// Either slot may have a larger suffix. It must remain disjoint from
-	// the exact shared prefix, regardless of which slot is being installed.
-	for _, tail := range extended[len(prefix):] {
-		if tail.Logical < logical {
-			return false
-		}
-		for _, extent := range prefix {
-			if overlap(extent, tail) {
+	// liblp can split/coalesce a linear extent or resize its final extent.
+	// Compare the physical mapping at every shared logical sector, rather
+	// than requiring identical serialized extent boundaries. Both complete
+	// maps must be contiguous and self-disjoint, including the longer tail.
+	for _, extents := range [][]lpExtent{active.Extents, other.Extents} {
+		logical := uint64(0)
+		for i, extent := range extents {
+			if extent.Count == 0 || extent.Logical != logical || extent.Count > ^uint64(0)-logical || extent.Count > ^uint64(0)-extent.Start {
 				return false
 			}
+			logical += extent.Count
+			for _, other := range extents[i+1:] {
+				if overlap(extent, other) {
+					return false
+				}
+			}
+		}
+	}
+	a, b := active.Extents, other.Extents
+	i, j := 0, 0
+	var usedA, usedB uint64
+	for i < len(a) && j < len(b) {
+		if a[i].Start+usedA != b[j].Start+usedB {
+			return false
+		}
+		count := min(a[i].Count-usedA, b[j].Count-usedB)
+		usedA, usedB = usedA+count, usedB+count
+		if usedA == a[i].Count {
+			i++
+			usedA = 0
+		}
+		if usedB == b[j].Count {
+			j++
+			usedB = 0
 		}
 	}
 	return true
 }
 
-type dormantCOW struct{ Name, Parent string }
+type dormantAllocation struct{ Name, Parent string }
 
-func inactiveCOW(other lpPartition, active, inactive *lpMetadata, slot string) (dormantCOW, bool) {
+func inactiveROMPartition(other lpPartition, active, inactive *lpMetadata, slot string) (dormantAllocation, bool) {
+	// After Virtual A/B merge, the selected table is the allocation authority.
+	// An opposite-slot ROM record absent from that table can describe blocks
+	// that have since been reused. Require its updated current-slot peer and
+	// matching slotted groups; runtime checks must additionally prove the old
+	// record and all of its snapshot mappings are unused.
+	opposite := "_b"
+	if slot == "_b" {
+		opposite = "_a"
+	} else if slot != "_a" {
+		return dormantAllocation{}, false
+	}
+	base := strings.TrimSuffix(other.Name, opposite)
+	switch base {
+	case "system", "system_ext", "vendor", "product", "odm":
+	default:
+		return dormantAllocation{}, false
+	}
+	attributes := other.Attributes & ^uint32(2)
+	if other.Name != base+opposite || active.HeaderFlags != 1 || inactive.HeaderFlags != 1 ||
+		(attributes != 1 && attributes != 5) || !strings.HasSuffix(other.Group, opposite) || len(other.Extents) == 0 {
+		return dormantAllocation{}, false
+	}
+	for _, peer := range active.Partitions {
+		if peer.Name == other.Name {
+			return dormantAllocation{}, false
+		}
+	}
+	for _, peer := range active.Partitions {
+		if peer.Name == base+slot && peer.Attributes & ^uint32(2) == 5 && len(peer.Extents) != 0 &&
+			peer.Group == strings.TrimSuffix(other.Group, opposite)+slot && peer.GroupFlags == other.GroupFlags {
+			return dormantAllocation{other.Name, other.Name}, true
+		}
+	}
+	return dormantAllocation{}, false
+}
+
+func inactiveCOW(other lpPartition, active, inactive *lpMetadata, slot string) (dormantAllocation, bool) {
 	// libsnapshot's cow group is removed from new target metadata before its
 	// storage is reallocated. An older metadata slot can retain that allocation
 	// even though it no longer exists in the active layout. Names alone cannot
 	// authorize ignoring a partition; preserve the group and parent evidence.
 	if active.HeaderFlags != 1 || inactive.HeaderFlags != 1 || other.Group != "cow" || other.GroupFlags != 0 || other.Attributes != 0 {
-		return dormantCOW{}, false
+		return dormantAllocation{}, false
 	}
 	opposite := "_b"
 	if slot == "_b" {
 		opposite = "_a"
 	} else if slot != "_a" {
-		return dormantCOW{}, false
+		return dormantAllocation{}, false
 	}
 	parent := strings.TrimSuffix(other.Name, "-cow")
 	if parent == other.Name || !strings.HasSuffix(parent, opposite) || strings.TrimSuffix(parent, opposite) == "" {
-		return dormantCOW{}, false
+		return dormantAllocation{}, false
 	}
 	for _, partition := range active.Partitions {
 		if partition.Name == other.Name {
-			return dormantCOW{}, false
+			return dormantAllocation{}, false
 		}
 	}
 	for _, partition := range inactive.Partitions {
 		if partition.Name == parent && partition.Group != "cow" && partition.Attributes & ^uint32(2) == 5 && len(partition.Extents) != 0 {
-			return dormantCOW{other.Name, parent}, true
+			return dormantAllocation{other.Name, parent}, true
 		}
 	}
-	return dormantCOW{}, false
+	return dormantAllocation{}, false
 }
 
 func liveDMNames() ([]string, error) {
@@ -303,13 +353,13 @@ func liveDMNames() ([]string, error) {
 	return names, nil
 }
 
-func checkDormantCOWRuntime(cows []dormantCOW, snapshot func() error, liveNames func() ([]string, error)) error {
+func checkDormantAllocationRuntime(cows []dormantAllocation, snapshot func() error, liveNames func() ([]string, error)) error {
 	if err := snapshot(); err != nil {
-		return fmt.Errorf("cannot establish dormant COW snapshot state: %w", err)
+		return fmt.Errorf("cannot establish dormant allocation snapshot state: %w", err)
 	}
 	names, err := liveNames()
 	if err != nil {
-		return fmt.Errorf("cannot enumerate live COW mappings: %w", err)
+		return fmt.Errorf("cannot enumerate live mappings: %w", err)
 	}
 	seen := make(map[string]bool)
 	for _, name := range names {
@@ -328,22 +378,29 @@ func checkDormantCOWRuntime(cows []dormantCOW, snapshot func() error, liveNames 
 				return fmt.Errorf("live mapping enumeration is missing active partition: %s", base+activeSlot)
 			}
 		}
+		if cow.Name == cow.Parent {
+			peer := strings.TrimSuffix(cow.Parent, "_a")
+			peer = strings.TrimSuffix(peer, "_b") + activeSlot
+			if !seen[peer] {
+				return fmt.Errorf("live mapping enumeration is missing updated ROM partition: %s", peer)
+			}
+		}
 		for _, name := range names {
 			// AOSP snapshot mapping names use parent-name plus a hyphen suffix.
 			// Also reject the bare inactive parent, whose mapping may hide a
 			// snapshot target. Unrelated similarly prefixed names do not match.
 			if name == cow.Name || name == cow.Parent || strings.HasPrefix(name, cow.Parent+"-") {
-				return fmt.Errorf("inactive COW allocation still has a live mapping: %s", name)
+				return fmt.Errorf("inactive allocation still has a live mapping: %s", name)
 			}
 		}
 	}
 	if err := snapshot(); err != nil {
-		return fmt.Errorf("snapshot state changed while checking dormant COW mappings: %w", err)
+		return fmt.Errorf("snapshot state changed while checking dormant mappings: %w", err)
 	}
 	return nil
 }
 
-func verifyDormantCOWRuntime(cows []dormantCOW) error {
+func verifyDormantAllocationRuntime(cows []dormantAllocation) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -356,14 +413,14 @@ func verifyDormantCOWRuntime(cows []dormantCOW) error {
 		}
 		return nil
 	}
-	return checkDormantCOWRuntime(cows, snapshot, liveDMNames)
+	return checkDormantAllocationRuntime(cows, snapshot, liveDMNames)
 }
 
 func checkLayout(super, slot, maps string) error {
-	return checkLayoutWithRuntime(super, slot, maps, verifyDormantCOWRuntime)
+	return checkLayoutWithRuntime(super, slot, maps, verifyDormantAllocationRuntime)
 }
 
-func checkLayoutWithRuntime(super, slot, maps string, verifyCOW func([]dormantCOW) error) error {
+func checkLayoutWithRuntime(super, slot, maps string, verifyCOW func([]dormantAllocation) error) error {
 	index := 0
 	if slot == "_b" {
 		index = 1
@@ -379,7 +436,7 @@ func checkLayoutWithRuntime(super, slot, maps string, verifyCOW func([]dormantCO
 		}
 	}
 	var aliases []string
-	dormant := make(map[string]dormantCOW)
+	dormant := make(map[string]dormantAllocation)
 	for _, base := range []string{"vendor_dlkm", "system_dlkm"} {
 		name := base + slot
 		var selected *lpPartition
@@ -407,6 +464,8 @@ func checkLayoutWithRuntime(super, slot, maps string, verifyCOW func([]dormantCO
 				alias := exactDLKMAlias(*selected, other, metadata[index].HeaderFlags, meta.HeaderFlags)
 				cow, staleCOW := inactiveCOW(other, metadata[index], meta, slot)
 				staleCOW = staleCOW && metaIndex != index && selected.Attributes & ^uint32(2) == 5
+				rom, staleROM := inactiveROMPartition(other, metadata[index], meta, slot)
+				staleROM = staleROM && metaIndex != index && selected.Attributes & ^uint32(2) == 5
 				for _, a := range selected.Extents {
 					for _, b := range other.Extents {
 						if overlap(a, b) {
@@ -418,7 +477,11 @@ func checkLayoutWithRuntime(super, slot, maps string, verifyCOW func([]dormantCO
 								dormant[cow.Name] = cow
 								continue
 							}
-							return fmt.Errorf("%s shares physical data with %s; a full ROM OTA is required for this layout", name, other.Name)
+							if staleROM {
+								dormant[rom.Name] = rom
+								continue
+							}
+							return fmt.Errorf("%s shares physical data with %s in metadata slot %d; sectors [%d,%d) and [%d,%d) are not a verified alias or dormant allocation", name, other.Name, metaIndex, a.Start, a.Start+a.Count, b.Start, b.Start+b.Count)
 						}
 					}
 				}
@@ -451,13 +514,13 @@ func checkLayoutWithRuntime(super, slot, maps string, verifyCOW func([]dormantCO
 		}
 	}
 	if len(dormant) != 0 {
-		var cows []dormantCOW
+		var cows []dormantAllocation
 		for _, cow := range dormant {
 			cows = append(cows, cow)
 		}
 		sort.Slice(cows, func(i, j int) bool { return cows[i].Name < cows[j].Name })
 		if verifyCOW == nil {
-			return fmt.Errorf("dormant COW runtime verification is unavailable")
+			return fmt.Errorf("dormant allocation runtime verification is unavailable")
 		}
 		if err := verifyCOW(cows); err != nil {
 			return err
@@ -473,7 +536,7 @@ func checkLayoutWithRuntime(super, slot, maps string, verifyCOW func([]dormantCO
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		fmt.Printf("Verified dormant inactive COW allocations: %s; no live mapping and snapshot state clean\n", strings.Join(names, ", "))
+		fmt.Printf("Verified dormant inactive allocations: %s; no live mapping and snapshot state clean\n", strings.Join(names, ", "))
 	}
 	return nil
 }
