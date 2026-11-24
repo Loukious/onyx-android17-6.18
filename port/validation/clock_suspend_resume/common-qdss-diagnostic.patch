@@ -99,8 +99,7 @@ diff --git a/drivers/amba/bus.c b/drivers/amba/bus.c
 diff --git a/drivers/clk/clk.c b/drivers/clk/clk.c
 --- a/drivers/clk/clk.c
 +++ b/drivers/clk/clk.c
-@@ -119,6 +119,27 @@
- 	struct hlist_node clks_node;
+@@ -120,5 +120,26 @@
  };
  
 +/* Opt-in startup evidence; clock reference handling is unchanged. */

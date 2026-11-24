@@ -218,7 +218,7 @@
     },
     {
       "path": "patches/droidspaces-618.patch",
-      "sha256": "e5630631ac7cf1dd6fd52095ecd003c6373ee52a5f7b60c8867a645d4edc9cd4"
+      "sha256": "6856c5eda72ec7697a0af7d546b099a38b5a25d9bf07a21631ac5fedd381a7c8"
     },
     {
       "path": "patches/bbrv3-6.18.patch",

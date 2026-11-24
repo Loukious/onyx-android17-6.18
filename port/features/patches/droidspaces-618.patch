@@ -183,14 +183,12 @@ diff --git a/ipc/shm.c b/ipc/shm.c
 index 2f5cee0c7..f6ff7d86b 100644
 --- a/ipc/shm.c
 +++ b/ipc/shm.c
-@@ -44,6 +44,7 @@
+@@ -44,4 +44,5 @@
  #include <linux/nsproxy.h>
  #include <linux/mount.h>
  #include <linux/ipc_namespace.h>
 +#include <linux/sysv_task.h>
  #include <linux/rhashtable.h>
- #include <linux/nstree.h>
- 
 @@ -452,12 +453,12 @@ void exit_shm(struct task_struct *task)
  
  		task_lock(task);
