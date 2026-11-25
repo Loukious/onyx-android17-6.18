@@ -4,8 +4,8 @@
   "upstream": "https://lists.openwall.net/linux-kernel/2026/07/10/62",
   "files": {
     "BUILD.bazel": {
-      "before_sha256": "be41c41bac5e0884189a0f67f644b76c7178542d1010f317348baae1720eb271",
-      "candidate_sha256": "254ef8f74222995580454db16d65cf85f51f97afa8f3603e865ceb3365095035"
+      "before_sha256": "50042d702a296e8c8c19090d91452aab9e516d83281306c66a835c89910a38f0",
+      "candidate_sha256": "ca0bfcd8c52d1ae971626c1def6ad3ddf6cdb646c1c9d6a1bca2296f1c3eb83f"
     },
     "arch/arm64/configs/gki_defconfig": {
       "before_sha256": "c92079fa0c102899644de89c8b7e80158cbfcfc000ddad3f881347ad810b997c",
@@ -44,8 +44,8 @@
       "candidate_sha256": "6fcfa3a9f1c00b61a9845afad108aef6ff7a963468ec97112ed31edf91d5644b"
     },
     "drivers/hwtracing/coresight/coresight-etm4x-core.c": {
-      "before_sha256": "9f5efc55ced1b6c9a7df2f3fa7878d3819664a12891c91f13d31ffafa20ab8af",
-      "candidate_sha256": "8a84129a20c0162bb2ae8cb7e7b48239b00acba4c782b202e01ae10954b87333"
+      "before_sha256": "6513e4025cdc268afed6db5508fca845a467ce225dcdc9411dbbfdce498d04c5",
+      "candidate_sha256": "8f0b85b35d22766000070cdde2e7fb7708ab2d02b945c9b9bbc0b48d449bb57b"
     },
     "drivers/hwtracing/coresight/coresight-funnel.c": {
       "before_sha256": "86f5d32ba957cecc2ac2268785e5f17d0525ca1c2a057240e46435227015cbf5",

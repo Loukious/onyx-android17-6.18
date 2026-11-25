@@ -305,6 +305,10 @@ void symbols__fixup_end(struct rb_root_cached *symbols, bool is_kallsyms)
 			else
 				prev->end = curr->start;
 
+			/* The next module can start within that page */
+			if (prev->end > curr->start)
+				prev->end = curr->start;
+
 			pr_debug4("%s sym:%s end:%#" PRIx64 "\n",
 				  __func__, prev->name, prev->end);
 		}
@@ -1807,9 +1811,9 @@ int dso__load(struct dso *dso, struct map *map)
 		if (nsexit)
 			nsinfo__mountns_enter(dso__nsinfo(dso), &nsc);
 
-		if (bfdrc == 0) {
-			ret = 0;
-			break;
+		if (bfdrc > 0) {
+			ret = 1;
+			goto out_destroy;
 		}
 
 		if (!is_reg || sirc < 0)
@@ -1874,6 +1878,7 @@ int dso__load(struct dso *dso, struct map *map)
 			ret += nr_plt;
 	}
 
+out_destroy:
 	for (; ss_pos > 0; ss_pos--)
 		symsrc__destroy(&ss_[ss_pos - 1]);
 out_free:
@@ -2607,17 +2612,16 @@ char *dso__demangle_sym(struct dso *dso, int kmodule, const char *elf_name)
 		     buf_len < 1024 * 1024; buf_len += 32) {
 			char *tmp = realloc(demangled, buf_len);
 
-			if (!tmp) {
-				/* Failure to grow output buffer, return what is there. */
-				return demangled;
-			}
+			if (!tmp)
+				break;
 			demangled = tmp;
 			if (rust_demangle_display_demangle(&rust_demangle, demangled, buf_len,
 							   /*alternate=*/true) == OverflowOk)
 				return demangled;
 		}
-		/* Buffer exceeded sensible bounds, return what is there. */
-		return demangled;
+		/* Failure to grow output buffer or buffer exceeded sensible bounds. */
+		free(demangled);
+		return NULL;
 	}
 
 	demangled = cxx_demangle_sym(elf_name, verbose > 0, verbose > 0);
