@@ -9731,7 +9731,7 @@
     "executable": false
   },
   "Documentation/devicetree/bindings/connector/usb-connector.yaml": {
-    "sha256": "9729a1748f45dfd35d5d8f045bbf082fb85d67fd7ab3de89a2a93b47f4a727a1",
+    "sha256": "177b82620aa4b18e107149d83e905d27eb40b92f261ec9317600add8b34eb0cb",
     "executable": false
   },
   "Documentation/devicetree/bindings/counter/fsl,ftm-quaddec.yaml": {
@@ -30039,7 +30039,7 @@
     "executable": false
   },
   "Documentation/devicetree/bindings/usb/maxim,max33359.yaml": {
-    "sha256": "c7a537942cd709cf21e7332f5c3137ca2ac26da8b257c32d5d8c3ca2d2923555",
+    "sha256": "c105d3ee5e267e0861aa22b793f45b45d3bbbceb8455fdc77ab55055de053689",
     "executable": false
   },
   "Documentation/devicetree/bindings/usb/maxim,max3420-udc.yaml": {
@@ -74978,7 +74978,7 @@
     "executable": false
   },
   "arch/arm64/configs/gki_defconfig": {
-    "sha256": "dbd09439453ef93814ff83ff68b20d4c8492b242ded8c82703516a2b56dad487",
+    "sha256": "ba59b13d1cce2c0297d5e71015d0e63730403ce32ddadfa2ee8f17bb2d0d7817",
     "executable": false
   },
   "arch/arm64/configs/hardening.config": {
@@ -76982,7 +76982,7 @@
     "executable": false
   },
   "arch/arm64/kvm/hyp/nvhe/trace.c": {
-    "sha256": "7e4835ab0b168211b07ee14165aff850fac012ff8e97745ec38ceb04e2b5bdd8",
+    "sha256": "a203e3df8a46bbc0f2a7faed2fb6c8f1d89ad969bffdbc9f2916f4f5043292fc",
     "executable": false
   },
   "arch/arm64/kvm/hyp/pgtable.c": {
@@ -77050,7 +77050,7 @@
     "executable": false
   },
   "arch/arm64/kvm/mmu.c": {
-    "sha256": "3506ab375dcab6fab22c7f02df5c137dedb657dbf677e5c50b33392b7d4d754a",
+    "sha256": "be7a663106cdd267f18bc130b737c128dadf1b8f8dbbb9bd87a36f7ee125e1ef",
     "executable": false
   },
   "arch/arm64/kvm/nested.c": {
@@ -109872,7 +109872,7 @@
     "executable": false
   },
   "arch/x86/configs/gki_defconfig": {
-    "sha256": "1e4c87f1acccc0ba2c950185016772f1feed8ab9bd1c746a9acda4df95a1e6d2",
+    "sha256": "013f24f86e44f162bb7106a3c69d22331a988d054a1623d038499d8e4e2bb311",
     "executable": false
   },
   "arch/x86/configs/hardening.config": {
@@ -111184,7 +111184,7 @@
     "executable": false
   },
   "arch/x86/include/asm/kvm_pkvm.h": {
-    "sha256": "ef2e972c7915acfe53e8f8c824cb4c9407610d3c89547b388b75a038b9fada6e",
+    "sha256": "feced3ba0e06a700b9cfa70b474fb89c5f7f70d6726379a083c4abc96fee5e4a",
     "executable": false
   },
   "arch/x86/include/asm/kvm_types.h": {
@@ -113620,7 +113620,7 @@
     "executable": false
   },
   "arch/x86/kvm/pkvm/mmu.c": {
-    "sha256": "d83bbe2deea80abb331cb68701293a099bebc66cc2d5a27b6e639b036e295576",
+    "sha256": "70306408dd3c94543c7ba0f6496c9aa3dad496174a7e0b8940db8a319e2127b2",
     "executable": false
   },
   "arch/x86/kvm/pkvm/mmu.h": {
@@ -116456,7 +116456,7 @@
     "executable": false
   },
   "bazel/modules_private.bzl": {
-    "sha256": "775506200f8612f5b93d99b7f0bc0b5848ae43b09850ab74b1a3662cd0f206bf",
+    "sha256": "66f47cd31524eed6aa208da611eec176c6a1c00c95a00f64d865f7229f40c09b",
     "executable": false
   },
   "bazel/test/BUILD.bazel": {
@@ -116700,7 +116700,7 @@
     "executable": false
   },
   "block/blk-zoned.c": {
-    "sha256": "fa59527d1f7c7bd46d4e3fa36c637f2c7e398aee777e1c48c4c31d72c585a6c9",
+    "sha256": "632139fc9cc5a89ccfc22d5066655e6119f6d47cd8b0cd47dc30b61fec169cd4",
     "executable": false
   },
   "block/blk.h": {
@@ -121567,11 +121567,11 @@
     "executable": false
   },
   "drivers/android/Kconfig": {
-    "sha256": "8a1fb5eb90df5d7edb8b35aec8e165186b3bc942e5d03adda549a3e6725e3328",
+    "sha256": "e104c8ae26f632d89812115f047b5994f6d93adb784ece1d20c4970227976305",
     "executable": false
   },
   "drivers/android/Makefile": {
-    "sha256": "a09f5a138a96d7f7b5ec91cf708806bd24f1ed4b68ecff8f17a1b7883ba317b3",
+    "sha256": "f742d1ccb87ec8f817c8f4bedbb434d56fd7bee6100b12b24e6eb241f60c4bc9",
     "executable": false
   },
   "drivers/android/TEST_MAPPING": {
@@ -121751,11 +121751,15 @@
     "executable": false
   },
   "drivers/android/tests/Makefile": {
-    "sha256": "5b5e7da522c9ca7f202b3019ab8e1c9ff3a394517c333f1044f33d7eb8b8448c",
+    "sha256": "1e9e6df7b4bfb2aff3a7307db2d7acab77ed9a02ab65e8c396b4000205d8ae1f",
     "executable": false
   },
   "drivers/android/tests/binder_alloc_kunit.c": {
     "sha256": "a9dc5c1d802336d3fa07e8a03beab77da7972737221058708820d82be38cd03e",
+    "executable": false
+  },
+  "drivers/android/tests/wrapfd_kunit.c": {
+    "sha256": "17fff7500c492bc209b64d4ba3261e95e06c68272e08b44ef24f73de424d531a",
     "executable": false
   },
   "drivers/android/vendor_hooks.c": {
@@ -121767,15 +121771,15 @@
     "executable": false
   },
   "drivers/android/wrapfd/Makefile": {
-    "sha256": "e8ec7ff7fbb8cbbadd2d76dc45fa4a0dced4a9d06ca96f6e0166941aa2345032",
+    "sha256": "90147bf5ca0228180fc159c5821f7d6b18191fa3a17f9aab67cbef83cff9f9dc",
     "executable": false
   },
   "drivers/android/wrapfd/content.rs": {
-    "sha256": "2ec32ae3932a232f986de143134afe425bb363ddb91ef864b0e25784ffb3996c",
+    "sha256": "f9b14e36a5064f95a87af6486e0ebb89dea918caf616a250a51862918a4e54b3",
     "executable": false
   },
   "drivers/android/wrapfd/io_context.rs": {
-    "sha256": "29199fd4694baa19b70b0421740060120bfdb0851d727ffa37e2dc6a256de5b2",
+    "sha256": "b5af0269fb2799ea66d8eaa29e35ea466761a67611a7e024b52451a121de29d1",
     "executable": false
   },
   "drivers/android/wrapfd/poll.rs": {
@@ -121787,11 +121791,15 @@
     "executable": false
   },
   "drivers/android/wrapfd/wrap.rs": {
-    "sha256": "bcccda927596cc19c1fc02c8c751915a962708802bdf4a67a4ec99ea32bddee5",
+    "sha256": "a6774cbade26aea05f4f10df04b5b7cce8d77dccacf6bd5ba0c3e22a134b5eb5",
     "executable": false
   },
   "drivers/android/wrapfd/wrapfd_device.rs": {
-    "sha256": "bea9003efb0fe4b4a3492397f0ce3eb1219a10ec10663fce2fd5abdd1d3d5ca9",
+    "sha256": "815da7f0d6327d0022f1819ffcd617225bd56eb950898f44bd3600129f9916d0",
+    "executable": false
+  },
+  "drivers/android/wrapfd/wrapfd_exports.c": {
+    "sha256": "93873de42989ff3cf01bbe58fbe404cb5a4216db15dbb978029695b9a0febb42",
     "executable": false
   },
   "drivers/ata/Kconfig": {
@@ -182343,11 +182351,11 @@
     "executable": false
   },
   "drivers/iommu/intel/iommu.c": {
-    "sha256": "250f7b47fb0ec8a2f455fc3e39d19f6128043344d2de2f3391f8ca06d371d422",
+    "sha256": "d8b49e28a8a1bdb6dcada87b1107098b0febaf26bafbf11d4b8232745ab30daa",
     "executable": false
   },
   "drivers/iommu/intel/iommu.h": {
-    "sha256": "3f4ab7b9b50dd813727b4c2c1d1404b8ee5b8e823235cd80deff742f9fdaab3a",
+    "sha256": "d803d58c21cb780ee64d08a7aa131b277c7ce8ad52bde9941fc92d828a31ce9c",
     "executable": false
   },
   "drivers/iommu/intel/irq_remapping.c": {
@@ -182359,7 +182367,7 @@
     "executable": false
   },
   "drivers/iommu/intel/pasid.c": {
-    "sha256": "ab68c2171b9cded82f2902151701924220cd0951d1146d4ffce06f2e44255775",
+    "sha256": "ab3e5f7c3ed2d642411aeb1fbce077eb9d2d25b4b4c8698a23f2e9e818ecf49c",
     "executable": false
   },
   "drivers/iommu/intel/pasid.h": {
@@ -182391,11 +182399,11 @@
     "executable": false
   },
   "drivers/iommu/intel/pkvm/domain.c": {
-    "sha256": "ca98c1999fe81f60b155776da54fc03c75646cf77859c53580891f39edcb76d6",
+    "sha256": "97cf454a38dc08e8aefc7a1122e30525a2149965de1cf7a38ac2e97e6892cd41",
     "executable": false
   },
   "drivers/iommu/intel/pkvm/iommu.c": {
-    "sha256": "ced4a1a5999363646aaf549189becf109df108283b04414a96253d56f00c8ed8",
+    "sha256": "ad0b19b89ac0efaba398bed7e83b25cceabd53e73054aad71bcd47900ac37846",
     "executable": false
   },
   "drivers/iommu/intel/pkvm/iommu_frcd.c": {
@@ -182403,7 +182411,7 @@
     "executable": false
   },
   "drivers/iommu/intel/pkvm/iommu_hc.c": {
-    "sha256": "77e190ffe642abb9570bad70a996043098eb7c47dde8d9e545c47838cb3b197b",
+    "sha256": "60f7006585ba3e5544cb4d3f0109a5659976f9d626e487357897d22ef8033320",
     "executable": false
   },
   "drivers/iommu/intel/pkvm/iommu_pmu.c": {
@@ -182411,11 +182419,11 @@
     "executable": false
   },
   "drivers/iommu/intel/pkvm_iommu.c": {
-    "sha256": "e7a605b33d95c5ff374091f59c69a2ceb492646cab6159ff7e70ca5e688b2043",
+    "sha256": "259b06b5104ce7461ed29f5f54af16ecfbdd4e81f8c5d6def8b8d289b2a4d353",
     "executable": false
   },
   "drivers/iommu/intel/pkvm_iommu.h": {
-    "sha256": "004b56acb5e0bd7d7c88ff33d6f89127c556ff609b6d93ae4838e1a3f0e55b01",
+    "sha256": "0af876bc9c3845f4d87260c189ca60ab1607170153b396bd0216f7cae6546984",
     "executable": false
   },
   "drivers/iommu/intel/prq.c": {
@@ -182495,7 +182503,7 @@
     "executable": false
   },
   "drivers/iommu/iommu.c": {
-    "sha256": "131c0cf409ded29075d289a415e5e446624e45468361ae1111f3a1aea5c27ac4",
+    "sha256": "8fd5c61d26e2d3289a7a1712ecd977b6fb61d44d7f500f989224fec5e7ca261e",
     "executable": false
   },
   "drivers/iommu/iommufd/Kconfig": {
@@ -259947,7 +259955,7 @@
     "executable": false
   },
   "drivers/usb/typec/tcpm/tcpm.c": {
-    "sha256": "3dbfe4a0f9d491c2e6655d70008667524d545f51259aa5ac2d4d6b21a61e1d76",
+    "sha256": "cc6d6a9cd8a4ca02227deec81485d5ed6ce678d721a06ed8c4d46c0326b7ef92",
     "executable": false
   },
   "drivers/usb/typec/tcpm/wcove.c": {
@@ -266515,7 +266523,7 @@
     "executable": false
   },
   "fs/exec.c": {
-    "sha256": "5fcdb4096f700ebdc430861338a2a5a0047986d87710ef54c076b24e91257626",
+    "sha256": "0e42a5b275bfa6833910090a542fe0131bea503df32c8b5021de970ddb24faa8",
     "executable": false
   },
   "fs/exfat/Kconfig": {
@@ -273707,7 +273715,7 @@
     "executable": false
   },
   "gki/aarch64/abi.stg": {
-    "sha256": "876f4ee8e406227b5c355029547e3fda50837afc877d8c25804c08d84b4811c0",
+    "sha256": "1b3dd98b59bed275e91d82eb5888510105ac3917d7f81c07bb220a7d3bedf5ed",
     "executable": false
   },
   "gki/aarch64/abi.stg.allowed_breaks": {
@@ -273787,7 +273795,7 @@
     "executable": false
   },
   "gki/aarch64/symbols/pixel": {
-    "sha256": "3762c830285c9d79522ab9e3b7ed1ca9fc47e4fb96d68fe3c95a318248668939",
+    "sha256": "a1d98b768bd25041aa102c157bcd53ad5fdfd2d1dbf8ec2846b6f2423196fb83",
     "executable": false
   },
   "gki/aarch64/symbols/pixel_watch": {
@@ -288259,7 +288267,7 @@
     "executable": false
   },
   "include/linux/ptshare.h": {
-    "sha256": "8ab1f88a18e2835053efe0532b20e5eca33ee4146dc49d86c0d0af2717053a60",
+    "sha256": "b8789895d27efab1d09653a2416f3ee8e5c88e652b75ee4d4172cbef1a2e61d0",
     "executable": false
   },
   "include/linux/purgatory.h": {
@@ -291295,7 +291303,7 @@
     "executable": false
   },
   "include/linux/wrapfd.h": {
-    "sha256": "5a2c8b0e22f3363d66a04584ef46d4b3c505acbc47521354388a0bc9d29cbe85",
+    "sha256": "045e9e147d0b21fb64984ae6a5015eba14b54bb272af728288caedbb6de18873",
     "executable": false
   },
   "include/linux/writeback.h": {
@@ -299487,7 +299495,7 @@
     "executable": false
   },
   "include/uapi/linux/wrapfd.h": {
-    "sha256": "c16e0745c7d2fd381c1b9957caec2835e85be978abffd26c83bfc793357dd848",
+    "sha256": "4179abc1c12afb5de557d628166b7ae7e5c057242ecb791107915a616c1af759",
     "executable": false
   },
   "include/uapi/linux/wwan.h": {
@@ -301575,7 +301583,7 @@
     "executable": false
   },
   "kernel/events/uprobes.c": {
-    "sha256": "34f68d2ecde2630b6e364c2a63540c2f82db301a80c69cb83750a10f7b03e5c4",
+    "sha256": "9fa33b94f037d6462c40a3dfb34010a870473a69f418ac15b7cffc655763dd61",
     "executable": false
   },
   "kernel/exec_domain.c": {
@@ -301599,11 +301607,11 @@
     "executable": false
   },
   "kernel/fork.c": {
-    "sha256": "3ea9a140737ddc1ae267cf86f4d0796b4d5696044cffd3ffaa0a021597f60f31",
+    "sha256": "0a7b79927427c6191e6df7ce8e8f1a082a3fd0bfc8d3777637d1b5cdd644fdd4",
     "executable": false
   },
   "kernel/freezer.c": {
-    "sha256": "ce29e55fe2c290fc1a4b4b812e2ab0b11f23d9def0aea86df7a5dcaa00fb3f4f",
+    "sha256": "a6406d9b89c251dc9b0f117d041649f3817597c705a97c063292026064ec6e9f",
     "executable": false
   },
   "kernel/futex/Makefile": {
@@ -302031,7 +302039,7 @@
     "executable": false
   },
   "kernel/locking/mutex.c": {
-    "sha256": "98474c104a3fceda933557a8815f11606f1f0a493af19a1d27cb2a7949981e61",
+    "sha256": "85e38f7e25d67088c92da56a18afb736475d8f8bee8d6d01ed9d6a1babf8e3f5",
     "executable": false
   },
   "kernel/locking/mutex.h": {
@@ -302083,7 +302091,7 @@
     "executable": false
   },
   "kernel/locking/rwsem.c": {
-    "sha256": "ad3b2c8883281ebaa306a688d2b9fe66a519097e4aa7d94a6b2e6f43a21bccbe",
+    "sha256": "60e2569fdeb5216c670707cff02d6fec71626390836fc279ff15771fdb4a30e2",
     "executable": false
   },
   "kernel/locking/semaphore.c": {
@@ -302519,7 +302527,7 @@
     "executable": false
   },
   "kernel/sched/core.c": {
-    "sha256": "bfa15adb7b9767ddffcc89c16466f74dcaa6cad2ee6a09f90bbedafc3a6449fb",
+    "sha256": "1691b618e80e9d26778144731502318d9c7e4b054b95806c62b401ae2f358d81",
     "executable": false
   },
   "kernel/sched/core_sched.c": {
@@ -302991,7 +302999,7 @@
     "executable": false
   },
   "kernel/trace/ring_buffer.c": {
-    "sha256": "9d591e984b022fb03cd1c87101efb7846d6c5ef0b91e2e72f6f187bf173915b5",
+    "sha256": "7763af2c259c2454c978d879995b87af238f04fb12c286a40699db67c6b3e2d0",
     "executable": false
   },
   "kernel/trace/ring_buffer_benchmark.c": {
@@ -303567,7 +303575,7 @@
     "executable": false
   },
   "kernel/workqueue.c": {
-    "sha256": "9ce819399d387bde15bf34b5445a594972c88bb8699db32c39935c18cbb492ad",
+    "sha256": "0fbf01344b39374bc87bcf40048b1d26294e9bc6cf420bfded135ed29d9c6b47",
     "executable": false
   },
   "kernel/workqueue_internal.h": {
@@ -306883,7 +306891,7 @@
     "executable": false
   },
   "mm/gup.c": {
-    "sha256": "6aec1779b6c08bfa855e0729149d71381988673e69f2559c2b15bc54d05dee27",
+    "sha256": "02e4eb5342e428aec4ce5a52a52d94cfdacfd6588f7c8c362bd82178471b2c0a",
     "executable": false
   },
   "mm/gup_test.c": {
@@ -306939,7 +306947,7 @@
     "executable": false
   },
   "mm/internal.h": {
-    "sha256": "fb0276949eac88f624f73cbe97f9efeb043bae5d37dece33e94bd0fc56c29048",
+    "sha256": "cb1b34ac49426df7700283da7d713d1596ebe5e3a3adfb05d4be67170b30eca7",
     "executable": false
   },
   "mm/interval_tree.c": {
@@ -307135,7 +307143,7 @@
     "executable": false
   },
   "mm/memory.c": {
-    "sha256": "b2603e6e093900359b81eec5ea44850a46a59b2076a06fa0baa73179eb191e70",
+    "sha256": "7dfb2f89bad2a749da897b4bd80150525d7c5ad8be1a12e90d3449445652c80e",
     "executable": false
   },
   "mm/memory_hotplug.c": {
@@ -307183,7 +307191,7 @@
     "executable": false
   },
   "mm/mmap.c": {
-    "sha256": "1051b300d05b8c58b0d1f9fbd110a16ea220541ba75e9a8993b0265a4f39b261",
+    "sha256": "8dca98873003201fea3ddee9c6ec4eb5113abfa7bf06d46c4e85447e9a632e09",
     "executable": false
   },
   "mm/mmap_lock.c": {
@@ -307351,7 +307359,7 @@
     "executable": false
   },
   "mm/ptshare.c": {
-    "sha256": "28a928814b8b827812bd897a9331a1ffa2f3ca92eb6ea74c7ead0124fd4605a4",
+    "sha256": "bf288b26018edea1a3aedcb86a3dcf8020c512d589ebb69f5572d850e99169a1",
     "executable": false
   },
   "mm/readahead.c": {
@@ -307459,7 +307467,7 @@
     "executable": false
   },
   "mm/vma.c": {
-    "sha256": "a9e5d129c7858d1113f85f102488827599f9cbc03befcfa1bf3a1a695b873939",
+    "sha256": "f0c9639c1a10b7b0607c08e4d2322973c2f51a9c0dc12215855cea747f84474f",
     "executable": false
   },
   "mm/vma.h": {
@@ -307499,7 +307507,7 @@
     "executable": false
   },
   "mm/workingset.c": {
-    "sha256": "99d6b422511103a7670b8c0096c86463788117815c95147fc74580bc847b51f2",
+    "sha256": "0eaa6b550ae49e5774d9a56c5e95bc75f7b48c85baeb3a89e5d42471f6deb8d1",
     "executable": false
   },
   "mm/zpdesc.h": {
@@ -315943,7 +315951,7 @@
     "executable": false
   },
   "rust/kernel/dma_buf/buf.rs": {
-    "sha256": "0a669061978ac485f9af6384275b3685fac3412f16806deb51632b3c0fb796d0",
+    "sha256": "15cc224f1aacb8f16fd05ffb1000933627a381e31a51a4b49d67b2ce1f14f21f",
     "executable": false
   },
   "rust/kernel/dma_buf/mod.rs": {
@@ -347147,11 +347155,11 @@
     "executable": false
   },
   "tools/testing/kunit/android/tradefed_configs/config_arm64.xml": {
-    "sha256": "021628b7d3464da3f770b1b3a59a6999b9b716a015f106586a0cd5fbb192d6e4",
+    "sha256": "3345411fb96695f1fb4d93673a7965e9e64d22e8ec9708d7a0b1f331da1d1ac4",
     "executable": false
   },
   "tools/testing/kunit/android/tradefed_configs/config_x86_64.xml": {
-    "sha256": "67558276daf221de5ab19e1bd264bbd5dc91366117a25f7d71f785ed07c70fb8",
+    "sha256": "124d89ba84b6d145cebd6e552558aaf353c7348d9881e4ebeec668803a4ffbb2",
     "executable": false
   },
   "tools/testing/kunit/configs/all_tests.config": {
@@ -355895,7 +355903,7 @@
     "executable": false
   },
   "tools/testing/selftests/drivers/wrapfd/wrapfd.c": {
-    "sha256": "68440873b47f3bdc7dfc728c54993c37cc1d6a6837b46b5901ac33189137b2f7",
+    "sha256": "91812a3e91fccdf547b80a5aa3c817d650654d28e435e79fd3a30493e95604e9",
     "executable": false
   },
   "tools/testing/selftests/dt/.gitignore": {
@@ -366498,7 +366506,7 @@
     "executable": false
   },
   "tools/testing/vma/vma_internal.h": {
-    "sha256": "2017dcb5e37a56be1fc7102b5003f200ae5f247095f8eb8e668ea2f7b9e95a96",
+    "sha256": "f761ef34f51069024458550fa749e38a61160f6320fb7d557bec81d461b7442d",
     "executable": false
   },
   "tools/testing/vsock/.gitignore": {

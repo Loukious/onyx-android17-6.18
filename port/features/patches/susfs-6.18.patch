@@ -5721,10 +5721,10 @@ index 5267c81..bd4ed14 100644
  	if (copy_to_user(name, &tmp, sizeof(tmp)))
  		return -EFAULT;
 diff --git a/mm/memory.c b/mm/memory.c
-index 096f38d..c64f893 100644
+index 5620836f648d51b1280df103630f6363030531c3..6418d1b93ad7d3adadca6e7850c0accf377b1f5a 100644
 --- a/mm/memory.c
 +++ b/mm/memory.c
-@@ -77,6 +77,9 @@
+@@ -78,6 +78,9 @@
  #include <linux/ptrace.h>
  #include <linux/vmalloc.h>
  #include <linux/sched/sysctl.h>
@@ -5734,12 +5734,10 @@ index 096f38d..c64f893 100644
  
  #include <trace/events/kmem.h>
  #include <trace/hooks/mm.h>
-@@ -6953,11 +6956,25 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
- 		struct folio *folio;
+@@ -7014,10 +7017,24 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
  		struct vm_area_struct *vma = NULL;
- 		struct page *page = get_user_page_vma_remote(mm, addr,
--							     gup_flags, &vma);
-+						     gup_flags, &vma);
+ 		struct page *page = ptshare_get_user_page_vma_remote(mm, addr,
+ 							     gup_flags, &vma);
 +#ifdef CONFIG_KSU_SUSFS_SUS_MAP
 +		/* GUP supplies the VMA and a page reference before this check. */
 +		if (!IS_ERR(page) && vma && vma->vm_file &&

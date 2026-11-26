@@ -8,12 +8,12 @@
       "candidate_sha256": "ca0bfcd8c52d1ae971626c1def6ad3ddf6cdb646c1c9d6a1bca2296f1c3eb83f"
     },
     "arch/arm64/configs/gki_defconfig": {
-      "before_sha256": "c92079fa0c102899644de89c8b7e80158cbfcfc000ddad3f881347ad810b997c",
-      "candidate_sha256": "dbd09439453ef93814ff83ff68b20d4c8492b242ded8c82703516a2b56dad487"
+      "before_sha256": "9e78062ad6026ec7542ec243f427d7be8356ad0f4c5161c8428d9a7e442aad4f",
+      "candidate_sha256": "ba59b13d1cce2c0297d5e71015d0e63730403ce32ddadfa2ee8f17bb2d0d7817"
     },
     "bazel/modules_private.bzl": {
-      "before_sha256": "d93adc60fdd792cc5d6eed6415f99dffb67fb3b4425235745104577618843595",
-      "candidate_sha256": "775506200f8612f5b93d99b7f0bc0b5848ae43b09850ab74b1a3662cd0f206bf"
+      "before_sha256": "eaa3ec4c69c0cd90ee063afd080db3039ea576211eca964cbf96015969b69972",
+      "candidate_sha256": "66f47cd31524eed6aa208da611eec176c6a1c00c95a00f64d865f7229f40c09b"
     },
     "block/blk-core.c": {
       "before_sha256": "14e3d8234d314f0532690a0ee8c59bbccc3d61f9bf47bedd054c01fb3e6a4086",
