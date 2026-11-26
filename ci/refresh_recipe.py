@@ -108,7 +108,138 @@ def replay(repo, patch, reverse=False):
     return subprocess.run(args + ['-'], input=patch, capture_output=True).returncode == 0
 
 
-def refresh(common):
+def apply(repo, patch, *options):
+    subprocess.run(['git', '-C', str(repo), 'apply', '--whitespace=nowarn', *options, '-'],
+                   input=patch, check=True)
+
+
+def copy_sources(source, destination, names):
+    for name in names:
+        data = contents(source, name)
+        if data is not None:
+            target = safe_path(destination, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            target.chmod(safe_path(source, name).stat().st_mode & 0o777)
+
+
+def feature_preimages(snapshot, series, directory):
+    """Recover each patch's base from the verified, materialized accepted source."""
+    names = {name for _, _, files in series for name in files}
+    inventory = json.loads(contents(PORT, 'common-source-hashes.json'))
+    copy_sources(snapshot, directory, names)
+    for name in sorted(names):
+        path = safe_path(directory, name)
+        if not path.is_file() or inventory.get(name) != {
+                'sha256': sha(path.read_bytes()), 'executable': bool(path.stat().st_mode & 0o100)}:
+            raise ValueError('Accepted feature snapshot differs from its inventory: ' + name)
+    images = {}
+    for path, data, names in reversed(series):
+        after = {name: contents(directory, name) for name in names}
+        if not replay(directory, data, reverse=True):
+            raise ValueError('Cannot reverse feature patch on accepted source: ' + path.name)
+        apply(directory, data, '--reverse')
+        images[path] = {name: (contents(directory, name), after[name]) for name in names}
+    return images
+
+
+def merge_feature_file(repo, path, name, before, upstream, patched):
+    label = f'{path.name}: {name}'
+    if None in (before, upstream, patched):
+        raise ValueError('Feature patch changes a file that was added or removed upstream: ' + label)
+
+    def git(*args, data=None):
+        return subprocess.check_output(['git', '-C', str(repo), *args], input=data).strip()
+
+    def tree(data):
+        blob = git('hash-object', '-w', '--stdin', data=data)
+        return git('mktree', data=b'100644 blob ' + blob + b'\tsource\n').decode()
+
+    def diff(left, right, *options):
+        return subprocess.check_output(['git', '-C', str(repo), 'diff', '--no-ext-diff', '--no-textconv',
+                                        '--full-index', '--src-prefix=a/', '--dst-prefix=b/',
+                                        *options, left, right])
+
+    def code_changes(left, right):
+        # Keep whitespace inside lines, which can matter in strings and macros.
+        def unindent(data):
+            return re.sub(rb'^[ \t]+', b'', data, flags=re.M)
+
+        return [line for hunk in diff(tree(unindent(left)), tree(unindent(right)), '-U0').split(b'\n@@ ')[1:]
+                for line in hunk.split(b'\n')[1:] if line.startswith((b'+', b'-', b'\\'))]
+
+    base, incoming, local = map(tree, (before, upstream, patched))
+    command = ['git', '-C', str(repo), 'merge-tree', '--write-tree', '--merge-base=' + base]
+    result = subprocess.run(command + [incoming, local], capture_output=True)
+    if result.returncode == 1 and Path(name).suffix in ('.c', '.h'):
+        result = subprocess.run(command + ['-Xignore-space-change', incoming, local], capture_output=True)
+        if result.returncode == 0:
+            merged_tree = result.stdout.splitlines()[0].decode()
+            merged_data = subprocess.check_output(['git', '-C', str(repo), 'show', merged_tree + ':source'])
+            if (code_changes(before, patched) != code_changes(upstream, merged_data)
+                    or code_changes(before, upstream) != code_changes(patched, merged_data)):
+                raise ValueError('Whitespace merge changed code edits: ' + label)
+    if result.returncode == 1:
+        raise ValueError('Feature patch conflicts with upstream: ' + label)
+    result.check_returncode()
+    merged = result.stdout.splitlines()[0].decode()
+    patch = diff(incoming, merged)
+    if not patch:
+        raise ValueError('Feature patch became empty and needs review: ' + label)
+    encoded = name.encode()
+    return (patch.replace(b'diff --git a/source b/source\n', b'diff --git a/' + encoded + b' b/' + encoded + b'\n', 1)
+            .replace(b'--- a/source\n', b'--- a/' + encoded + b'\n', 1)
+            .replace(b'+++ b/source\n', b'+++ b/' + encoded + b'\n', 1))
+
+
+def refresh_feature_patches(common, features):
+    """Rebase only file diffs that fail exact replay, then relock their patch files."""
+    from common_fixes import applied
+
+    series = features.patches()
+    manifest = features.manifest()
+    outputs = {}
+    with tempfile.TemporaryDirectory(prefix='onyx-feature-rebase-') as temporary:
+        root = Path(temporary)
+        trial, accepted, merge = (root / name for name in ('trial', 'accepted', 'merge'))
+        for directory in (trial, accepted, merge):
+            directory.mkdir()
+        with applied(common, root / 'common-fixes'):
+            copy_sources(common, trial, {name for _, _, names in series for name in names})
+        for name, data in features.nomount_files().items():
+            target = safe_path(trial, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open('xb') as stream:
+                stream.write(data)
+        images = None
+        for (path, data, names), item in zip(series, manifest['patch_series'], strict=True):
+            if replay(trial, data):
+                apply(trial, data)
+                continue
+            header, diffs = sections(data)
+            if [filename(diff) for diff in diffs] != names or len(set(names)) != len(names):
+                raise ValueError('Unexpected feature patch inventory: ' + path.name)
+            updated = []
+            for name, diff in zip(names, diffs):
+                if not replay(trial, diff):
+                    if file_headers(diff)[0] == '/dev/null' or re.search(rb'^(old|new) mode ', diff, re.M):
+                        raise ValueError(f'Feature patch conflicts with upstream: {path.name}: {name}')
+                    if images is None:
+                        images = feature_preimages(PORT.parent / 'common', series, accepted)
+                        subprocess.run(['git', 'init', '-q', str(merge)], check=True)
+                    before, patched = images[path][name]
+                    diff = merge_feature_file(merge, path, name, before, contents(trial, name), patched)
+                apply(trial, diff)
+                updated.append(diff)
+            patch = header + b''.join(updated)
+            item['sha256'] = sha(patch)
+            outputs[safe_path(PORT / 'features', item['path'])] = patch
+    if outputs:
+        outputs[safe_path(PORT / 'features', 'manifest.json')] = (json.dumps(manifest, indent=2) + '\n').encode()
+    return outputs
+
+
+def refresh(common, *, rebase_features=False):
     patch_dir = PORT / 'common-patches'
     manifest = json.loads(contents(patch_dir, 'manifest.json'))
     original = contents(patch_dir, manifest.get('replay_patch', 'upstream-platform-remove.patch'))
@@ -131,6 +262,7 @@ def refresh(common):
             raise ValueError('Unknown common patch upstream check: ' + name)
         blk_plug_ordering.validate_patch(diffs[names.index(name)])
     active, integrated, files, check_results = [], [], {}, {}
+    feature_outputs = {}
     with tempfile.TemporaryDirectory(prefix='onyx-patch-rebase-') as temporary:
         root = Path(temporary)
         for name, diff in zip(names, diffs):
@@ -211,6 +343,11 @@ def refresh(common):
                 try:
                     sys.path.insert(0, str(PORT))
                     import features
+                    if rebase_features:
+                        feature_outputs = refresh_feature_patches(common, features)
+                        previous.extend((target, target.read_bytes()) for target in feature_outputs)
+                        for target, data in feature_outputs.items():
+                            target.write_bytes(data)
                     features.refresh_common(common)
                 finally:
                     sys.path[:] = old_path
@@ -222,6 +359,8 @@ def refresh(common):
                     target.write_bytes(data)
             raise
     result = {'active_common_patches': len(active), 'already_integrated_upstream': integrated}
+    if rebase_features:
+        result['rebased_feature_patches'] = [target.name for target in feature_outputs if target.suffix == '.patch']
     if checks:
         result['upstream_checks'] = check_results
     return result
@@ -230,4 +369,6 @@ def refresh(common):
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('common', type=Path)
-    print(json.dumps(refresh(p.parse_args().common), indent=2))
+    p.add_argument('--rebase-features', action='store_true')
+    args = p.parse_args()
+    print(json.dumps(refresh(args.common, rebase_features=args.rebase_features), indent=2))

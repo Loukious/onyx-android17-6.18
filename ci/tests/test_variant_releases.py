@@ -436,6 +436,83 @@ class VariantInstallerTests(unittest.TestCase):
 
 
 class FeatureReplayTests(unittest.TestCase):
+    def feature_rebase(self, root, upstream):
+        from contextlib import nullcontext
+        port, common = test_automation.RebaseTests().setup_fixture(root)
+        snapshot = root / 'common'
+        candidate = root / 'upstream'
+        common.rename(candidate)
+        snapshot.mkdir()
+        path = candidate / 'memory.c'
+        base = 'before\n\tcall_old(\n\t\targument);\n\nafter\n'
+        patched = base.replace('\t\targument);', '\targument);\n\tcheck_result();')
+        path.write_text(upstream(base))
+        (snapshot / path.name).write_text(patched)
+        feature_dir = port / 'features'
+        feature_dir.mkdir()
+        feature_patch = feature_dir / 'memory.patch'
+        feature_patch.write_bytes(
+            b'diff --git a/memory.c b/memory.c\n--- a/memory.c\n+++ b/memory.c\n'
+            b'@@ -1,5 +1,6 @@\n before\n \tcall_old(\n-\t\targument);\n'
+            b'+\targument);\n+\tcheck_result();\n \n after\n')
+        data = {'patch_series': [{'path': feature_patch.name, 'sha256': refresh_recipe.sha(feature_patch.read_bytes())}]}
+        manifest = feature_dir / 'manifest.json'
+        manifest.write_text(json.dumps(data))
+        (port / 'common-source-hashes.json').write_text(json.dumps({path.name: {
+            'sha256': refresh_recipe.sha(patched.encode()), 'executable': False}}))
+        def verify(tree):
+            self.assertTrue(refresh_recipe.replay(tree, feature_patch.read_bytes()))
+        features = SimpleNamespace(
+            manifest=lambda: json.loads(manifest.read_text()), nomount_files=dict,
+            patches=lambda: [(feature_patch, feature_patch.read_bytes(), [path.name])], refresh_common=verify)
+        return port, candidate, snapshot, feature_patch, manifest, {
+            'features': features, 'common_fixes': SimpleNamespace(applied=lambda *args: nullcontext())}
+
+    def test_rebase_preserves_upstream_call_and_relocks_patch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            port, common, _, feature_patch, manifest, modules = self.feature_rebase(
+                Path(temporary), lambda base: base.replace('call_old', 'call_upstream'))
+            before = (common / 'memory.c').read_bytes()
+            self.assertFalse(refresh_recipe.replay(common, feature_patch.read_bytes()))
+            with patch.object(refresh_recipe, 'PORT', port), patch.dict(sys.modules, modules):
+                result = refresh_recipe.refresh(common, rebase_features=True)
+            self.assertEqual(result['rebased_feature_patches'], [feature_patch.name])
+            data = feature_patch.read_bytes()
+            self.assertEqual(json.loads(manifest.read_text())['patch_series'][0]['sha256'], refresh_recipe.sha(data))
+            self.assertEqual((common / 'memory.c').read_bytes(), before)
+            refresh_recipe.apply(common, data)
+            self.assertEqual((common / 'memory.c').read_bytes(),
+                             before.replace(b'argument);\n', b'argument);\n\tcheck_result();\n'))
+
+    def test_rebase_rejects_overlapping_code_and_unsafe_whitespace_merges(self):
+        cases = (
+            (lambda base: base.replace('argument);', 'different_argument);\n\tupstream_check();'),
+             'Feature patch conflicts with upstream'),
+            (lambda base: base.replace('call_old', 'call_upstream').replace('argument);', 'argument );'),
+             '(?:Feature patch conflicts with upstream|Whitespace merge changed code edits)'),
+        )
+        for upstream, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                port, common, _, _, _, modules = self.feature_rebase(root, upstream)
+                before = test_automation.RebaseTests().snapshot(root)
+                with patch.object(refresh_recipe, 'PORT', port), patch.dict(sys.modules, modules), \
+                        self.assertRaisesRegex(ValueError, message + r': memory.patch: memory.c'):
+                    refresh_recipe.refresh(common, rebase_features=True)
+                self.assertEqual(test_automation.RebaseTests().snapshot(root), before)
+
+    def test_rebase_rejects_modified_accepted_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, common, snapshot, _, _, modules = self.feature_rebase(
+                root, lambda base: base.replace('call_old', 'call_upstream'))
+            (snapshot / 'memory.c').write_text('changed accepted source\n')
+            before = test_automation.RebaseTests().snapshot(root)
+            with patch.object(refresh_recipe, 'PORT', port), patch.dict(sys.modules, modules), \
+                    self.assertRaisesRegex(ValueError, 'Accepted feature snapshot differs from its inventory'):
+                refresh_recipe.refresh(common, rebase_features=True)
+            self.assertEqual(test_automation.RebaseTests().snapshot(root), before)
+
     def test_feature_conflict_restores_all_legacy_recipe_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

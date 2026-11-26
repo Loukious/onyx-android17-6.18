@@ -47,8 +47,13 @@ jobs:
           git -C "$RUNNER_TEMP/upstream-common" remote add origin https://android.googlesource.com/kernel/common
           git -C "$RUNNER_TEMP/upstream-common" fetch --depth 1 origin "$REVISION"
           git -C "$RUNNER_TEMP/upstream-common" checkout --detach FETCH_HEAD
+      - name: Refresh LTS pins and replay patches
+        if: steps.detect.outputs.kernel_changed == 'true'
+        env:
+          REVISION: ${{ steps.detect.outputs.latest }}
+        run: |
           python3 ci/track_upstream.py --update "$RUNNER_TEMP/upstream-common" --revision "$REVISION"
-          python3 ci/refresh_recipe.py "$RUNNER_TEMP/upstream-common"
+          python3 ci/refresh_recipe.py "$RUNNER_TEMP/upstream-common" --rebase-features
           rm -rf "$RUNNER_TEMP/upstream-common"
       - name: Freeze detected KernelSU revision into the source candidate
         if: steps.detect.outputs.kernelsu_update_needed == 'true'
