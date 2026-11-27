@@ -3552,6 +3552,13 @@ static void gsi_unbind(struct usb_configuration *c, struct usb_function *f)
 	spin_unlock_irqrestore(&gsi->d_port.lock, flags);
 	gsi_ipa_token_retire(gsi);
 	cancel_delayed_work_sync(&gsi->d_port.usb_ipa_w);
+	rndis_deregister(gsi->params);
+	gsi->params = NULL;
+	/* IPA unregisters rndis0 and waits for this reference to be dropped. */
+	if (gsi->net) {
+		dev_put(gsi->net);
+		gsi->net = NULL;
+	}
 	ret = gsi->d_port.ipa_ops->deinit_teth_prot(gsi->prot_id);
 	if (ret) {
 		pr_err("GSI protocol %d deinit failed: %d; retaining IPA context\n",
@@ -3561,12 +3568,6 @@ static void gsi_unbind(struct usb_configuration *c, struct usb_function *f)
 		gsi_put(gsi);
 	}
 	gsi->d_port.sm_state = STATE_UNINITIALIZED;
-	rndis_deregister(gsi->params);
-	gsi->params = NULL;
-	if (gsi->net) {
-		dev_put(gsi->net);
-		gsi->net = NULL;
-	}
 	gsi_ctrl_clear_cpkt_queues(gsi, false);
 	gsi_clear_bind(gsi);
 	rndis_gsi_string_defs[0].id = 0;
