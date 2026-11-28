@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import installer_assets
+import publish_release
 import recovery_assets
 import release_naming
 import variant_assets
@@ -26,8 +27,13 @@ class ReleaseTimestamps(unittest.TestCase):
                 row['full_recovery'] = recovery_assets.names(row['kernel_release'], 3, row['id'], stamp)
                 downloads = variant_assets.download_map(row)
                 marker = stamp[:8] + '-' + stamp[9:15] + 'UTC'
-                self.assertTrue(all(marker in name for name in downloads.values()))
+                for key, name in downloads.items():
+                    with self.subTest(variant=row['id'], asset=key):
+                        extension = '.tar.gz' if name.endswith('.tar.gz') else Path(name).suffix
+                        self.assertTrue(name.endswith('-' + marker + extension), name)
                 self.assertEqual(downloads['anykernel'], names[0])
+                self.assertEqual(downloads['anykernel'], f'Onyx-{row["label"]}-GKI-6.18-AnyKernel3-{marker}.zip')
+                self.assertEqual(downloads['kernel_config'], f'Onyx-{row["label"]}-kernel_aarch64_dot_config-{marker}')
             malformed = copy.deepcopy(identity)
             malformed['variants'][0]['asset_timestamp'] = '20261120T120000Z'
             with self.assertRaisesRegex(ValueError, 'timestamp differs'):
@@ -44,6 +50,26 @@ class ReleaseTimestamps(unittest.TestCase):
         for root in ('20260230T120000', '20261124T250000', 'bad', None):
             with self.subTest(root=root), self.assertRaises(ValueError):
                 release_naming.build_timestamp(root)
+
+    def test_timestamped_prefix_bundles_still_verify(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, _, _, bundle, identity = test_variant_releases.VariantReleaseTests().export(Path(temporary))
+            for row in identity['variants']:
+                suffix_names = row['downloads']
+                del row['timestamp_suffix']
+                prefix_names = variant_assets.download_map(row)
+                for key, current in suffix_names.items():
+                    (bundle / current).rename(bundle / prefix_names[key])
+                    row['sha256'][prefix_names[key]] = row['sha256'].pop(current)
+                row['downloads'] = prefix_names
+            self.assertEqual(identity['variants'][1]['downloads']['rom_integration'],
+                             'Onyx-Performance-20261119-120000UTC-GKI-6.18-ROM-Integration.tar.gz')
+            identity['sha256'] = {name: digest for row in identity['variants'] for name, digest in row['sha256'].items()}
+            (bundle / 'release.json').write_text(json.dumps(identity) + '\n')
+            release_naming.write_checksums(bundle)
+            self.assertEqual(publish_release.validate_bundle(bundle, source, identity['source_revision'],
+                identity['common_revision'], identity['kernelsu_revision'], identity['run_id'], identity['run_attempt']),
+                identity)
 
 
 if __name__ == '__main__':

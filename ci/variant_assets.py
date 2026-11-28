@@ -1,6 +1,6 @@
 """Matched variant bundle identities and unique public download filenames."""
 import re
-from release_naming import VARIANT_ASSET_FORMAT, VARIANTS, archive_name, variant_prefix, asset_timestamp
+from release_naming import VARIANT_ASSET_FORMAT, VARIANTS, archive_name, variant_filename, timestamp_options
 
 
 SHARED = ('source_revision', 'common_revision', 'kernelsu_revision', 'run_id', 'run_attempt',
@@ -23,15 +23,15 @@ def verify_builtin_susfs_payload(artifact, report, row):
     return True
 
 
-def evidence_names(variant, timestamp=None):
-    prefix = variant_prefix(variant, timestamp)
-    return {'report': prefix + 'report.json', 'build_log': prefix + 'build.log',
-            'module_abi': prefix + 'Module.symvers', 'kernel_release': prefix + 'kernel.release',
-            'kernel_config': prefix + 'kernel_aarch64_dot_config'}
+def evidence_names(variant, timestamp=None, *, timestamp_suffix=True):
+    names = {'report': 'report.json', 'build_log': 'build.log', 'module_abi': 'Module.symvers',
+             'kernel_release': 'kernel.release', 'kernel_config': 'kernel_aarch64_dot_config'}
+    return {key: variant_filename(variant, name, timestamp, timestamp_suffix=timestamp_suffix)
+            for key, name in names.items()}
 
 
-def installer_metadata_name(variant, timestamp=None):
-    return variant_prefix(variant, timestamp) + 'installers.json'
+def installer_metadata_name(variant, timestamp=None, *, timestamp_suffix=True):
+    return variant_filename(variant, 'installers.json', timestamp, timestamp_suffix=timestamp_suffix)
 
 
 def rows(identity):
@@ -49,7 +49,7 @@ def rows(identity):
         if any(value.get(key) != identity.get(key) for key in SHARED):
             raise ValueError('Variants must share exact build and source revisions')
         release, root = value.get('kernel_release'), value.get('artifact_root')
-        asset_timestamp(value)
+        timestamp_options(value)
         if (not isinstance(release, str) or not release.endswith('-onyx-' + value['id'])
                 or release in releases or not isinstance(root, str) or root in roots):
             raise ValueError('Variant kernel releases and artifact roots must be distinct')
@@ -70,24 +70,24 @@ def rows(identity):
 
 
 def core_files(row):
-    timestamp = asset_timestamp(row)
-    return set(evidence_names(row['id'], timestamp).values()) | {archive_name(VARIANT_ASSET_FORMAT, row['id'], timestamp)}
+    options = timestamp_options(row)
+    return set(evidence_names(row['id'], **options).values()) | {archive_name(VARIANT_ASSET_FORMAT, row['id'], **options)}
 
 
 def download_map(row):
     import installer_assets
     import recovery_assets
-    timestamp = asset_timestamp(row)
-    value = {**evidence_names(row['id'], timestamp),
-             'rom_integration': archive_name(VARIANT_ASSET_FORMAT, row['id'], timestamp)}
+    options = timestamp_options(row)
+    value = {**evidence_names(row['id'], **options),
+             'rom_integration': archive_name(VARIANT_ASSET_FORMAT, row['id'], **options)}
     if row.get('installers'):
-        ak, internal, external, susfs = installer_assets.names(row['kernel_release'], VARIANT_ASSET_FORMAT, row['id'], timestamp)
+        ak, internal, external, susfs = installer_assets.names(row['kernel_release'], VARIANT_ASSET_FORMAT, row['id'], **options)
         value.update(anykernel=ak, internal_wifi=internal, external_wifi=external,
-                     installer_metadata=installer_metadata_name(row['id'], timestamp))
+                     installer_metadata=installer_metadata_name(row['id'], **options))
         if not susfs_builtin(row):
             value['susfs_module'] = susfs
     if row.get('full_recovery'):
-        full, metadata = recovery_assets.names(row['kernel_release'], VARIANT_ASSET_FORMAT, row['id'], timestamp)
+        full, metadata = recovery_assets.names(row['kernel_release'], VARIANT_ASSET_FORMAT, row['id'], **options)
         value.update(full_recovery=full, recovery_metadata=metadata)
     return value
 

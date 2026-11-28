@@ -13,7 +13,7 @@ import tarfile
 import tempfile
 import zipfile
 
-from release_naming import archive_name, asset_format, write_checksums, variant_prefix, asset_timestamp
+from release_naming import archive_name, asset_format, write_checksums, variant_filename, timestamp_options
 import variant_assets
 
 HERE = Path(__file__).resolve().parent / 'installers'
@@ -26,15 +26,15 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def names(release, asset_format=1, variant=None, timestamp=None):
+def names(release, asset_format=1, variant=None, timestamp=None, *, timestamp_suffix=True):
     if not re.fullmatch(r'6\.18\.\d+-android17-\d+-[A-Za-z0-9.-]+', release):
         raise ValueError('Unsupported installer kernel release')
     if asset_format == 1:
         return (f'Konoha-AnyKernel3-{release}.zip', f'nethunter-wlan-injection-{release}.zip')
     if asset_format == 3:
-        prefix = variant_prefix(variant, timestamp)
-        return (prefix + 'GKI-6.18-AnyKernel3.zip', prefix + 'NetHunter-Internal-WiFi-KSU-Module.zip',
-                prefix + 'NetHunter-External-WiFi-KSU-Module.zip', prefix + 'SUSFS-KSU-Module.zip')
+        files = ('GKI-6.18-AnyKernel3.zip', 'NetHunter-Internal-WiFi-KSU-Module.zip',
+                 'NetHunter-External-WiFi-KSU-Module.zip', 'SUSFS-KSU-Module.zip')
+        return tuple(variant_filename(variant, name, timestamp, timestamp_suffix=timestamp_suffix) for name in files)
     if asset_format != 2:
         raise ValueError('Unsupported installer asset format')
     return ('Onyx-GKI-6.18-AnyKernel3.zip', 'Onyx-NetHunter-Internal-WiFi-KSU-Module.zip',
@@ -44,7 +44,7 @@ def names(release, asset_format=1, variant=None, timestamp=None):
 def expected_names(identity):
     """Names actually produced for the selected SUSFS implementation."""
     version = asset_format(identity)
-    filenames = names(identity['kernel_release'], version, identity.get('id'), asset_timestamp(identity))
+    filenames = names(identity['kernel_release'], version, identity.get('id'), **timestamp_options(identity))
     if version == 3 and variant_assets.susfs_builtin(identity):
         return filenames[:3]
     return filenames
@@ -254,7 +254,7 @@ def build(artifact, identity):
     version = asset_format(identity)
     if version == 3:
         variant_assets.verify_builtin_susfs_payload(artifact, report, identity)
-    filenames = names(release, version, identity.get('id'), asset_timestamp(identity))
+    filenames = names(release, version, identity.get('id'), **timestamp_options(identity))
     ak_name, wlan_name = filenames[:2]
     if report['kernel_release'] != release:
         raise ValueError('Installer release differs from build')
@@ -402,7 +402,9 @@ def build(artifact, identity):
         addons['payload.sha256'] = (installed_payload(addons), False)
         products[filenames[3]] = zip_bytes(addons)
         metadata['sha256'][filenames[3]] = sha(products[filenames[3]])
-    products[variant_assets.installer_metadata_name(identity['id'], asset_timestamp(identity)) if version == 3 else 'installers.json'] = (json.dumps(metadata, indent=2)+'\n').encode()
+    metadata_name = (variant_assets.installer_metadata_name(identity['id'], **timestamp_options(identity))
+                     if version == 3 else 'installers.json')
+    products[metadata_name] = (json.dumps(metadata, indent=2)+'\n').encode()
     return products
 
 
@@ -444,7 +446,7 @@ def add_variant_installers(bundle, identity):
     staged = {}
     for row in rows:
         with tempfile.TemporaryDirectory(prefix='onyx-variant-installer-') as temporary:
-            with tarfile.open(bundle / archive_name(3, row['id'], asset_timestamp(row))) as archive:
+            with tarfile.open(bundle / archive_name(3, row['id'], **timestamp_options(row))) as archive:
                 archive.extractall(temporary, filter='data')
             staged[row['id']] = build(Path(temporary) / row['artifact_root'], row)
     products = variant_assets.merge_products(identity, staged, 'installers')

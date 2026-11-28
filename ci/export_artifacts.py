@@ -10,7 +10,7 @@ import subprocess
 import tarfile
 
 from verify_artifacts import digest, verify, inventory_summary
-from release_naming import ASSET_FORMAT, VARIANT_ASSET_FORMAT, VARIANTS, archive_name, artifact_name, write_checksums, build_timestamp
+from release_naming import ASSET_FORMAT, VARIANT_ASSET_FORMAT, VARIANTS, archive_name, artifact_name, write_checksums, build_timestamp, timestamp_options
 import variant_assets
 
 
@@ -51,14 +51,15 @@ def export_variants(builds, output, source_root, source_revision, run_id, run_at
         row = {key: identity[key] for key in variant_assets.SHARED if key in identity}
         row.update(report['variant'])
         row.update(asset_format=VARIANT_ASSET_FORMAT, kernel_release=report['kernel_release'],
-                   artifact_root=artifact.name, modules=count, asset_timestamp=build_timestamp(artifact.name))
-        evidence = variant_assets.evidence_names(identifier, row['asset_timestamp'])
+                   artifact_root=artifact.name, modules=count, asset_timestamp=build_timestamp(artifact.name),
+                   timestamp_suffix=True)
+        evidence = variant_assets.evidence_names(identifier, **timestamp_options(row))
         for source, destination in [('report.json', evidence['report']), ('build.log', evidence['build_log']),
                 ('gki/kernel_aarch64_Module.symvers', evidence['module_abi']),
                 ('gki/kernel.release', evidence['kernel_release']),
                 ('gki/kernel_aarch64_dot_config', evidence['kernel_config'])]:
             shutil.copyfile(artifact / source, output / destination)
-        filename = archive_name(VARIANT_ASSET_FORMAT, identifier, row['asset_timestamp'])
+        filename = archive_name(VARIANT_ASSET_FORMAT, identifier, **timestamp_options(row))
         with tarfile.open(output / filename, 'w:gz') as archive:
             archive.add(artifact, arcname=artifact.name)
         row.update(inventory_summary(report))

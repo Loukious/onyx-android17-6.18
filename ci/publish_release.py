@@ -14,7 +14,7 @@ from verify_artifacts import digest, relative, verify, inventory_summary
 import installer_assets
 import recovery_assets
 import google_changelog
-from release_naming import archive_name, artifact_name, asset_format, checksum_paths, release_title, asset_timestamp
+from release_naming import archive_name, artifact_name, asset_format, checksum_paths, release_title, timestamp_options
 import variant_assets
 
 TRACK = json.loads((Path(__file__).resolve().parent / 'upstream.json').read_text())
@@ -30,12 +30,13 @@ def bundle_files(identity):
         files = set()
         for row in variant_assets.rows(identity):
             extra, complete = row.get('installers', []), row.get('full_recovery', [])
+            options = timestamp_options(row)
             if extra and (len(extra) != len(set(extra)) or set(extra) !=
                     set(installer_assets.expected_names(row)) |
-                    {variant_assets.installer_metadata_name(row['id'], asset_timestamp(row))}):
+                    {variant_assets.installer_metadata_name(row['id'], **options)}):
                 raise ValueError('Invalid variant installer asset inventory')
             if complete and (len(complete) != len(set(complete)) or set(complete) !=
-                    set(recovery_assets.names(row['kernel_release'], 3, row['id'], asset_timestamp(row)))):
+                    set(recovery_assets.names(row['kernel_release'], 3, row['id'], **options))):
                 raise ValueError('Invalid variant recovery asset inventory')
             current = variant_assets.core_files(row) | set(extra) | set(complete)
             if files & current or set(row.get('sha256', {})) != current:
@@ -196,9 +197,10 @@ def validate_variant_archive(bundle, source_root, row, hashes):
     root_name = str(relative(row['artifact_root']))
     if '/' in root_name:
         raise ValueError('Invalid variant archive root')
+    options = timestamp_options(row)
     with tempfile.TemporaryDirectory(prefix='onyx-variant-verify-') as temporary:
         root = Path(temporary)
-        with tarfile.open(bundle / archive_name(3, row['id'], asset_timestamp(row)), 'r:gz') as archive:
+        with tarfile.open(bundle / archive_name(3, row['id'], **options), 'r:gz') as archive:
             seen = set()
             for member in archive.getmembers():
                 name = str(relative(member.name.rstrip('/')))
@@ -223,7 +225,7 @@ def validate_variant_archive(bundle, source_root, row, hashes):
             counts['native_component_modules'] = sum(item['kind'] == 'native_common' for item in catalog['components'])
             if any(row.get(key) != value for key, value in counts.items()):
                 raise ValueError('Variant module counts differ from its build')
-        evidence = variant_assets.evidence_names(row['id'], asset_timestamp(row))
+        evidence = variant_assets.evidence_names(row['id'], **options)
         for exported, archived in [(evidence['report'], 'report.json'), (evidence['build_log'], 'build.log'),
                 (evidence['module_abi'], 'gki/kernel_aarch64_Module.symvers'),
                 (evidence['kernel_release'], 'gki/kernel.release'),

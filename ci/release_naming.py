@@ -46,22 +46,36 @@ def asset_timestamp(identity):
     return value
 
 
-def variant_prefix(variant, timestamp=None):
+def timestamp_options(identity):
+    timestamp = asset_timestamp(identity)
+    suffix = identity.get('timestamp_suffix', False)
+    if type(suffix) is not bool or (suffix and timestamp is None):
+        raise ValueError('Invalid release timestamp placement')
+    return {'timestamp': timestamp, 'timestamp_suffix': suffix}
+
+
+def variant_filename(variant, filename, timestamp=None, *, timestamp_suffix=True):
     if variant not in VARIANTS:
         raise ValueError('Unsupported release variant')
     prefix = 'Onyx-' + variant.title() + '-'
-    if timestamp is not None:
-        if not isinstance(timestamp, str) or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', timestamp):
-            raise ValueError('Invalid release filename timestamp')
-        datetime.strptime(timestamp, '%Y%m%dT%H%M%SZ')
-        prefix += timestamp[:8] + '-' + timestamp[9:15] + 'UTC-'
-    return prefix
+    if timestamp is None:
+        return prefix + filename
+    if not isinstance(timestamp, str) or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', timestamp):
+        raise ValueError('Invalid release filename timestamp')
+    datetime.strptime(timestamp, '%Y%m%dT%H%M%SZ')
+    stamp = timestamp[:8] + '-' + timestamp[9:15] + 'UTC'
+    if not timestamp_suffix:
+        return prefix + stamp + '-' + filename
+    extension = '.tar.gz' if filename.endswith('.tar.gz') else Path(filename).suffix
+    stem = filename.removesuffix(extension) if extension else filename
+    return prefix + stem + '-' + stamp + extension
 
 
-def archive_name(version=ASSET_FORMAT, variant=None, timestamp=None):
+def archive_name(version=ASSET_FORMAT, variant=None, timestamp=None, *, timestamp_suffix=True):
     asset_format({'asset_format': version})
     if version == VARIANT_ASSET_FORMAT:
-        return variant_prefix(variant, timestamp) + 'GKI-6.18-ROM-Integration.tar.gz'
+        return variant_filename(variant, 'GKI-6.18-ROM-Integration.tar.gz', timestamp,
+                                timestamp_suffix=timestamp_suffix)
     return ('konoha-gki-and-modules.tar.gz' if version == 1 else
             'Onyx-GKI-6.18-ROM-Integration.tar.gz')
 
