@@ -648,7 +648,7 @@
   "drivers/usb/gadget/function/f_ccid.h": "673060a9c31d874744a046bfaa9d9a69453e06f3193a42fbb317005ff1fdd34e",
   "drivers/usb/gadget/function/f_cdev.c": "59b8957cc7a119ffb946cb8236664a60e5754b7f9decf2e9cef960b7335b15c6",
   "drivers/usb/gadget/function/f_fs_ipc_log.c": "6b887cf48f4feed6de45367d11476b7018903bb73a58f82ecc84309b84b95708",
-  "drivers/usb/gadget/function/f_gsi.c": "9ac8c0afb70c2b9ec7f7a05ef589e296d8362dfdb75eb8ad1fb8f6559378829f",
+  "drivers/usb/gadget/function/f_gsi.c": "c762a9e183f93ed0c1bbb004f4376ae2bdf6fe65e3fa024ecc4549a52ebc7af9",
   "drivers/usb/gadget/function/f_gsi.h": "963a0c283104402b855612338c01c8c603c0a8f1197cb3c91b07b32cc00076c4",
   "drivers/usb/gadget/function/f_qdss.c": "00fa1218aa4560e8254e387207f7d92bddbf34e2f980f12048b8e49b14d86049",
   "drivers/usb/gadget/function/f_qdss.h": "065d819dddcb528807eb0e5067820b5555ffbf94aa516036dc8681f6663eebac",

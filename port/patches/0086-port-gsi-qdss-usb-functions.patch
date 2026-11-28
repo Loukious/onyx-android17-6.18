@@ -1412,7 +1412,7 @@
  fail:
  	return status;
  }
-@@ -3200,51 +3533,56 @@
+@@ -3200,51 +3533,57 @@
  static void gsi_unbind(struct usb_configuration *c, struct usb_function *f)
  {
  	struct f_gsi *gsi = func_to_gsi(f);
@@ -1455,6 +1455,13 @@
 +	spin_unlock_irqrestore(&gsi->d_port.lock, flags);
 +	gsi_ipa_token_retire(gsi);
 +	cancel_delayed_work_sync(&gsi->d_port.usb_ipa_w);
++	rndis_deregister(gsi->params);
++	gsi->params = NULL;
++	/* IPA unregisters rndis0 and waits for this reference to be dropped. */
++	if (gsi->net) {
++		dev_put(gsi->net);
++		gsi->net = NULL;
++	}
 +	ret = gsi->d_port.ipa_ops->deinit_teth_prot(gsi->prot_id);
 +	if (ret) {
 +		pr_err("GSI protocol %d deinit failed: %d; retaining IPA context\n",
@@ -1464,12 +1471,6 @@
 +		gsi_put(gsi);
 +	}
 +	gsi->d_port.sm_state = STATE_UNINITIALIZED;
-+	rndis_deregister(gsi->params);
-+	gsi->params = NULL;
-+	if (gsi->net) {
-+		dev_put(gsi->net);
-+		gsi->net = NULL;
-+	}
 +	gsi_ctrl_clear_cpkt_queues(gsi, false);
 +	gsi_clear_bind(gsi);
  	rndis_gsi_string_defs[0].id = 0;
@@ -1508,7 +1509,7 @@
  
  static int gsi_bind_config(struct f_gsi *gsi)
  {
-@@ -3312,7 +3650,10 @@
+@@ -3312,7 +3651,10 @@
  		goto error;
  	}
  
@@ -1519,7 +1520,7 @@
  
  	INIT_DELAYED_WORK(&gsi->d_port.usb_ipa_w, ipa_work_handler);
  
-@@ -3325,7 +3666,7 @@
+@@ -3325,7 +3667,7 @@
  
  	ret = gsi_function_ctrl_port_init(gsi);
  	if (ret) {
@@ -1528,7 +1529,7 @@
  		goto error;
  	}
  	gsi->gsi_rw_timer_interval = DEFAULT_RW_TIMER_INTERVAL;
-@@ -3342,8 +3683,9 @@
+@@ -3342,8 +3684,9 @@
  	struct f_gsi *gsi;
  
  	gsi = opts->gsi;
@@ -1540,7 +1541,7 @@
  	usb_put_function_instance(&opts->func_inst);
  }
  
-@@ -3487,7 +3829,7 @@
+@@ -3487,7 +3830,7 @@
  	if (len > PAGE_SIZE)
  		len = PAGE_SIZE;
  
@@ -1549,7 +1550,7 @@
  
  	kfree(buf);
  
-@@ -3546,20 +3888,19 @@
+@@ -3546,20 +3889,19 @@
  
  static void gsi_inst_clean(struct gsi_opts *opts)
  {
@@ -1583,7 +1584,7 @@
  	kfree(opts);
  }
  
-@@ -3593,7 +3934,6 @@
+@@ -3593,7 +3935,6 @@
  						__func__, prot_id);
  		return -EBUSY;
  	}
@@ -1591,7 +1592,7 @@
  
  	if (prot_id == IPA_USB_RNDIS)
  		config_group_init_type_name(&opts->func_inst.group,
-@@ -3601,8 +3941,10 @@
+@@ -3601,8 +3942,10 @@
  						&gsi_func_rndis_type);
  
  	gsi = gsi_function_init(prot_id);
@@ -1603,7 +1604,7 @@
  
  	opts->gsi = gsi;
  	/*
-@@ -3611,13 +3953,14 @@
+@@ -3611,13 +3954,14 @@
  	 */
  	scnprintf(gsi_inst_name, sizeof(gsi_inst_name), "gsi.%s", name);
  	ipc_log_ctxt = ipc_log_context_create(NUM_LOG_PAGES, gsi_inst_name, 0);
@@ -1620,7 +1621,7 @@
  	inst_status[prot_id].inst_exist = true;
  	inst_status[prot_id].opts = opts;
  	mutex_unlock(&inst_status[prot_id].gsi_lock);
-@@ -3628,31 +3971,27 @@
+@@ -3628,31 +3972,27 @@
  static void gsi_free_inst(struct usb_function_instance *f)
  {
  	struct gsi_opts *opts = container_of(f, struct gsi_opts, func_inst);
@@ -1671,7 +1672,7 @@
  }
  
  static struct usb_function_instance *gsi_alloc_inst(void)
-@@ -3678,9 +4017,13 @@
+@@ -3678,9 +4018,13 @@
  
  	opts = container_of(fi, struct gsi_opts, func_inst);
  
@@ -1686,7 +1687,7 @@
  
  	return &opts->gsi->function;
  }
-@@ -3689,57 +4032,61 @@
+@@ -3689,57 +4033,61 @@
  MODULE_LICENSE("GPL");
  MODULE_DESCRIPTION("GSI function driver");
  
